@@ -547,7 +547,7 @@ where
             }
         }
 
-        ensure_intrinsic_gas(transaction, &self.fork_tracker)?;
+        ensure_intrinsic_gas(transaction, &self.fork_tracker, block_gas_limit)?;
 
         // light blob tx pre-checks
         if transaction.is_eip4844() {
@@ -1404,6 +1404,7 @@ impl ForkTracker {
 pub fn ensure_intrinsic_gas<T: EthPoolTransaction>(
     transaction: &T,
     fork_tracker: &ForkTracker,
+    block_gas_limit: u64,
 ) -> Result<(), InvalidPoolTransactionError> {
     use revm_primitives::hardfork::SpecId;
     let spec_id = if fork_tracker.is_prague_activated() {
@@ -1424,6 +1425,7 @@ pub fn ensure_intrinsic_gas<T: EthPoolTransaction>(
             .map(|l| l.iter().map(|i| i.storage_keys.len()).sum::<usize>())
             .unwrap_or_default() as u64,
         transaction.authorization_list().map(|l| l.len()).unwrap_or_default() as u64,
+        revm_primitives::eip8037::cost_per_state_byte(block_gas_limit),
     );
 
     let gas_limit = transaction.gas_limit();
@@ -1478,11 +1480,11 @@ mod tests {
             tx_gas_limit_cap: AtomicU64::new(0),
         };
 
-        let res = ensure_intrinsic_gas(&transaction, &fork_tracker);
+        let res = ensure_intrinsic_gas(&transaction, &fork_tracker, 30_000_000);
         assert!(res.is_ok());
 
         fork_tracker.shanghai = true.into();
-        let res = ensure_intrinsic_gas(&transaction, &fork_tracker);
+        let res = ensure_intrinsic_gas(&transaction, &fork_tracker, 30_000_000);
         assert!(res.is_ok());
 
         let provider = MockEthProvider::default().with_genesis_block();

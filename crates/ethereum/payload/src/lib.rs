@@ -9,7 +9,7 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 use alloy_consensus::Transaction;
-use alloy_primitives::U256;
+use alloy_primitives::{Bytes, U256};
 use alloy_rlp::Encodable;
 use alloy_rpc_types_engine::PayloadAttributes as EthPayloadAttributes;
 use reth_basic_payload_builder::{
@@ -416,7 +416,9 @@ where
         return Ok(BuildOutcome::Aborted { fees: total_fees, cached_reads })
     }
 
-    let BlockBuilderOutcome { execution_result, block, .. } = if let Some(mut handle) = trie_handle
+    let BlockBuilderOutcome { execution_result, block, block_access_list, .. } = if let Some(
+        mut handle,
+    ) = trie_handle
     {
         // Drop the state hook, which drops the StateHookSender and triggers
         // FinishedStateUpdates via its Drop impl, signaling the trie task to finalize.
@@ -455,8 +457,12 @@ where
             max_rlp_length: MAX_RLP_BLOCK_SIZE,
         }));
     }
-
-    let payload = EthBuiltPayload::new(sealed_block, total_fees, requests, None)
+    let block_access_list: Option<Bytes> = if let Some(block_access_list) = block_access_list {
+        Some(alloy_rlp::encode(&block_access_list).into())
+    } else {
+        None
+    };
+    let payload = EthBuiltPayload::new(sealed_block, total_fees, requests, block_access_list)
         // add blob sidecars from the executed txs
         .with_sidecars(blob_sidecars);
 
