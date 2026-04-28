@@ -450,7 +450,7 @@ alloy-sol-types = { version = "1.5.6", default-features = false }
 alloy-chains = { version = "0.2.33", default-features = false }
 alloy-eip2124 = { version = "0.2.0", default-features = false }
 alloy-eip7928 = { version = "0.3.4", default-features = false }
-alloy-evm = { version = "0.33.0", default-features = false }
+alloy-evm = { version = "0.34.0", default-features = false }
 alloy-rlp = { version = "0.3.13", default-features = false, features = ["core-net"] }
 alloy-trie = { version = "0.9.4", default-features = false }
 
@@ -715,7 +715,7 @@ revm-precompile = { git = "https://github.com/bluealloy/revm", rev = "3ed3bdfed9
 revm-primitives = { git = "https://github.com/bluealloy/revm", rev = "3ed3bdfed9ad6e5ba37f4e1f015436ab89ca98be" }
 revm-state = { git = "https://github.com/bluealloy/revm", rev = "3ed3bdfed9ad6e5ba37f4e1f015436ab89ca98be" }
 revm-inspectors = { git = "https://github.com/paradigmxyz/revm-inspectors", rev = "5eebb56819ee6bec5bfbc69a415276ee1a784fec" }
-alloy-evm = { git = "https://github.com/alloy-rs/evm", rev = "47fda848fdaf0976b0731bbda8fa561e541306b7" }
+alloy-evm = { git = "https://github.com/alloy-rs/evm", branch = "bal-devnet-4" }
 reth-codecs = { git = "https://github.com/paradigmxyz/reth-core", rev = "8612239c4f3dda83cc389f577b9eb04f10ebf81d" }
 reth-codecs-derive = { git = "https://github.com/paradigmxyz/reth-core", rev = "8612239c4f3dda83cc389f577b9eb04f10ebf81d" }
 reth-primitives-traits = { git = "https://github.com/paradigmxyz/reth-core", rev = "8612239c4f3dda83cc389f577b9eb04f10ebf81d" }
