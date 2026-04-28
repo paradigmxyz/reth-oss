@@ -7,7 +7,7 @@ use alloy_eips::{
     eip2718::WithEncoded,
     eip7928::{compute_block_access_list_hash, BlockAccessList},
 };
-pub use alloy_evm::block::{BlockExecutor, BlockExecutorFactory};
+pub use alloy_evm::block::{BlockExecutor, BlockExecutorFactory, GasOutput};
 use alloy_evm::{
     block::{CommitChanges, ExecutableTxParts},
     Evm, EvmEnv, EvmFactory, RecoveredTx, ToTxEnv,
@@ -344,7 +344,7 @@ pub trait BlockBuilder {
         &mut self,
         tx: impl ExecutorTx<Self::Executor>,
         f: impl FnOnce(&<Self::Executor as BlockExecutor>::Result) -> CommitChanges,
-    ) -> Result<Option<u64>, BlockExecutionError>;
+    ) -> Result<Option<GasOutput>, BlockExecutionError>;
 
     /// Invokes [`BlockExecutor::execute_transaction_with_result_closure`] and saves the
     /// transaction in internal state.
@@ -352,7 +352,7 @@ pub trait BlockBuilder {
         &mut self,
         tx: impl ExecutorTx<Self::Executor>,
         f: impl FnOnce(&<Self::Executor as BlockExecutor>::Result),
-    ) -> Result<u64, BlockExecutionError> {
+    ) -> Result<GasOutput, BlockExecutionError> {
         self.execute_transaction_with_commit_condition(tx, |res| {
             f(res);
             CommitChanges::Yes
@@ -365,7 +365,7 @@ pub trait BlockBuilder {
     fn execute_transaction(
         &mut self,
         tx: impl ExecutorTx<Self::Executor>,
-    ) -> Result<u64, BlockExecutionError> {
+    ) -> Result<GasOutput, BlockExecutionError> {
         self.execute_transaction_with_result_closure(tx, |_| ())
     }
 
@@ -481,7 +481,7 @@ where
         &mut self,
         tx: impl ExecutorTx<Self::Executor>,
         f: impl FnOnce(&<Self::Executor as BlockExecutor>::Result) -> CommitChanges,
-    ) -> Result<Option<u64>, BlockExecutionError> {
+    ) -> Result<Option<GasOutput>, BlockExecutionError> {
         let (tx_env, tx) = tx.into_parts();
         if let Some(gas_used) =
             self.executor.execute_transaction_with_commit_condition((tx_env, &tx), f)?
@@ -489,7 +489,7 @@ where
             self.transactions.push(tx);
             // Bump BAL index after each committed transaction (EIP-7928)
             self.executor.evm_mut().db_mut().bump_bal_index();
-            Ok(Some(gas_used.tx_gas_used()))
+            Ok(Some(gas_used))
         } else {
             Ok(None)
         }
