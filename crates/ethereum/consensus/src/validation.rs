@@ -87,6 +87,7 @@ where
     if chain_spec.is_amsterdam_active_at_timestamp(block.header().timestamp()) &&
         block_access_list.is_some()
     {
+        tracing::info!(target: "consensus::validation", "Validating block access list hash for block {}", block.header().number());
         let block_bal_hash = block.header().block_access_list_hash().unwrap_or_default();
         let default_bal = BlockAccessList::default();
         let block_access_list_hash =

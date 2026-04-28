@@ -1113,7 +1113,7 @@ where
             // Bump BAL index after each transaction (EIP-7928)
             if has_bal {
                 executor.evm_mut().db_mut().bump_bal_index();
-                tracing::info!(target: "engine::tree::payload_validator", "Bumped BAL index after transaction execution {:?}"., executor.evm().db().bal_state.bal_index);
+                tracing::info!(target: "engine::tree::payload_validator", "Bumped BAL index after transaction execution {:?}", executor.evm().db().bal_state.bal_index);
             }
         }
         drop(exec_span);
