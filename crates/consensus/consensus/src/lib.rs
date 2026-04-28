@@ -477,7 +477,7 @@ pub enum ConsensusError {
     #[error(transparent)]
     TransactionGasLimitTooHigh(Box<TxGasLimitTooHighErr>),
     /// Error when an unexpected block access list cost is encountered.
-    #[error("bblock access list exceeds gas limit")]
+    #[error("block access list exceeds gas limit")]
     BlockAccessListExceedsGasLimit,
     /// Error when the block access list hash doesn't match the expected value.
     #[error("block access list hash mismatch: {0}")]
