@@ -424,8 +424,8 @@ where
                 return Err(InvalidTransactionError::Eip7702Disabled.into())
             }
             // Accept known transaction types when their respective fork is active
-            LEGACY_TX_TYPE_ID | EIP2930_TX_TYPE_ID | EIP1559_TX_TYPE_ID | EIP4844_TX_TYPE_ID
-            | EIP7702_TX_TYPE_ID => {}
+            LEGACY_TX_TYPE_ID | EIP2930_TX_TYPE_ID | EIP1559_TX_TYPE_ID | EIP4844_TX_TYPE_ID |
+            EIP7702_TX_TYPE_ID => {}
 
             ty if !self.other_tx_types.bit(ty as usize) => {
                 return Err(InvalidTransactionError::TxTypeNotSupported.into())
@@ -482,8 +482,8 @@ where
         }
 
         // Check individual transaction gas limit if configured
-        if let Some(max_tx_gas_limit) = self.max_tx_gas_limit
-            && transaction_gas_limit > max_tx_gas_limit
+        if let Some(max_tx_gas_limit) = self.max_tx_gas_limit &&
+            transaction_gas_limit > max_tx_gas_limit
         {
             return Err(InvalidPoolTransactionError::MaxTxGasLimitExceeded(
                 transaction_gas_limit,
@@ -518,9 +518,9 @@ where
 
         // Drop non-local transactions with a fee lower than the configured fee for acceptance into
         // the pool.
-        if !is_local
-            && transaction.is_dynamic_fee()
-            && transaction.max_priority_fee_per_gas() < self.minimum_priority_fee
+        if !is_local &&
+            transaction.is_dynamic_fee() &&
+            transaction.max_priority_fee_per_gas() < self.minimum_priority_fee
         {
             return Err(InvalidPoolTransactionError::PriorityFeeBelowMinimum {
                 minimum_priority_fee: self
@@ -530,8 +530,8 @@ where
         }
 
         // Checks for chainid
-        if let Some(chain_id) = transaction.chain_id()
-            && chain_id != self.chain_id()
+        if let Some(chain_id) = transaction.chain_id() &&
+            chain_id != self.chain_id()
         {
             return Err(InvalidTransactionError::ChainIdMismatch.into());
         }
@@ -619,8 +619,8 @@ where
         };
 
         // Checks for nonce
-        if transaction.requires_nonce_check()
-            && let Err(err) = self.validate_sender_nonce(&transaction, &account)
+        if transaction.requires_nonce_check() &&
+            let Err(err) = self.validate_sender_nonce(&transaction, &account)
         {
             return TransactionValidationOutcome::Invalid(transaction, err);
         }
@@ -637,8 +637,8 @@ where
         };
 
         // Run additional stateful validation if configured
-        if let Some(check) = &self.additional_stateful_validation
-            && let Err(err) = check(origin, &transaction, &state)
+        if let Some(check) = &self.additional_stateful_validation &&
+            let Err(err) = check(origin, &transaction, &state)
         {
             return TransactionValidationOutcome::Invalid(transaction, err);
         }
