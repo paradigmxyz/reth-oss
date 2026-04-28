@@ -17,7 +17,7 @@ echo "Building images"
     --sim.buildarg branch=devnets/bal/4 \
     --sim.timelimit 1s || true &
 ./hive -client reth --sim "ethereum/eels/consume-rlp" \
-    --sim.buildarg fixtures=https://github.com/ethereum/execution-spec-tests/releases/download/bal@@v6.0.0/fixtures_bal-devnet-4.tar.gz \
+    --sim.buildarg fixtures=https://github.com/ethereum/execution-spec-tests/releases/download/bal@v6.0.0/fixtures_bal-devnet-4.tar.gz \
     --sim.buildarg branch=devnets/bal/4 \
     --sim.timelimit 1s || true &
 ./hive -client reth --sim "ethereum/engine" -sim.timelimit 1s || true &
