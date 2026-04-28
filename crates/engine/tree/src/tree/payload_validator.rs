@@ -1083,6 +1083,7 @@ where
 
             let tx = tx_result.map_err(BlockExecutionError::other)?;
             let tx_signer = *<Tx as alloy_evm::RecoveredTx<InnerTx>>::signer(&tx);
+            tracing::info!(target: "engine::tree::payload_validator", ?tx_signer, "Executing transaction from sender");
 
             senders.push(tx_signer);
 
