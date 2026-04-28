@@ -477,8 +477,8 @@ pub enum ConsensusError {
     #[error(transparent)]
     TransactionGasLimitTooHigh(Box<TxGasLimitTooHighErr>),
     /// Error when an unexpected block access list cost is encountered.
-    #[error("block access list cost exceeds gas limit")]
-    BlockAccessListCostMoreThanGasLimit,
+    #[error("bblock access list exceeds gas limit")]
+    BlockAccessListExceedsGasLimit,
     /// Error when the block access list hash doesn't match the expected value.
     #[error("block access list hash mismatch: {0}")]
     BlockAccessListHashMismatch(GotExpectedBoxed<B256>),
@@ -538,7 +538,7 @@ pub fn validate_block_access_list_gas(
     if let Some(bal) = block_access_list {
         let bal_items = alloy_eip7928::total_bal_items(bal);
         if bal_items > gas_limit / alloy_eip7928::ITEM_COST as u64 {
-            return Err(ConsensusError::BlockAccessListCostMoreThanGasLimit)
+            return Err(ConsensusError::BlockAccessListExceedsGasLimit)
         }
     }
     Ok(())
