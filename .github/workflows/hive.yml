@@ -29,7 +29,7 @@ jobs:
   prepare-hive:
     if: github.repository == 'paradigmxyz/reth-oss' || github.repository == 'paradigmxyz/reth'
     timeout-minutes: 45
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.repository == 'paradigmxyz/reth-oss' || github.repository == 'paradigmxyz/reth') && 'ubuntu-latest' || fromJSON('{"group":"Reth"}') }}
     steps:
       - uses: actions/checkout@v6
       - name: Checkout hive tests
