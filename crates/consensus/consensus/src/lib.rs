@@ -253,15 +253,6 @@ pub enum ConsensusError {
     #[error("mismatched block requests hash: {0}")]
     BodyRequestsHashDiff(GotExpectedBoxed<B256>),
 
-    /// Error when the computed block access list hash does not match the hash committed in
-    /// the block header (EIP-7928).
-    #[error("mismatched block access list hash: {0}")]
-    BlockAccessListHashMismatch(GotExpectedBoxed<B256>),
-
-    /// Error when the block's declared block access list contains more items than the
-    /// block's gas limit allows (EIP-7928 `ITEM_COST` gating).
-    #[error("block access list cost more than gas limit")]
-    BlockAccessListCostMoreThanGasLimit,
 
     /// Error when a block with a specific hash and number is already known.
     #[error("block with [hash={hash}, number={number}] is already known")]
