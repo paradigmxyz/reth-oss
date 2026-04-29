@@ -253,7 +253,6 @@ pub enum ConsensusError {
     #[error("mismatched block requests hash: {0}")]
     BodyRequestsHashDiff(GotExpectedBoxed<B256>),
 
-
     /// Error when a block with a specific hash and number is already known.
     #[error("block with [hash={hash}, number={number}] is already known")]
     BlockKnown {
