@@ -117,6 +117,7 @@ pub(crate) type BalIndexReader<DB> = fn(&DB) -> u64;
 /// Gas counters reset at each boundary so that each segment's real gas limit
 /// is used (preserving correct GASLIMIT opcode behavior). Accumulated offsets
 /// are applied to receipts and totals in `finish()`.
+#[expect(missing_debug_implementations)]
 pub struct BbBlockExecutor<'a, DB, I, P, Spec>
 where
     DB: Database,
@@ -144,21 +145,6 @@ where
     bal_index_reader: Option<BalIndexReader<DB>>,
     /// Whether the executor has selected its starting segment.
     initialized: bool,
-}
-
-impl<DB, I, P, Spec> std::fmt::Debug for BbBlockExecutor<'_, DB, I, P, Spec>
-where
-    DB: Database,
-{
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("BbBlockExecutor")
-            .field("has_inner", &self.inner.is_some())
-            .field("plan", &self.plan)
-            .field("gas_used_offset", &self.gas_used_offset)
-            .field("blob_gas_used_offset", &self.blob_gas_used_offset)
-            .field("initialized", &self.initialized)
-            .finish_non_exhaustive()
-    }
 }
 
 impl<'a, DB, I, P, Spec> BbBlockExecutor<'a, DB, I, P, Spec>
