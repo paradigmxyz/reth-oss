@@ -714,10 +714,10 @@ revm-interpreter = { git = "https://github.com/bluealloy/revm", branch= "dev4-fi
 revm-precompile = { git = "https://github.com/bluealloy/revm", branch= "dev4-fix" }
 revm-primitives = { git = "https://github.com/bluealloy/revm", branch= "dev4-fix" }
 revm-state = { git = "https://github.com/bluealloy/revm", branch= "dev4-fix" }
-revm-inspectors = { git = "https://github.com/paradigmxyz/revm-inspectors", rev = "5eebb56819ee6bec5bfbc69a415276ee1a784fec" }
+revm-inspectors = { git = "https://github.com/Soubhik-10/revm-inspectors", branch = "dev4-fix" }
 alloy-evm = { git = "https://github.com/Soubhik-10/evm", branch = "dev4-fix" }
-reth-codecs = { git = "https://github.com/paradigmxyz/reth-core", rev = "8612239c4f3dda83cc389f577b9eb04f10ebf81d" }
-reth-codecs-derive = { git = "https://github.com/paradigmxyz/reth-core", rev = "8612239c4f3dda83cc389f577b9eb04f10ebf81d" }
-reth-primitives-traits = { git = "https://github.com/paradigmxyz/reth-core", rev = "8612239c4f3dda83cc389f577b9eb04f10ebf81d" }
-reth-rpc-traits = { git = "https://github.com/paradigmxyz/reth-core", rev = "8612239c4f3dda83cc389f577b9eb04f10ebf81d" }
-reth-zstd-compressors = { git = "https://github.com/paradigmxyz/reth-core", rev = "8612239c4f3dda83cc389f577b9eb04f10ebf81d" }
+reth-codecs = { git = "https://github.com/Rimeeeeee/reth-core", branch = "dev4-fixes" }
+reth-codecs-derive = { git = "https://github.com/Rimeeeeee/reth-core", branch = "dev4-fixes" }
+reth-primitives-traits = { git = "https://github.com/Rimeeeeee/reth-core", branch = "dev4-fixes" }
+reth-rpc-traits = { git = "https://github.com/Rimeeeeee/reth-core", branch = "dev4-fixes" }
+reth-zstd-compressors = { git = "https://github.com/Rimeeeeee/reth-core", branch = "dev4-fixes" }
