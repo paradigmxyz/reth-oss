@@ -50,7 +50,7 @@ use crate::tree::{
 use alloy_consensus::transaction::{Either, TxHashRef};
 use alloy_eip7928::{
     bal::{Bal, DecodedBal},
-    BlockAccessList,
+    compute_block_access_list_hash, total_bal_items, BlockAccessList, ITEM_COST,
 };
 use alloy_eips::{eip1898::BlockWithParent, eip4895::Withdrawal, NumHash};
 use alloy_evm::Evm;
@@ -529,8 +529,7 @@ where
         // Create overlay factory for payload processor (StateRootTask path needs it for
         // multiproofs)
         let provider_factory = self.provider.clone();
-        let overlay_builder = OverlayBuilder::new(self.changeset_cache.clone())
-            .with_block_hash(Some(anchor_hash))
+        let overlay_builder = OverlayBuilder::<N>::new(anchor_hash, self.changeset_cache.clone())
             .with_lazy_overlay(lazy_overlay);
         let overlay_factory =
             OverlayStateProviderFactory::new(provider_factory.clone(), overlay_builder.clone());
@@ -652,6 +651,7 @@ where
                 &mut ctx,
                 transaction_root,
                 receipt_root_bloom,
+                built_bal.as_ref(),
                 hashed_state,
                 built_bal
             ),
@@ -1135,7 +1135,7 @@ where
     fn compute_state_root_parallel(
         &self,
         provider_factory: P,
-        overlay_builder: OverlayBuilder,
+        overlay_builder: OverlayBuilder<N>,
         hashed_state: &LazyHashedPostState,
     ) -> Result<(B256, TrieUpdates), ParallelStateRootError> {
         let hashed_state = hashed_state.get();
@@ -1280,7 +1280,7 @@ where
         &self,
         state_provider_builder: StateProviderBuilder<N, P>,
         provider_factory: P,
-        overlay_builder: OverlayBuilder,
+        overlay_builder: OverlayBuilder<N>,
         hashed_state: &LazyHashedPostState,
         task_trie_updates: TrieUpdates,
     ) -> bool {
@@ -1397,6 +1397,7 @@ where
         ctx: &mut TreeCtx<'_, N>,
         transaction_root: Option<B256>,
         receipt_root_bloom: Option<ReceiptRootBloom>,
+        built_bal: Option<&BlockAccessList>,
         hashed_state: LazyHashedPostState,
         built_bal: Option<BlockAccessList>,
     ) -> Result<LazyHashedPostState, InsertBlockErrorKind>
@@ -1437,6 +1438,21 @@ where
             return Err(err.into())
         }
         drop(_enter);
+
+        // EIP-7928: validate the produced BAL matches the hash committed in the header.
+        // Only checked when the header carries a BAL hash (post-Amsterdam) and the executor
+        // tracked execution into a BAL.
+        if let Some(header_bal_hash) = block.header().block_access_list_hash() {
+            let computed_hash =
+                built_bal.map(|bal| compute_block_access_list_hash(bal)).unwrap_or_default();
+            if computed_hash != header_bal_hash {
+                self.on_invalid_block(parent_block, block, output, None, ctx.state_mut());
+                return Err(ConsensusError::BlockAccessListHashMismatch(
+                    GotExpected { got: computed_hash, expected: header_bal_hash }.into(),
+                )
+                .into())
+            }
+        }
 
         // Wait for the background keccak256 hashing task to complete. This blocks until
         // all changed addresses and storage slots have been hashed.
@@ -1488,7 +1504,7 @@ where
         env: ExecutionEnv<Evm>,
         txs: T,
         provider_builder: StateProviderBuilder<N, P>,
-        overlay_factory: OverlayStateProviderFactory<P>,
+        overlay_factory: OverlayStateProviderFactory<P, N>,
         strategy: StateRootStrategy,
     ) -> Result<
         PayloadHandle<
@@ -1608,7 +1624,7 @@ where
     fn get_parent_lazy_overlay(
         parent_hash: B256,
         state: &EngineApiTreeState<N>,
-    ) -> (Option<LazyOverlay>, B256) {
+    ) -> (Option<LazyOverlay<N>>, B256) {
         // Get blocks leading to the parent to determine the anchor
         let (anchor_hash, blocks) =
             state.tree_state.blocks_by_hash(parent_hash).unwrap_or_else(|| (parent_hash, vec![]));
@@ -1636,10 +1652,7 @@ where
             "Creating lazy overlay for in-memory blocks"
         );
 
-        // Extract deferred trie data handles (non-blocking)
-        let handles: Vec<DeferredTrieData> = blocks.iter().map(|b| b.trie_data_handle()).collect();
-
-        (Some(LazyOverlay::new(anchor_hash, handles)), anchor_hash)
+        (Some(LazyOverlay::new(blocks)), anchor_hash)
     }
 
     /// Spawns a background task to compute and sort trie data for the executed block.
@@ -2073,8 +2086,7 @@ where
         let (lazy_overlay, anchor_hash) = Self::get_parent_lazy_overlay(parent_hash, state);
         let overlay_factory = OverlayStateProviderFactory::new(
             self.provider.clone(),
-            OverlayBuilder::new(self.changeset_cache.clone())
-                .with_block_hash(Some(anchor_hash))
+            OverlayBuilder::<N>::new(anchor_hash, self.changeset_cache.clone())
                 .with_lazy_overlay(lazy_overlay),
         );
 

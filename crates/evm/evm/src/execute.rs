@@ -7,7 +7,7 @@ use alloy_eips::{
     eip2718::WithEncoded,
     eip7928::{compute_block_access_list_hash, BlockAccessList},
 };
-pub use alloy_evm::block::{BlockExecutor, BlockExecutorFactory};
+pub use alloy_evm::block::{BlockExecutor, BlockExecutorFactory, GasOutput};
 use alloy_evm::{
     block::{CommitChanges, ExecutableTxParts},
     Evm, EvmEnv, EvmFactory, RecoveredTx, ToTxEnv,
@@ -152,7 +152,7 @@ pub trait Executor<DB: Database>: Sized {
     /// This is used to optimize DB commits depending on the size of the state.
     fn size_hint(&self) -> usize;
 
-    /// Take built [`BlockAccessList`] from executor
+    /// Takes built [`BlockAccessList`] from executor.
     fn take_bal(&mut self) -> Option<BlockAccessList>;
 }
 
@@ -344,7 +344,7 @@ pub trait BlockBuilder {
         &mut self,
         tx: impl ExecutorTx<Self::Executor>,
         f: impl FnOnce(&<Self::Executor as BlockExecutor>::Result) -> CommitChanges,
-    ) -> Result<Option<u64>, BlockExecutionError>;
+    ) -> Result<Option<GasOutput>, BlockExecutionError>;
 
     /// Invokes [`BlockExecutor::execute_transaction_with_result_closure`] and saves the
     /// transaction in internal state.
@@ -352,7 +352,7 @@ pub trait BlockBuilder {
         &mut self,
         tx: impl ExecutorTx<Self::Executor>,
         f: impl FnOnce(&<Self::Executor as BlockExecutor>::Result),
-    ) -> Result<u64, BlockExecutionError> {
+    ) -> Result<GasOutput, BlockExecutionError> {
         self.execute_transaction_with_commit_condition(tx, |res| {
             f(res);
             CommitChanges::Yes
@@ -365,7 +365,7 @@ pub trait BlockBuilder {
     fn execute_transaction(
         &mut self,
         tx: impl ExecutorTx<Self::Executor>,
-    ) -> Result<u64, BlockExecutionError> {
+    ) -> Result<GasOutput, BlockExecutionError> {
         self.execute_transaction_with_result_closure(tx, |_| ())
     }
 
@@ -471,7 +471,6 @@ where
 
     fn apply_pre_execution_changes(&mut self) -> Result<(), BlockExecutionError> {
         self.executor.apply_pre_execution_changes()?;
-        // Bump BAL index after pre-execution changes (EIP-7928: index 0 is pre-execution)
         self.executor.evm_mut().db_mut().bump_bal_index();
 
         Ok(())
@@ -481,15 +480,14 @@ where
         &mut self,
         tx: impl ExecutorTx<Self::Executor>,
         f: impl FnOnce(&<Self::Executor as BlockExecutor>::Result) -> CommitChanges,
-    ) -> Result<Option<u64>, BlockExecutionError> {
+    ) -> Result<Option<GasOutput>, BlockExecutionError> {
         let (tx_env, tx) = tx.into_parts();
         if let Some(gas_used) =
             self.executor.execute_transaction_with_commit_condition((tx_env, &tx), f)?
         {
             self.transactions.push(tx);
-            // Bump BAL index after each committed transaction (EIP-7928)
             self.executor.evm_mut().db_mut().bump_bal_index();
-            Ok(Some(gas_used.tx_gas_used()))
+            Ok(Some(gas_used))
         } else {
             Ok(None)
         }
@@ -506,7 +504,6 @@ where
         // merge all transitions into bundle state
         db.merge_transitions(BundleRetention::Reverts);
 
-        // extract the built block access list (EIP-7928, Amsterdam) and compute its hash
         let block_access_list = db.take_built_alloy_bal();
         let block_access_list_hash =
             block_access_list.as_ref().map(|bal| compute_block_access_list_hash(bal));
