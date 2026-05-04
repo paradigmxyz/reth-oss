@@ -68,7 +68,7 @@ impl<S> Layer<S> for EngineSszProxyLayer {
 }
 
 /// The service produced by [`EngineSszProxyLayer`].
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct EngineSszProxyService<S> {
     inner: S,
     handle: EngineSszProxyHandle,
