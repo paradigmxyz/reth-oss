@@ -802,6 +802,7 @@ impl RpcServerArgs {
         self.rpc_force_blob_sidecar_upcasting = true;
         self
     }
+
 }
 
 impl Default for RpcServerArgs {
