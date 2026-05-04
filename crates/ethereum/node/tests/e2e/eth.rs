@@ -404,14 +404,14 @@ struct PayloadAttributesV3Ssz {
 #[derive(Clone, Debug, Default, ssz_derive::Decode)]
 struct PayloadStatusSsz {
     status: u8,
-    latest_valid_hash: B256,
-    validation_error: Vec<u8>,
+    _latest_valid_hash: B256,
+    _validation_error: Vec<u8>,
 }
 
 #[derive(Clone, Debug, Default, ssz_derive::Decode)]
 struct ForkchoiceUpdatedSsz {
     payload_status: PayloadStatusSsz,
-    payload_id: alloy_primitives::B64,
+    _payload_id: alloy_primitives::B64,
 }
 
 /// Tests that the sparse trie pipeline can be shared with the payload builder.
