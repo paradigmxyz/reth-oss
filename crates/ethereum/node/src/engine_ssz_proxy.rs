@@ -1,6 +1,9 @@
 //! HTTP SSZ transport proxy for the authenticated Engine API server.
 
-use alloy_eips::{eip4895::Withdrawal, eip7685::{Requests,RequestsOrHash}};
+use alloy_eips::{
+    eip4895::Withdrawal,
+    eip7685::{Requests, RequestsOrHash},
+};
 use alloy_primitives::{Address, Bytes, B256, B64};
 use alloy_rpc_types_engine::{
     CancunPayloadFields, ExecutionData, ExecutionPayload, ExecutionPayloadSidecar,
