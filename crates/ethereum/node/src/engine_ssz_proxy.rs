@@ -463,7 +463,7 @@ impl From<PayloadStatus> for PayloadStatusSsz {
     }
 }
 
-fn payload_status_code(status: &PayloadStatusEnum) -> u8 {
+const fn payload_status_code(status: &PayloadStatusEnum) -> u8 {
     match status {
         PayloadStatusEnum::Valid => 0,
         PayloadStatusEnum::Invalid { .. } => 1,
