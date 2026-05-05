@@ -133,6 +133,7 @@ jobs:
           # eth_ rpc methods
           - sim: ethereum/rpc-compat
             include:
+              - testing_buildBlockV1
               - eth_blockNumber
               - eth_call
               - eth_chainId
@@ -317,6 +318,7 @@ jobs:
           # eth_ rpc methods
           - sim: ethereum/rpc-compat
             include:
+              - testing_buildBlockV1
               - eth_blockNumber
               - eth_call
               - eth_chainId
