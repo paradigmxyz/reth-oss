@@ -13,10 +13,8 @@ use alloy_rpc_types_engine::{
     ForkchoiceState, ForkchoiceUpdated, PayloadAttributes, PayloadStatus, PayloadStatusEnum,
     PraguePayloadFields,
 };
-use jsonrpsee::{
-    core::http_helpers::read_body,
-    server::{HttpBody, HttpRequest, HttpResponse},
-};
+use http_body_util::BodyExt;
+use jsonrpsee::server::{HttpBody, HttpRequest, HttpResponse};
 use reth_engine_primitives::ConsensusEngineHandle;
 use reth_ethereum_engine_primitives::EthEngineTypes;
 use std::{
@@ -122,8 +120,7 @@ async fn handle_engine_ssz_request(
         return text_response(STATUS_NOT_FOUND, "unknown engine ssz endpoint")
     };
 
-    let headers = request.headers().clone();
-    let Ok((body, _)) = read_body(&headers, request.into_body(), u32::MAX).await else {
+    let Ok(body) = request.into_body().collect().await.map(|body| body.to_bytes()) else {
         return text_response(STATUS_BAD_REQUEST, "failed to read request body")
     };
 
