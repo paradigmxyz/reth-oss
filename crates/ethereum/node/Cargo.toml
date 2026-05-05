@@ -56,8 +56,6 @@ revm = { workspace = true, features = ["secp256k1", "blst", "c-kzg", "memory_lim
 eyre.workspace = true
 ethereum_ssz.workspace = true
 ethereum_ssz_derive.workspace = true
-http.workspace = true
-http-body-util.workspace = true
 tower.workspace = true
 
 [dev-dependencies]

@@ -9317,8 +9317,6 @@ dependencies = [
  "ethereum_ssz_derive",
  "eyre",
  "futures",
- "http",
- "http-body-util",
  "jsonrpsee",
  "jsonrpsee-core",
  "rand 0.9.4",

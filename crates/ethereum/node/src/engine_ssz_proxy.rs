@@ -1,4 +1,6 @@
 //! HTTP SSZ transport proxy for the authenticated Engine API server.
+//!
+//! Implements the EIP-8178 SSZ Engine API routes under `/engine`.
 
 use alloy_eips::{
     eip4895::Withdrawal,
@@ -11,9 +13,10 @@ use alloy_rpc_types_engine::{
     ForkchoiceState, ForkchoiceUpdated, PayloadAttributes, PayloadStatus, PayloadStatusEnum,
     PraguePayloadFields,
 };
-use http::{header::CONTENT_TYPE, Method, Response, StatusCode};
-use http_body_util::BodyExt;
-use jsonrpsee::server::{HttpBody, HttpRequest, HttpResponse};
+use jsonrpsee::{
+    core::http_helpers::read_body,
+    server::{HttpBody, HttpRequest, HttpResponse},
+};
 use reth_engine_primitives::ConsensusEngineHandle;
 use reth_ethereum_engine_primitives::EthEngineTypes;
 use std::{
@@ -27,6 +30,14 @@ use tower::{BoxError, Layer, Service};
 
 const OCTET_STREAM: &str = "application/octet-stream";
 const TEXT_PLAIN: &str = "text/plain";
+const CONTENT_TYPE: &str = "content-type";
+
+const STATUS_OK: u16 = 200;
+const STATUS_BAD_REQUEST: u16 = 400;
+const STATUS_NOT_FOUND: u16 = 404;
+const STATUS_METHOD_NOT_ALLOWED: u16 = 405;
+const STATUS_INTERNAL_SERVER_ERROR: u16 = 500;
+const STATUS_SERVICE_UNAVAILABLE: u16 = 503;
 
 /// Shared handle used by [`EngineSszProxyLayer`].
 #[derive(Clone, Debug, Default)]
@@ -45,7 +56,7 @@ impl EngineSszProxyHandle {
     }
 }
 
-/// A tower layer that intercepts EIP-8178 SSZ Engine API routes under `/engine`.
+/// A tower layer that intercepts SSZ Engine API routes under `/engine`.
 #[derive(Clone, Debug, Default)]
 pub struct EngineSszProxyLayer {
     handle: EngineSszProxyHandle,
@@ -102,27 +113,28 @@ async fn handle_engine_ssz_request(
     handle: EngineSszProxyHandle,
     request: HttpRequest,
 ) -> HttpResponse {
-    if request.method() != Method::POST {
-        return text_response(StatusCode::METHOD_NOT_ALLOWED, "method not allowed")
+    if request.method().as_str() != "POST" {
+        return text_response(STATUS_METHOD_NOT_ALLOWED, "method not allowed")
     }
 
     let path = request.uri().path().to_owned();
     let Some((version, resource)) = parse_engine_path(&path) else {
-        return text_response(StatusCode::NOT_FOUND, "unknown engine ssz endpoint")
+        return text_response(STATUS_NOT_FOUND, "unknown engine ssz endpoint")
     };
 
-    let Ok(body) = request.into_body().collect().await.map(|body| body.to_bytes()) else {
-        return text_response(StatusCode::BAD_REQUEST, "failed to read request body")
+    let headers = request.headers().clone();
+    let Ok((body, _)) = read_body(&headers, request.into_body(), u32::MAX).await else {
+        return text_response(STATUS_BAD_REQUEST, "failed to read request body")
     };
 
     let Some(engine) = handle.engine().await else {
-        return text_response(StatusCode::SERVICE_UNAVAILABLE, "engine handle unavailable")
+        return text_response(STATUS_SERVICE_UNAVAILABLE, "engine handle unavailable")
     };
 
     match resource {
         "payloads" => handle_new_payload(engine, version, &body).await,
         "forkchoice" => handle_forkchoice_updated(engine, version, &body).await,
-        _ => text_response(StatusCode::NOT_FOUND, "unknown engine ssz endpoint"),
+        _ => text_response(STATUS_NOT_FOUND, "unknown engine ssz endpoint"),
     }
 }
 
@@ -144,12 +156,12 @@ async fn handle_new_payload(
 ) -> HttpResponse {
     let payload = match decode_new_payload_request(version, body) {
         Ok(payload) => payload,
-        Err(err) => return text_response(StatusCode::BAD_REQUEST, err),
+        Err(err) => return text_response(STATUS_BAD_REQUEST, err),
     };
 
     match engine.new_payload(payload).await {
         Ok(status) => ssz_response(PayloadStatusSsz::from(status)),
-        Err(err) => text_response(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
+        Err(err) => text_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string()),
     }
 }
 
@@ -160,12 +172,12 @@ async fn handle_forkchoice_updated(
 ) -> HttpResponse {
     let (state, attrs) = match decode_forkchoice_request(version, body) {
         Ok(request) => request,
-        Err(err) => return text_response(StatusCode::BAD_REQUEST, err),
+        Err(err) => return text_response(STATUS_BAD_REQUEST, err),
     };
 
     match engine.fork_choice_updated(state, attrs).await {
         Ok(updated) => ssz_response(ForkchoiceUpdatedSsz::from(updated)),
-        Err(err) => text_response(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
+        Err(err) => text_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string()),
     }
 }
 
@@ -174,52 +186,62 @@ fn decode_new_payload_request(version: u8, body: &[u8]) -> Result<ExecutionData,
 
     match version {
         1 => {
-            let request = NewPayloadV1Request::from_ssz_bytes(body).map_err(|_| "invalid ssz")?;
-            Ok(ExecutionData::new(
-                request.execution_payload.into(),
-                ExecutionPayloadSidecar::none(),
-            ))
+            let execution_payload =
+                decode_one::<ExecutionPayloadV1>(body).map_err(|_| "invalid ssz")?;
+            Ok(ExecutionData::new(execution_payload.into(), ExecutionPayloadSidecar::none()))
         }
         2 => {
-            let request = NewPayloadV2Request::from_ssz_bytes(body).map_err(|_| "invalid ssz")?;
-            Ok(ExecutionData::new(
-                request.execution_payload.into(),
-                ExecutionPayloadSidecar::none(),
-            ))
+            let execution_payload =
+                decode_one::<ExecutionPayloadV2>(body).map_err(|_| "invalid ssz")?;
+            Ok(ExecutionData::new(execution_payload.into(), ExecutionPayloadSidecar::none()))
         }
         3 => {
-            let request = NewPayloadV3Request::from_ssz_bytes(body).map_err(|_| "invalid ssz")?;
+            let (execution_payload, expected_blob_versioned_hashes, parent_beacon_block_root) =
+                <(ExecutionPayloadV3, Vec<B256>, B256)>::from_ssz_bytes(body)
+                    .map_err(|_| "invalid ssz")?;
             let sidecar = ExecutionPayloadSidecar::v3(CancunPayloadFields {
-                parent_beacon_block_root: request.parent_beacon_block_root,
-                versioned_hashes: request.expected_blob_versioned_hashes,
+                parent_beacon_block_root,
+                versioned_hashes: expected_blob_versioned_hashes,
             });
-            Ok(ExecutionData::new(request.execution_payload.into(), sidecar))
+            Ok(ExecutionData::new(execution_payload.into(), sidecar))
         }
         4 => {
-            let request = NewPayloadV4Request::from_ssz_bytes(body).map_err(|_| "invalid ssz")?;
+            let (
+                execution_payload,
+                expected_blob_versioned_hashes,
+                parent_beacon_block_root,
+                execution_requests,
+            ) = <(ExecutionPayloadV3, Vec<B256>, B256, Vec<Bytes>)>::from_ssz_bytes(body)
+                .map_err(|_| "invalid ssz")?;
             let sidecar = ExecutionPayloadSidecar::v4(
                 CancunPayloadFields {
-                    parent_beacon_block_root: request.parent_beacon_block_root,
-                    versioned_hashes: request.expected_blob_versioned_hashes,
+                    parent_beacon_block_root,
+                    versioned_hashes: expected_blob_versioned_hashes,
                 },
                 PraguePayloadFields::new(RequestsOrHash::Requests(Requests::new(
-                    request.execution_requests,
+                    execution_requests,
                 ))),
             );
-            Ok(ExecutionData::new(request.execution_payload.into(), sidecar))
+            Ok(ExecutionData::new(execution_payload.into(), sidecar))
         }
         5 => {
-            let request = NewPayloadV5Request::from_ssz_bytes(body).map_err(|_| "invalid ssz")?;
+            let (
+                execution_payload,
+                expected_blob_versioned_hashes,
+                parent_beacon_block_root,
+                execution_requests,
+            ) = <(ExecutionPayloadV4, Vec<B256>, B256, Vec<Bytes>)>::from_ssz_bytes(body)
+                .map_err(|_| "invalid ssz")?;
             let sidecar = ExecutionPayloadSidecar::v4(
                 CancunPayloadFields {
-                    parent_beacon_block_root: request.parent_beacon_block_root,
-                    versioned_hashes: request.expected_blob_versioned_hashes,
+                    parent_beacon_block_root,
+                    versioned_hashes: expected_blob_versioned_hashes,
                 },
                 PraguePayloadFields::new(RequestsOrHash::Requests(Requests::new(
-                    request.execution_requests,
+                    execution_requests,
                 ))),
             );
-            Ok(ExecutionData::new(ExecutionPayload::V4(request.execution_payload), sidecar))
+            Ok(ExecutionData::new(ExecutionPayload::V4(execution_payload), sidecar))
         }
         _ => Err("unsupported payload endpoint version"),
     }
@@ -233,27 +255,38 @@ fn decode_forkchoice_request(
 
     match version {
         1 => {
-            let request =
-                ForkchoiceUpdatedV1Request::from_ssz_bytes(body).map_err(|_| "invalid ssz")?;
-            Ok((request.forkchoice_state.into(), payload_attrs(request.payload_attributes)?))
+            let (forkchoice_state, payload_attributes) =
+                <(ForkchoiceStateSsz, Vec<PayloadAttributesV1Ssz>)>::from_ssz_bytes(body)
+                    .map_err(|_| "invalid ssz")?;
+            Ok((forkchoice_state.into(), payload_attrs(payload_attributes)?))
         }
         2 => {
-            let request =
-                ForkchoiceUpdatedV2Request::from_ssz_bytes(body).map_err(|_| "invalid ssz")?;
-            Ok((request.forkchoice_state.into(), payload_attrs(request.payload_attributes)?))
+            let (forkchoice_state, payload_attributes) =
+                <(ForkchoiceStateSsz, Vec<PayloadAttributesV2Ssz>)>::from_ssz_bytes(body)
+                    .map_err(|_| "invalid ssz")?;
+            Ok((forkchoice_state.into(), payload_attrs(payload_attributes)?))
         }
         3 => {
-            let request =
-                ForkchoiceUpdatedV3Request::from_ssz_bytes(body).map_err(|_| "invalid ssz")?;
-            Ok((request.forkchoice_state.into(), payload_attrs(request.payload_attributes)?))
+            let (forkchoice_state, payload_attributes) =
+                <(ForkchoiceStateSsz, Vec<PayloadAttributesV3Ssz>)>::from_ssz_bytes(body)
+                    .map_err(|_| "invalid ssz")?;
+            Ok((forkchoice_state.into(), payload_attrs(payload_attributes)?))
         }
         4 => {
-            let request =
-                ForkchoiceUpdatedV4Request::from_ssz_bytes(body).map_err(|_| "invalid ssz")?;
-            Ok((request.forkchoice_state.into(), payload_attrs(request.payload_attributes)?))
+            let (forkchoice_state, payload_attributes) =
+                <(ForkchoiceStateSsz, Vec<PayloadAttributesV4Ssz>)>::from_ssz_bytes(body)
+                    .map_err(|_| "invalid ssz")?;
+            Ok((forkchoice_state.into(), payload_attrs(payload_attributes)?))
         }
         _ => Err("unsupported forkchoice endpoint version"),
     }
+}
+
+fn decode_one<T: ssz::Decode>(body: &[u8]) -> Result<T, ssz::DecodeError> {
+    let mut builder = ssz::SszDecoderBuilder::new(body);
+    builder.register_type::<T>()?;
+    let mut decoder = builder.build()?;
+    decoder.decode_next()
 }
 
 fn payload_attrs<T>(attrs: Vec<T>) -> Result<Option<PayloadAttributes>, &'static str>
@@ -268,79 +301,22 @@ where
 }
 
 fn ssz_response<T: ssz::Encode>(value: T) -> HttpResponse {
-    Response::builder()
-        .status(StatusCode::OK)
+    HttpResponse::builder()
+        .status(STATUS_OK)
         .header(CONTENT_TYPE, OCTET_STREAM)
         .body(HttpBody::from(value.as_ssz_bytes()))
         .expect("valid response")
 }
 
-fn text_response(status: StatusCode, body: impl Into<String>) -> HttpResponse {
-    Response::builder()
+fn text_response(status: u16, body: impl Into<String>) -> HttpResponse {
+    HttpResponse::builder()
         .status(status)
         .header(CONTENT_TYPE, TEXT_PLAIN)
         .body(HttpBody::from(body.into()))
         .expect("valid response")
 }
 
-#[derive(Clone, Debug, ssz_derive::Decode, ssz_derive::Encode)]
-struct NewPayloadV1Request {
-    execution_payload: ExecutionPayloadV1,
-}
-
-#[derive(Clone, Debug, ssz_derive::Decode, ssz_derive::Encode)]
-struct NewPayloadV2Request {
-    execution_payload: ExecutionPayloadV2,
-}
-
-#[derive(Clone, Debug, ssz_derive::Decode, ssz_derive::Encode)]
-struct NewPayloadV3Request {
-    execution_payload: ExecutionPayloadV3,
-    expected_blob_versioned_hashes: Vec<B256>,
-    parent_beacon_block_root: B256,
-}
-
-#[derive(Clone, Debug, ssz_derive::Decode, ssz_derive::Encode)]
-struct NewPayloadV4Request {
-    execution_payload: ExecutionPayloadV3,
-    expected_blob_versioned_hashes: Vec<B256>,
-    parent_beacon_block_root: B256,
-    execution_requests: Vec<Bytes>,
-}
-
-#[derive(Clone, Debug, ssz_derive::Decode, ssz_derive::Encode)]
-struct NewPayloadV5Request {
-    execution_payload: ExecutionPayloadV4,
-    expected_blob_versioned_hashes: Vec<B256>,
-    parent_beacon_block_root: B256,
-    execution_requests: Vec<Bytes>,
-}
-
-#[derive(Clone, Debug, ssz_derive::Decode, ssz_derive::Encode)]
-struct ForkchoiceUpdatedV1Request {
-    forkchoice_state: ForkchoiceStateSsz,
-    payload_attributes: Vec<PayloadAttributesV1Ssz>,
-}
-
-#[derive(Clone, Debug, ssz_derive::Decode, ssz_derive::Encode)]
-struct ForkchoiceUpdatedV2Request {
-    forkchoice_state: ForkchoiceStateSsz,
-    payload_attributes: Vec<PayloadAttributesV2Ssz>,
-}
-
-#[derive(Clone, Debug, ssz_derive::Decode, ssz_derive::Encode)]
-struct ForkchoiceUpdatedV3Request {
-    forkchoice_state: ForkchoiceStateSsz,
-    payload_attributes: Vec<PayloadAttributesV3Ssz>,
-}
-
-#[derive(Clone, Debug, ssz_derive::Decode, ssz_derive::Encode)]
-struct ForkchoiceUpdatedV4Request {
-    forkchoice_state: ForkchoiceStateSsz,
-    payload_attributes: Vec<PayloadAttributesV4Ssz>,
-}
-
-#[derive(Clone, Copy, Debug, ssz_derive::Decode, ssz_derive::Encode)]
+#[derive(ssz_derive::Decode)]
 struct ForkchoiceStateSsz {
     head_block_hash: B256,
     safe_block_hash: B256,
@@ -357,7 +333,7 @@ impl From<ForkchoiceStateSsz> for ForkchoiceState {
     }
 }
 
-#[derive(Clone, Debug, ssz_derive::Decode, ssz_derive::Encode)]
+#[derive(ssz_derive::Decode)]
 struct PayloadAttributesV1Ssz {
     timestamp: u64,
     prev_randao: B256,
@@ -377,7 +353,7 @@ impl From<PayloadAttributesV1Ssz> for PayloadAttributes {
     }
 }
 
-#[derive(Clone, Debug, ssz_derive::Decode, ssz_derive::Encode)]
+#[derive(ssz_derive::Decode)]
 struct PayloadAttributesV2Ssz {
     timestamp: u64,
     prev_randao: B256,
@@ -398,7 +374,7 @@ impl From<PayloadAttributesV2Ssz> for PayloadAttributes {
     }
 }
 
-#[derive(Clone, Debug, ssz_derive::Decode, ssz_derive::Encode)]
+#[derive(ssz_derive::Decode)]
 struct PayloadAttributesV3Ssz {
     timestamp: u64,
     prev_randao: B256,
@@ -420,7 +396,7 @@ impl From<PayloadAttributesV3Ssz> for PayloadAttributes {
     }
 }
 
-#[derive(Clone, Debug, ssz_derive::Decode, ssz_derive::Encode)]
+#[derive(ssz_derive::Decode)]
 struct PayloadAttributesV4Ssz {
     timestamp: u64,
     prev_randao: B256,
