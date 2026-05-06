@@ -21,7 +21,7 @@ use alloy_primitives::{map::HashSet, Address, U256};
 use alloy_rlp::Encodable;
 use alloy_rpc_types_engine::ExecutionPayloadEnvelopeV5;
 use async_trait::async_trait;
-use jsonrpsee::core::RpcResult;
+use jsonrpsee::{core::RpcResult, types::Params, RpcModule};
 use reth_chainspec::{ChainSpecProvider, EthereumHardforks};
 use reth_consensus_common::validation::MAX_RLP_BLOCK_SIZE;
 use reth_errors::RethError;
@@ -73,6 +73,31 @@ impl<Eth, Evm> TestingApi<Eth, Evm> {
         self.gas_limit_override = Some(gas_limit);
         self
     }
+
+    /// Builds the testing RPC module while accepting both the standard single-argument request
+    /// shape and Hive's top-level positional params form.
+    pub fn into_rpc(self) -> RpcModule<Self>
+    where
+        Self: Send + Sync + 'static,
+    {
+        let mut module = TestingApiServer::into_rpc(self);
+        module.remove_method(TESTING_BUILD_BLOCK_V1);
+        module
+            .register_async_method(TESTING_BUILD_BLOCK_V1, |params, this, _| async move {
+                let request = parse_testing_build_block_params(&params)?;
+                this.build_block_v1(request).await.map_err(Into::into)
+            })
+            .expect("testing_buildBlockV1 method should be replaceable");
+        module
+    }
+}
+
+fn parse_testing_build_block_params(
+    params: &Params<'static>,
+) -> Result<TestingBuildBlockRequestV1, jsonrpsee::types::ErrorObjectOwned> {
+    params
+        .one::<TestingBuildBlockRequestV1>()
+        .or_else(|_| params.parse::<TestingBuildBlockRequestV1>())
 }
 
 impl<Eth, Evm> TestingApi<Eth, Evm>

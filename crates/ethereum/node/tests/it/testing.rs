@@ -2,7 +2,10 @@
 
 use alloy_primitives::{Address, B256};
 use alloy_rpc_types_engine::ExecutionPayloadEnvelopeV4;
-use jsonrpsee_core::client::ClientT;
+use jsonrpsee::{
+    core::{client::ClientT, traits::ToRpcParams},
+    types::Request,
+};
 use reth_db::test_utils::create_test_rw_db;
 use reth_ethereum_engine_primitives::EthPayloadAttributes;
 use reth_node_builder::{NodeBuilder, NodeConfig};
@@ -13,10 +16,19 @@ use reth_node_core::{
 use reth_node_ethereum::{node::EthereumAddOns, EthereumNode};
 use reth_rpc_api::TestingBuildBlockRequestV1;
 use reth_rpc_server_types::{RethRpcModule, RpcModuleSelection};
+use serde_json::value::RawValue;
 use reth_tasks::Runtime;
 use std::str::FromStr;
 use tempfile::tempdir;
 use tokio::sync::oneshot;
+
+struct RawRpcParams(Box<RawValue>);
+
+impl ToRpcParams for RawRpcParams {
+    fn to_rpc_params(self) -> Result<Option<Box<RawValue>>, serde_json::Error> {
+        Ok(Some(self.0))
+    }
+}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn testing_rpc_build_block_works() -> eyre::Result<()> {
@@ -34,10 +46,8 @@ async fn testing_rpc_build_block_works() -> eyre::Result<()> {
     let config = NodeConfig::test().with_datadir_args(datadir_args).with_rpc(rpc_args);
     let db = create_test_rw_db();
 
-    let (tx, rx): (
-        oneshot::Sender<eyre::Result<ExecutionPayloadEnvelopeV4>>,
-        oneshot::Receiver<eyre::Result<ExecutionPayloadEnvelopeV4>>,
-    ) = oneshot::channel();
+    let (tx, rx): (oneshot::Sender<eyre::Result<()>>, oneshot::Receiver<eyre::Result<()>>) =
+        oneshot::channel();
 
     let builder = NodeBuilder::new(config)
         .with_database(db)
@@ -67,8 +77,25 @@ async fn testing_rpc_build_block_works() -> eyre::Result<()> {
             };
 
             tokio::spawn(async move {
-                let res: eyre::Result<ExecutionPayloadEnvelopeV4> =
-                    client.request("testing_buildBlockV1", [request]).await.map_err(Into::into);
+                let res: eyre::Result<()> = async move {
+                    let _: ExecutionPayloadEnvelopeV4 =
+                        client.request("testing_buildBlockV1", [request.clone()]).await?;
+
+                    let raw_request = format!(
+                        r#"{{"jsonrpc":"2.0","id":1,"method":"testing_buildBlockV1","params":[{parent_hash},{payload_attributes},[],"0x"]}}"#,
+                        parent_hash = serde_json::to_string(&request.parent_block_hash)?,
+                        payload_attributes =
+                            serde_json::to_string(&request.payload_attributes)?,
+                    );
+                    let req: Request<'_> = serde_json::from_str(&raw_request)?;
+                    let params =
+                        RawRpcParams(RawValue::from_string(req.params.unwrap().to_string()).unwrap());
+                    let _: ExecutionPayloadEnvelopeV4 =
+                        client.request("testing_buildBlockV1", params).await?;
+
+                    Ok(())
+                }
+                .await;
                 let _ = tx.send(res);
             });
 
