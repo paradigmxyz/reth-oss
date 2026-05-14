@@ -357,8 +357,9 @@ where
                 })
             })?;
 
-            let bal=executor.take_bal().unwrap_or_default();
-           let bal_hash = alloy_eip7928::compute_block_access_list_hash(&bal);
+            let bal = alloy_eip7928::bal::Bal::from(executor.take_bal().unwrap_or_default());
+            bal.validate_gas_limit(block.header().gas_limit())?;
+            let bal_hash = alloy_eip7928::compute_block_access_list_hash(&bal);
 
             if let Err(err) =
                 self.consensus.validate_block_post_execution(&block, &result, None, Some(bal_hash))
