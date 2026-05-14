@@ -357,8 +357,11 @@ where
                 })
             })?;
 
+            let bal=executor.take_bal().unwrap_or_default();
+           let bal_hash = alloy_eip7928::compute_block_access_list_hash(&bal);
+
             if let Err(err) =
-                self.consensus.validate_block_post_execution(&block, &result, None, None)
+                self.consensus.validate_block_post_execution(&block, &result, None, Some(bal_hash))
             {
                 return Err(StageError::Block {
                     block: Box::new(block.block_with_parent()),
