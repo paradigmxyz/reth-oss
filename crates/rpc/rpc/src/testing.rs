@@ -35,7 +35,7 @@ use reth_primitives_traits::{
 };
 use reth_revm::{database::StateProviderDatabase, db::State};
 use reth_rpc_api::{TestingApiServer, TestingBuildBlockRequestV1};
-use reth_rpc_eth_api::{helpers::Call, FromEthApiError, RpcNodeCore};
+use reth_rpc_eth_api::{helpers::Call, FromEthApiError};
 use reth_rpc_eth_types::EthApiError;
 use reth_storage_api::{BlockReader, HeaderProvider};
 use reth_transaction_pool::{PoolTransaction, TransactionPool};
