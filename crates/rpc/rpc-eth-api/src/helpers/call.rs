@@ -13,7 +13,6 @@ use alloy_evm::overrides::{apply_block_overrides, apply_state_overrides, Overrid
 use alloy_network::TransactionBuilder;
 use alloy_primitives::{Bytes, B256, U256};
 use alloy_rpc_types_eth::{
-    simulate::{SimBlock, SimulatePayload, SimulatedBlock},
     state::{EvmOverrides, StateOverride},
     BlockId, Bundle, EthCallResponse, StateContext, TransactionInfo,
 };
@@ -34,10 +33,10 @@ use reth_rpc_convert::{RpcConvert, RpcTxReq};
 use reth_rpc_eth_types::{
     cache::db::StateProviderTraitObjWrapper,
     error::{AsEthApiError, FromEthApiError},
-    simulate::{self, EthSimulateError},
+    simulate::{self, EthSimulateError, SimBlock, SimulatePayload, SimulatedBlock},
     EthApiError, StateCacheDb,
 };
-use reth_storage_api::{BlockIdReader, ProviderTx, StateProviderBox};
+use reth_storage_api::{noop::NoopProvider, BlockIdReader, ProviderTx, StateProviderBox};
 use revm::{
     context::Block,
     context_interface::{result::ResultAndState, Transaction},
@@ -83,6 +82,7 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                 trace_transfers,
                 validation,
                 return_full_transactions,
+                return_state_root,
             } = payload;
 
             if block_state_calls.is_empty() {
@@ -92,6 +92,8 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
             let base_block =
                 self.recovered_block(block).await?.ok_or(EthApiError::HeaderNotFound(block))?;
             let mut parent = base_block.sealed_header().clone();
+            let state_root_provider =
+                if return_state_root { Some(self.state_at_block_id(block).await?) } else { None };
 
             self.spawn_with_state_at_block(block, move |this, mut db| {
                 let mut blocks: Vec<SimulatedBlock<RpcBlock<Self::NetworkTypes>>> =
@@ -234,11 +236,19 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                             .map_err(|e| Self::Error::from_eth_err(EthApiError::other(e)))?;
                         }
 
+                        let noop_provider = NoopProvider::default();
+                        let state_provider: &dyn reth_storage_api::StateProvider =
+                            match state_root_provider.as_deref() {
+                                Some(provider) => provider,
+                                None => &noop_provider,
+                            };
+
                         simulate::execute_transactions(
                             builder,
                             calls,
                             default_gas_limit,
                             chain_id,
+                            state_provider,
                             this.converter(),
                         )
                         .map_err(map_err)?
@@ -254,11 +264,19 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                             .map_err(|e| Self::Error::from_eth_err(EthApiError::other(e)))?;
                         }
 
+                        let noop_provider = NoopProvider::default();
+                        let state_provider: &dyn reth_storage_api::StateProvider =
+                            match state_root_provider.as_deref() {
+                                Some(provider) => provider,
+                                None => &noop_provider,
+                            };
+
                         simulate::execute_transactions(
                             builder,
                             calls,
                             default_gas_limit,
                             chain_id,
+                            state_provider,
                             this.converter(),
                         )
                         .map_err(map_err)?

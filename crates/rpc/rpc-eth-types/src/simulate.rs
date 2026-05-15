@@ -8,11 +8,8 @@ use alloy_consensus::{transaction::TxHashRef, BlockHeader, Transaction as _};
 use alloy_eips::eip2718::WithEncoded;
 use alloy_evm::{block::TxResult, precompiles::PrecompilesMap};
 use alloy_network::{NetworkTransactionBuilder, TransactionBuilder};
-use alloy_rpc_types_eth::{
-    simulate::{SimCallResult, SimulateError, SimulatedBlock},
-    state::StateOverride,
-    BlockTransactionsKind,
-};
+pub use alloy_rpc_types_eth::simulate::{SimBlock, SimCallResult, SimulateError};
+use alloy_rpc_types_eth::{state::StateOverride, BlockOverrides, BlockTransactionsKind};
 use jsonrpsee_types::ErrorObject;
 use reth_evm::{
     execute::{BlockBuilder, BlockBuilderOutcome, BlockExecutor},
@@ -21,7 +18,7 @@ use reth_evm::{
 use reth_primitives_traits::{BlockBody as _, BlockTy, NodePrimitives, Recovered, RecoveredBlock};
 use reth_rpc_convert::{RpcBlock, RpcConvert, RpcTxReq};
 use reth_rpc_server_types::result::rpc_err;
-use reth_storage_api::noop::NoopProvider;
+use reth_storage_api::StateProvider;
 use revm::{
     context::Block,
     context_interface::result::ExecutionResult,
@@ -131,6 +128,91 @@ impl ToRpcError for EthSimulateError {
     }
 }
 
+/// Result of simulating a block.
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SimulatedBlock<B = alloy_rpc_types_eth::Block> {
+    /// The simulated block.
+    #[serde(flatten)]
+    pub inner: B,
+    /// Results for each call in the block.
+    pub calls: Vec<SimCallResult>,
+}
+
+/// Payload for `eth_simulateV1`.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(
+    rename_all = "camelCase",
+    bound(deserialize = "TxReq: serde::Deserialize<'de>", serialize = "TxReq: serde::Serialize")
+)]
+pub struct SimulatePayload<TxReq = alloy_rpc_types_eth::TransactionRequest> {
+    /// Array of block state calls to execute.
+    #[serde(default)]
+    pub block_state_calls: Vec<SimBlock<TxReq>>,
+    /// Whether to trace ERC20/ERC721 token transfers within transactions.
+    #[serde(default)]
+    pub trace_transfers: bool,
+    /// Whether to validate transaction sequence in the blocks.
+    #[serde(default)]
+    pub validation: bool,
+    /// Whether to return full transaction objects instead of hashes.
+    #[serde(default)]
+    pub return_full_transactions: bool,
+    /// Whether to compute and return the post-simulation state root for each block.
+    #[serde(default)]
+    pub return_state_root: bool,
+}
+
+impl<TxReq> Default for SimulatePayload<TxReq> {
+    fn default() -> Self {
+        Self {
+            block_state_calls: Vec::new(),
+            trace_transfers: false,
+            validation: false,
+            return_full_transactions: false,
+            return_state_root: false,
+        }
+    }
+}
+
+impl<TxReq> SimulatePayload<TxReq> {
+    /// Adds a block to the simulation payload.
+    pub fn extend(mut self, block: SimBlock<TxReq>) -> Self {
+        self.block_state_calls.push(block);
+        self
+    }
+
+    /// Adds multiple blocks to the simulation payload.
+    pub fn extend_blocks(mut self, blocks: impl IntoIterator<Item = SimBlock<TxReq>>) -> Self {
+        self.block_state_calls.extend(blocks);
+        self
+    }
+
+    /// Enables tracing of token transfers.
+    pub const fn with_trace_transfers(mut self) -> Self {
+        self.trace_transfers = true;
+        self
+    }
+
+    /// Enables validation of the transaction sequence.
+    pub const fn with_validation(mut self) -> Self {
+        self.validation = true;
+        self
+    }
+
+    /// Enables returning full transactions.
+    pub const fn with_full_transactions(mut self) -> Self {
+        self.return_full_transactions = true;
+        self
+    }
+
+    /// Enables state root computation for simulated blocks.
+    pub const fn with_state_root(mut self) -> Self {
+        self.return_state_root = true;
+        self
+    }
+}
+
 /// Applies precompile move overrides from state overrides to the EVM's precompiles map.
 ///
 /// This function processes `movePrecompileToAddress` entries from the state overrides and
@@ -168,6 +250,7 @@ pub fn execute_transactions<S, T>(
     calls: Vec<RpcTxReq<T::Network>>,
     default_gas_limit: u64,
     chain_id: u64,
+    state_provider: &dyn StateProvider,
     converter: &T,
 ) -> Result<
     (
@@ -203,8 +286,7 @@ where
         })?;
     }
 
-    // Pass noop provider to skip state root calculations.
-    let result = builder.finish(NoopProvider::default(), None)?;
+    let result = builder.finish(state_provider, None)?;
 
     Ok((result, results))
 }
