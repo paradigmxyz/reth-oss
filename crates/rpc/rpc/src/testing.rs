@@ -158,10 +158,13 @@ where
                     })
                     .or(Err(EthApiError::InvalidTransactionSignature))?
                 };
+                let allow_skip_invalid_transactions = skip_invalid_transactions &&
+                    !use_pool_transactions &&
+                    request.transactions.is_empty();
 
                 for (idx, tx) in recovered_txs.into_iter().enumerate() {
                     let signer = tx.signer();
-                    if skip_invalid_transactions && invalid_senders.contains(&signer) {
+                    if allow_skip_invalid_transactions && invalid_senders.contains(&signer) {
                         continue;
                     }
 
@@ -174,7 +177,7 @@ where
                             withdrawals_rlp_length +
                             1024;
                         if estimated_block_size > MAX_RLP_BLOCK_SIZE {
-                            if skip_invalid_transactions {
+                            if allow_skip_invalid_transactions {
                                 debug!(
                                     target: "rpc::testing",
                                     tx_idx = idx,
@@ -199,7 +202,7 @@ where
                     let gas_used = match builder.execute_transaction(tx) {
                         Ok(gas_used) => gas_used.tx_gas_used(),
                         Err(err) => {
-                            if skip_invalid_transactions && !use_pool_transactions {
+                            if allow_skip_invalid_transactions {
                                 debug!(
                                     target: "rpc::testing",
                                     tx_idx = idx,
