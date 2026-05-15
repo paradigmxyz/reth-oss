@@ -52,12 +52,20 @@ pub struct TestingApi<Eth, Evm> {
     desired_gas_limit: u64,
     /// If true, skip invalid transactions instead of failing.
     skip_invalid_transactions: bool,
+    /// If set, override the block gas limit in `testing_buildBlockV1`.
+    gas_limit_override: Option<u64>,
 }
 
 impl<Eth, Evm> TestingApi<Eth, Evm> {
     /// Create a new testing API handler.
     pub const fn new(eth_api: Eth, evm_config: Evm, desired_gas_limit: u64) -> Self {
-        Self { eth_api, evm_config, desired_gas_limit, skip_invalid_transactions: false }
+        Self {
+            eth_api,
+            evm_config,
+            desired_gas_limit,
+            skip_invalid_transactions: false,
+            gas_limit_override: None,
+        }
     }
 
     /// Enable skipping invalid transactions instead of failing.
@@ -68,9 +76,9 @@ impl<Eth, Evm> TestingApi<Eth, Evm> {
         self
     }
 
-    /// Override the desired gas limit used by `testing_buildBlockV1`.
-    pub const fn with_gas_limit_override(mut self, desired_gas_limit: u64) -> Self {
-        self.desired_gas_limit = desired_gas_limit;
+    /// Override the gas limit used by `testing_buildBlockV1`.
+    pub const fn with_gas_limit_override(mut self, gas_limit: u64) -> Self {
+        self.gas_limit_override = Some(gas_limit);
         self
     }
 }
@@ -90,6 +98,7 @@ where
         let evm_config = self.evm_config.clone();
         let skip_invalid_transactions = self.skip_invalid_transactions;
         let desired_gas_limit = self.desired_gas_limit;
+        let gas_limit_override = self.gas_limit_override;
         self.eth_api
             .spawn_with_state_at_block(request.parent_block_hash, move |eth_api, state| {
                 let state = state.database.0;
@@ -115,7 +124,9 @@ where
                     timestamp: request.payload_attributes.timestamp,
                     suggested_fee_recipient: request.payload_attributes.suggested_fee_recipient,
                     prev_randao: request.payload_attributes.prev_randao,
-                    gas_limit: calculate_block_gas_limit(parent.gas_limit(), desired_gas_limit),
+                    gas_limit: gas_limit_override.unwrap_or_else(|| {
+                        calculate_block_gas_limit(parent.gas_limit(), desired_gas_limit)
+                    }),
                     parent_beacon_block_root: request.payload_attributes.parent_beacon_block_root,
                     withdrawals: withdrawals.map(Into::into),
                     extra_data: request.extra_data.unwrap_or_default(),

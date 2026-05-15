@@ -648,11 +648,11 @@ pub struct RpcServerArgs {
     #[arg(long = "testing.skip-invalid-transactions", default_value_t = true)]
     pub testing_skip_invalid_transactions: bool,
 
-    /// Override the desired gas limit used by `testing_buildBlockV1`.
+    /// Override the gas limit used by `testing_buildBlockV1`.
     ///
-    /// When set, `testing_buildBlockV1` will move toward this value within the allowed
-    /// parent/child gas limit bounds. Accepts short notation: K for thousand, M for million,
-    /// G for billion (e.g., 1G = 1 billion).
+    /// When set, `testing_buildBlockV1` will use this exact value instead of moving toward the
+    /// payload builder's configured gas limit. Accepts short notation: K for thousand, M for
+    /// million, G for billion (e.g., 1G = 1 billion).
     #[arg(long = "testing.gas-limit", value_name = "GAS_LIMIT", hide = true)]
     pub testing_gas_limit: Option<u64>,
 
