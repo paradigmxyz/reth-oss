@@ -13,6 +13,7 @@ use alloy_evm::overrides::{apply_block_overrides, apply_state_overrides, Overrid
 use alloy_network::TransactionBuilder;
 use alloy_primitives::{Bytes, B256, U256};
 use alloy_rpc_types_eth::{
+    simulate::{SimBlock, SimulatePayload, SimulatedBlock},
     state::{EvmOverrides, StateOverride},
     BlockId, Bundle, EthCallResponse, StateContext, TransactionInfo,
 };
@@ -33,7 +34,7 @@ use reth_rpc_convert::{RpcConvert, RpcTxReq};
 use reth_rpc_eth_types::{
     cache::db::StateProviderTraitObjWrapper,
     error::{AsEthApiError, FromEthApiError},
-    simulate::{self, EthSimulateError, SimBlock, SimulatePayload, SimulatedBlock},
+    simulate::{self, EthSimulateError},
     EthApiError, StateCacheDb,
 };
 use reth_storage_api::{noop::NoopProvider, BlockIdReader, ProviderTx, StateProviderBox};
@@ -82,7 +83,6 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                 trace_transfers,
                 validation,
                 return_full_transactions,
-                return_state_root,
             } = payload;
 
             if block_state_calls.is_empty() {
@@ -92,8 +92,11 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
             let base_block =
                 self.recovered_block(block).await?.ok_or(EthApiError::HeaderNotFound(block))?;
             let mut parent = base_block.sealed_header().clone();
-            let state_root_provider =
-                if return_state_root { Some(self.state_at_block_id(block).await?) } else { None };
+            let state_root_provider = if self.compute_state_root_for_eth_simulate() {
+                Some(self.state_at_block_id(block).await?)
+            } else {
+                None
+            };
 
             self.spawn_with_state_at_block(block, move |this, mut db| {
                 let mut blocks: Vec<SimulatedBlock<RpcBlock<Self::NetworkTypes>>> =
@@ -571,6 +574,9 @@ pub trait Call:
 
     /// Returns the maximum number of blocks accepted for `eth_simulateV1`.
     fn max_simulate_blocks(&self) -> u64;
+
+    /// Returns whether `eth_simulateV1` computes the post-state root for simulated blocks.
+    fn compute_state_root_for_eth_simulate(&self) -> bool;
 
     /// Returns the maximum memory the EVM can allocate per RPC request.
     fn evm_memory_limit(&self) -> u64;
