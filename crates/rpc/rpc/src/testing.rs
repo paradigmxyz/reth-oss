@@ -237,13 +237,13 @@ where
         &self,
         parent_block_hash: B256,
         payload_attributes: PayloadAttributes,
-        transactions: Vec<Bytes>,
+        transactions: Option<Vec<Bytes>>,
         extra_data: Option<Bytes>,
     ) -> RpcResult<ExecutionPayloadEnvelopeV5> {
         let request = TestingBuildBlockRequestV1 {
             parent_block_hash,
             payload_attributes,
-            transactions,
+            transactions: transactions.unwrap_or_default(),
             extra_data,
         };
         self.build_block_v1(request).await.map_err(Into::into)

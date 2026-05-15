@@ -35,7 +35,7 @@ pub trait TestingApi {
         &self,
         parent_block_hash: B256,
         payload_attributes: PayloadAttributes,
-        transactions: Vec<Bytes>,
+        transactions: Option<Vec<Bytes>>,
         extra_data: Option<Bytes>,
     ) -> jsonrpsee::core::RpcResult<ExecutionPayloadEnvelopeV5>;
 }
