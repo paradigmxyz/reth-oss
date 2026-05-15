@@ -35,9 +35,10 @@ use reth_primitives_traits::{
 };
 use reth_revm::{database::StateProviderDatabase, db::State};
 use reth_rpc_api::{TestingApiServer, TestingBuildBlockRequestV1};
-use reth_rpc_eth_api::{helpers::Call, FromEthApiError};
+use reth_rpc_eth_api::{helpers::Call, FromEthApiError, RpcNodeCore};
 use reth_rpc_eth_types::EthApiError;
 use reth_storage_api::{BlockReader, HeaderProvider};
+use reth_transaction_pool::{PoolTransaction, TransactionPool};
 use revm::context::Block;
 use revm_primitives::map::DefaultHashBuilder;
 use std::sync::Arc;
@@ -87,6 +88,7 @@ impl<Eth, Evm> TestingApi<Eth, Evm>
 where
     Eth: Call<
         Provider: BlockReader<Header = Header> + ChainSpecProvider<ChainSpec: EthereumHardforks>,
+        Pool: TransactionPool<Transaction: PoolTransaction<Consensus = TxTy<Evm::Primitives>>>,
     >,
     Evm: ConfigureEvm<NextBlockEnvCtx = NextBlockEnvAttributes, Primitives = EthPrimitives>
         + 'static,
@@ -94,6 +96,7 @@ where
     async fn build_block_v1(
         &self,
         request: TestingBuildBlockRequestV1,
+        use_pool_transactions: bool,
     ) -> Result<ExecutionPayloadEnvelopeV5, Eth::Error> {
         let evm_config = self.evm_config.clone();
         let skip_invalid_transactions = self.skip_invalid_transactions;
@@ -145,12 +148,16 @@ where
                 let mut invalid_senders: HashSet<Address, DefaultHashBuilder> = HashSet::default();
                 let mut block_transactions_rlp_length = 0usize;
 
-                // Decode and recover all transactions in parallel
-                let recovered_txs = try_recover_signers(&request.transactions, |tx| {
-                    TxTy::<Evm::Primitives>::decode_2718_exact(tx.as_ref())
-                        .map_err(RecoveryError::from_source)
-                })
-                .or(Err(EthApiError::InvalidTransactionSignature))?;
+                let recovered_txs = if use_pool_transactions {
+                    eth_api.pool().all_transactions().all().collect()
+                } else {
+                    // Decode and recover all transactions in parallel
+                    try_recover_signers(&request.transactions, |tx| {
+                        TxTy::<Evm::Primitives>::decode_2718_exact(tx.as_ref())
+                            .map_err(RecoveryError::from_source)
+                    })
+                    .or(Err(EthApiError::InvalidTransactionSignature))?
+                };
 
                 for (idx, tx) in recovered_txs.into_iter().enumerate() {
                     let signer = tx.signer();
@@ -192,7 +199,7 @@ where
                     let gas_used = match builder.execute_transaction(tx) {
                         Ok(gas_used) => gas_used.tx_gas_used(),
                         Err(err) => {
-                            if skip_invalid_transactions {
+                            if skip_invalid_transactions && !use_pool_transactions {
                                 debug!(
                                     target: "rpc::testing",
                                     tx_idx = idx,
@@ -246,6 +253,7 @@ impl<Eth, Evm> TestingApiServer for TestingApi<Eth, Evm>
 where
     Eth: Call<
         Provider: BlockReader<Header = Header> + ChainSpecProvider<ChainSpec: EthereumHardforks>,
+        Pool: TransactionPool<Transaction: PoolTransaction<Consensus = TxTy<Evm::Primitives>>>,
     >,
     Evm: ConfigureEvm<NextBlockEnvCtx = NextBlockEnvAttributes, Primitives = EthPrimitives>
         + 'static,
@@ -259,12 +267,13 @@ where
         transactions: Option<Vec<Bytes>>,
         extra_data: Option<Bytes>,
     ) -> RpcResult<ExecutionPayloadEnvelopeV5> {
+        let use_pool_transactions = transactions.is_none();
         let request = TestingBuildBlockRequestV1 {
             parent_block_hash,
             payload_attributes,
             transactions: transactions.unwrap_or_default(),
             extra_data,
         };
-        self.build_block_v1(request).await.map_err(Into::into)
+        self.build_block_v1(request, use_pool_transactions).await.map_err(Into::into)
     }
 }
