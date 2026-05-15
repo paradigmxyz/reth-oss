@@ -146,7 +146,7 @@ where
             gas_oracle: None,
             gas_cap: GasCap::default(),
             max_simulate_blocks: DEFAULT_MAX_SIMULATE_BLOCKS,
-            compute_state_root_for_eth_simulate: false,
+            compute_state_root_for_eth_simulate: true,
             eth_proof_window: DEFAULT_ETH_PROOF_WINDOW,
             blocking_task_pool: None,
             fee_history_cache_config: FeeHistoryCacheConfig::default(),

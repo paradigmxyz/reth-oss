@@ -402,7 +402,7 @@ impl Default for DefaultRpcServerArgs {
             rpc_evm_memory_limit: (1 << 32) - 1,
             rpc_tx_fee_cap: constants::DEFAULT_TX_FEE_CAP_WEI,
             rpc_max_simulate_blocks: constants::DEFAULT_MAX_SIMULATE_BLOCKS,
-            rpc_compute_state_root_for_eth_simulate: false,
+            rpc_compute_state_root_for_eth_simulate: true,
             rpc_eth_proof_window: constants::DEFAULT_ETH_PROOF_WINDOW,
             rpc_proof_permits: constants::DEFAULT_PROOF_PERMITS,
             rpc_pending_block: PendingBlockKind::Full,

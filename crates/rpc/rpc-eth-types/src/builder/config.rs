@@ -139,7 +139,7 @@ impl Default for EthConfig {
             max_logs_per_response: DEFAULT_MAX_LOGS_PER_RESPONSE,
             rpc_gas_cap: RPC_DEFAULT_GAS_CAP.into(),
             rpc_max_simulate_blocks: DEFAULT_MAX_SIMULATE_BLOCKS,
-            compute_state_root_for_eth_simulate: false,
+            compute_state_root_for_eth_simulate: true,
             stale_filter_ttl: DEFAULT_STALE_FILTER_TTL,
             fee_history_cache: FeeHistoryCacheConfig::default(),
             proof_permits: DEFAULT_PROOF_PERMITS,
