@@ -540,11 +540,29 @@ async fn prepare_built_block(
     const BUILD_RETRY_INTERVAL: Duration = Duration::from_millis(100);
 
     let request = build_block_request(block, parent_block_hash)?;
+    let TestingBuildBlockRequestV1 {
+        parent_block_hash,
+        payload_attributes,
+        transactions,
+        extra_data,
+    } = request;
     let built_payload: ExecutionPayloadEnvelopeV5 = {
         let mut attempts_remaining = MAX_BUILD_ATTEMPTS;
 
         loop {
-            match block_provider.client().request("testing_buildBlockV1", [request.clone()]).await {
+            match block_provider
+                .client()
+                .request(
+                    "testing_buildBlockV1",
+                    (
+                        parent_block_hash,
+                        payload_attributes.clone(),
+                        transactions.clone(),
+                        extra_data.clone(),
+                    ),
+                )
+                .await
+            {
                 Ok(payload) => break payload,
                 Err(err) if attempts_remaining > 1 && is_retryable_build_block_error(&err) => {
                     warn!(

@@ -5,7 +5,8 @@
 //! disabled by default and never be exposed on public-facing RPC without an
 //! explicit operator flag.
 
-use alloy_rpc_types_engine::ExecutionPayloadEnvelopeV5;
+use alloy_primitives::{Bytes, B256};
+use alloy_rpc_types_engine::{ExecutionPayloadEnvelopeV5, PayloadAttributes};
 use jsonrpsee::proc_macros::rpc;
 
 pub use alloy_rpc_types_engine::{TestingBuildBlockRequestV1, TESTING_BUILD_BLOCK_V1};
@@ -32,6 +33,9 @@ pub trait TestingApi {
     #[method(name = "buildBlockV1")]
     async fn build_block_v1(
         &self,
-        request: TestingBuildBlockRequestV1,
+        parent_block_hash: B256,
+        payload_attributes: PayloadAttributes,
+        transactions: Vec<Bytes>,
+        extra_data: Option<Bytes>,
     ) -> jsonrpsee::core::RpcResult<ExecutionPayloadEnvelopeV5>;
 }
