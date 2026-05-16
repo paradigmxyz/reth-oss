@@ -1,5 +1,5 @@
 use crate::utils::eth_payload_attributes;
-use alloy_primitives::{Address, U256};
+use alloy_primitives::{Address, B256, U256};
 use alloy_provider::{network::EthereumWallet, Provider, ProviderBuilder};
 use alloy_rpc_types_eth::{
     simulate::{SimBlock, SimulatePayload, SimulatedBlock},
@@ -77,6 +77,11 @@ async fn test_simulate_v1_with_max_fee_per_blob_gas_only() -> eyre::Result<()> {
     assert!(call.status, "expected call to succeed");
     assert!(call.error.is_none(), "expected no error");
     assert_eq!(call.max_used_gas, Some(call.gas_used), "expected maxUsedGas in call result");
+    assert_eq!(result[0].inner.header.parent_beacon_block_root, Some(B256::ZERO));
+    assert_eq!(
+        result[0].inner.header.state_root,
+        "0xa71c9323ee8ea101844ff13303d5a75dda6be0900d6bd6771695822747822e93".parse::<B256>()?
+    );
 
     Ok(())
 }
