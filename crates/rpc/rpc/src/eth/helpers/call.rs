@@ -3,7 +3,7 @@
 use crate::EthApi;
 use reth_rpc_convert::RpcConvert;
 use reth_rpc_eth_api::{
-    helpers::{estimate::EstimateCall, Call, EthCall},
+    helpers::{call::SimulateBlockEnv, estimate::EstimateCall, Call, EthCall},
     FromEvmError, RpcNodeCore,
 };
 use reth_rpc_eth_types::EthApiError;
@@ -11,6 +11,7 @@ use reth_rpc_eth_types::EthApiError;
 impl<N, Rpc> EthCall for EthApi<N, Rpc>
 where
     N: RpcNodeCore,
+    <N::Evm as reth_evm::ConfigureEvm>::NextBlockEnvCtx: SimulateBlockEnv,
     EthApiError: FromEvmError<N::Evm>,
     Rpc: RpcConvert<Primitives = N::Primitives, Error = EthApiError, Evm = N::Evm>,
 {
