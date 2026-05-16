@@ -1,6 +1,8 @@
 //! Loads a pending block from database. Helper trait for `eth_` transaction, call and trace RPC
 //! methods.
 
+use std::collections::BTreeMap;
+
 use core::fmt;
 
 use super::{LoadBlock, LoadPendingBlock, LoadState, LoadTransaction, SpawnBlocking, Trace};
@@ -15,9 +17,10 @@ use alloy_primitives::{Bytes, B256, U256};
 use alloy_rpc_types_eth::{
     simulate::{SimBlock, SimulatePayload, SimulatedBlock},
     state::{EvmOverrides, StateOverride},
-    BlockId, Bundle, EthCallResponse, StateContext, TransactionInfo,
+    BlockId, BlockOverrides, Bundle, EthCallResponse, StateContext, TransactionInfo,
 };
 use futures::Future;
+use reth_chainspec::{ChainSpecProvider, EthereumHardforks};
 use reth_errors::{ProviderError, RethError};
 use reth_evm::{
     block::BlockExecutor, env::BlockEnvironment, execute::BlockBuilder, ConfigureEvm, Evm,
@@ -48,6 +51,64 @@ use tracing::{trace, warn};
 
 /// Result type for `eth_simulateV1` RPC method.
 pub type SimulatedBlocksResult<N, E> = Result<Vec<SimulatedBlock<RpcBlock<N>>>, E>;
+
+fn sanitize_simulate_blocks<TxReq>(
+    blocks: Vec<SimBlock<TxReq>>,
+    base_number: u64,
+    base_timestamp: u64,
+    max_blocks: u64,
+) -> Result<Vec<SimBlock<TxReq>>, EthSimulateError> {
+    let mut sanitized = Vec::with_capacity(blocks.len());
+    let mut prev_number = base_number;
+    let mut prev_timestamp = base_timestamp;
+
+    for mut block in blocks {
+        let overrides = block.block_overrides.get_or_insert_with(Default::default);
+        let number = overrides
+            .number
+            .map(|number| number.try_into().unwrap_or(u64::MAX))
+            .unwrap_or_else(|| prev_number.saturating_add(1));
+        overrides.number = Some(U256::from(number));
+
+        if number <= prev_number {
+            return Err(EthSimulateError::BlockNumberInvalid { got: number, parent: prev_number })
+        }
+        if number.saturating_sub(base_number) > max_blocks {
+            return Err(EthSimulateError::TooManyBlocks)
+        }
+
+        for gap_number in prev_number + 1..number {
+            prev_timestamp = prev_timestamp.saturating_add(12);
+            sanitized.push(SimBlock {
+                block_overrides: Some(BlockOverrides {
+                    number: Some(U256::from(gap_number)),
+                    time: Some(prev_timestamp),
+                    ..Default::default()
+                }),
+                state_overrides: None,
+                calls: Vec::new(),
+            });
+        }
+
+        let timestamp = match overrides.time {
+            Some(timestamp) if timestamp <= prev_timestamp => {
+                return Err(EthSimulateError::BlockTimestampInvalid {
+                    got: timestamp,
+                    parent: prev_timestamp,
+                })
+            }
+            Some(timestamp) => timestamp,
+            None => prev_timestamp.saturating_add(12),
+        };
+        overrides.time = Some(timestamp);
+
+        prev_number = number;
+        prev_timestamp = timestamp;
+        sanitized.push(block);
+    }
+
+    Ok(sanitized)
+}
 
 /// Execution related functions for the [`EthApiServer`](crate::EthApiServer) trait in
 /// the `eth_` namespace.
@@ -92,6 +153,13 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
             let base_block =
                 self.recovered_block(block).await?.ok_or(EthApiError::HeaderNotFound(block))?;
             let base_block_id = BlockId::Hash(base_block.hash().into());
+            let block_state_calls = sanitize_simulate_blocks(
+                block_state_calls,
+                base_block.number(),
+                base_block.timestamp(),
+                self.max_simulate_blocks(),
+            )
+            .map_err(EthApiError::other)?;
             let mut parent = base_block.sealed_header().clone();
             let state_root_provider = if self.compute_state_root_for_eth_simulate() {
                 Some(self.state_at_block_id(base_block_id).await?)
@@ -133,7 +201,22 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                         .into());
                     }
 
-                    let attributes = this.next_env_attributes(&parent)?;
+                    let SimBlock { block_overrides, state_overrides, calls } = block;
+
+                    let mut attributes = this.next_env_attributes(&parent)?;
+                    let block_timestamp = block_overrides
+                        .as_ref()
+                        .and_then(|overrides| overrides.time)
+                        .unwrap_or(attributes.timestamp);
+                    attributes.parent_beacon_block_root = block_overrides
+                        .as_ref()
+                        .and_then(|overrides| overrides.beacon_root)
+                        .or_else(|| {
+                            this.provider()
+                                .chain_spec()
+                                .is_cancun_active_at_timestamp(block_timestamp)
+                                .then_some(B256::ZERO)
+                        });
 
                     let mut evm_env = this
                         .evm_config()
@@ -152,8 +235,6 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                         evm_env.cfg_env.tx_gas_limit_cap = Some(u64::MAX);
                         evm_env.block_env.inner_mut().basefee = 0;
                     }
-
-                    let SimBlock { block_overrides, state_overrides, calls } = block;
 
                     // Set prevrandao to zero for simulated blocks by default,
                     // matching spec behavior where MixDigest is zero-initialized.
@@ -288,6 +369,8 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                     };
 
                     parent = result.block.clone_sealed_header();
+
+                    db.override_block_hashes(BTreeMap::from([(parent.number(), parent.hash())]));
 
                     // Update tracking for next iteration's validation
                     prev_block_number = parent.number();
