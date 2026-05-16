@@ -147,9 +147,17 @@ impl<N: NetworkPrimitives> ProtocolMessage<N> {
                 EthMessage::GetPooledTransactions(RequestPair::decode(buf)?)
             }
             EthMessageID::PooledTransactions => {
-                EthMessage::PooledTransactions(RequestPair::decode_with(buf, |buf| {
-                    PooledTransactions::decode_with_memory_budget(buf, tx_memory_budget)
-                })?)
+                if version >= EthVersion::Eth72 {
+                    let response = RequestPair::decode_with(buf, |buf| {
+                        PooledTransactions::decode_eth72_with_memory_budget(buf, tx_memory_budget)
+                    })?;
+                    EthMessage::PooledTransactions72(response)
+                } else {
+                    let response = RequestPair::decode_with(buf, |buf| {
+                        PooledTransactions::decode_with_memory_budget(buf, tx_memory_budget)
+                    })?;
+                    EthMessage::PooledTransactions(response)
+                }
             }
             EthMessageID::GetNodeData => {
                 if version >= EthVersion::Eth67 {
@@ -515,9 +523,12 @@ impl<N: NetworkPrimitives> Encodable for EthMessage<N> {
             Self::GetBlockBodies(request) => request.encode(out),
             Self::BlockBodies(bodies) => bodies.encode(out),
             Self::GetPooledTransactions(request) => request.encode(out),
-            Self::PooledTransactions(transactions) | Self::PooledTransactions72(transactions) => {
-                transactions.encode(out)
-            }
+            Self::PooledTransactions(transactions) => transactions.encode(out),
+            Self::PooledTransactions72(transactions) => encode_request_pair_pooled_eth72(
+                transactions.request_id,
+                &transactions.message,
+                out,
+            ),
             Self::GetNodeData(request) => request.encode(out),
             Self::NodeData(data) => data.encode(out),
             Self::GetReceipts(request) => request.encode(out),
@@ -546,8 +557,9 @@ impl<N: NetworkPrimitives> Encodable for EthMessage<N> {
             Self::GetBlockBodies(request) => request.length(),
             Self::BlockBodies(bodies) => bodies.length(),
             Self::GetPooledTransactions(request) => request.length(),
-            Self::PooledTransactions(transactions) | Self::PooledTransactions72(transactions) => {
-                transactions.length()
+            Self::PooledTransactions(transactions) => transactions.length(),
+            Self::PooledTransactions72(transactions) => {
+                request_pair_pooled_eth72_length(transactions.request_id, &transactions.message)
             }
             Self::GetNodeData(request) => request.length(),
             Self::NodeData(data) => data.length(),
@@ -564,6 +576,27 @@ impl<N: NetworkPrimitives> Encodable for EthMessage<N> {
             Self::Other(unknown) => unknown.length(),
         }
     }
+}
+
+fn encode_request_pair_pooled_eth72<T: alloy_eips::eip2718::Encodable2718>(
+    request_id: u64,
+    message: &PooledTransactions<T>,
+    out: &mut dyn BufMut,
+) {
+    let message_length = message.length_eth72();
+    let payload_length = request_id.length() + message_length;
+
+    Header { list: true, payload_length }.encode(out);
+    request_id.encode(out);
+    message.encode_eth72(out);
+}
+
+fn request_pair_pooled_eth72_length<T: alloy_eips::eip2718::Encodable2718>(
+    request_id: u64,
+    message: &PooledTransactions<T>,
+) -> usize {
+    let payload_length = request_id.length() + message.length_eth72();
+    Header { list: true, payload_length }.length() + payload_length
 }
 
 /// Represents broadcast messages of [`EthMessage`] with the same object that can be sent to

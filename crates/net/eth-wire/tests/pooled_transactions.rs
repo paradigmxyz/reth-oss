@@ -1,8 +1,8 @@
 //! Decoding tests for [`PooledTransactions`]
 
-use alloy_eips::eip2718::Decodable2718;
+use alloy_eips::eip2718::{Decodable2718, Encodable2718};
 use alloy_primitives::hex;
-use alloy_rlp::{Decodable, Encodable};
+use alloy_rlp::{Decodable, Encodable, Header};
 use reth_eth_wire::{EthNetworkPrimitives, EthVersion, PooledTransactions, ProtocolMessage};
 use std::{fs, path::PathBuf};
 use test_fuzz::test_fuzz;
@@ -78,4 +78,59 @@ fn decode_blob_rpc_transaction() {
     let data = fs::read_to_string(network_data_path).expect("Unable to read file");
     let hex_data = hex::decode(data.trim()).unwrap();
     let _txs = PreOsakaPooledTransaction::decode_2718(&mut hex_data.as_ref()).unwrap();
+}
+
+#[test]
+fn encode_eth72_pooled_transactions_elides_blob_payloads() {
+    let network_data_path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("testdata/rpc_blob_transaction");
+    let data = fs::read_to_string(network_data_path).expect("Unable to read file");
+    let hex_data = hex::decode(data.trim()).unwrap();
+    let tx = PreOsakaPooledTransaction::decode_2718(&mut hex_data.as_ref()).unwrap();
+
+    let mut normal_tx = Vec::new();
+    tx.encode_2718(&mut normal_tx);
+
+    let mut eth72 = Vec::new();
+    PooledTransactions(vec![tx]).encode_eth72(&mut eth72);
+
+    let eth72_tx = single_pooled_transaction_payload(&eth72);
+    let normal_sidecar = eip4844_sidecar_payload(&normal_tx);
+    let eth72_sidecar = eip4844_sidecar_payload(eth72_tx);
+    let normal_blobs_len = rlp_item_length(normal_sidecar);
+
+    assert_eq!(eth72_sidecar[0], alloy_rlp::EMPTY_STRING_CODE);
+    assert_eq!(&normal_sidecar[normal_blobs_len..], &eth72_sidecar[1..]);
+
+    let decoded = PooledTransactions::<PreOsakaPooledTransaction>::decode_eth72_with_memory_budget(
+        &mut &eth72[..],
+        usize::MAX,
+    );
+    assert!(decoded.is_ok());
+}
+
+fn single_pooled_transaction_payload(encoded: &[u8]) -> &[u8] {
+    let mut payload = encoded;
+    let header = Header::decode(&mut payload).unwrap();
+    assert!(header.list);
+    payload
+}
+
+fn eip4844_sidecar_payload(encoded_tx: &[u8]) -> &[u8] {
+    assert_eq!(encoded_tx[0], 0x03);
+    let mut payload = &encoded_tx[1..];
+    let header = Header::decode(&mut payload).unwrap();
+    assert!(header.list);
+    let signed_tx_len = rlp_item_length(payload);
+    &payload[signed_tx_len..]
+}
+
+fn rlp_item_length(buf: &[u8]) -> usize {
+    if buf[0] <= 0x7f {
+        return 1
+    }
+
+    let mut tmp = buf;
+    let header = Header::decode(&mut tmp).unwrap();
+    header.length() + header.payload_length
 }

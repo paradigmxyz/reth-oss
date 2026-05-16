@@ -5,7 +5,9 @@ use alloc::vec::Vec;
 use alloy_consensus::transaction::PooledTransaction;
 use alloy_eips::{eip2718::Encodable2718, eip7594::Cell};
 use alloy_primitives::{B128, B256};
-use alloy_rlp::{Decodable, RlpDecodable, RlpDecodableWrapper, RlpEncodable, RlpEncodableWrapper};
+use alloy_rlp::{
+    Decodable, Header, RlpDecodable, RlpDecodableWrapper, RlpEncodable, RlpEncodableWrapper,
+};
 use derive_more::{Constructor, Deref, IntoIterator};
 use reth_codecs_derive::add_arbitrary_tests;
 use reth_primitives_traits::InMemorySize;
@@ -80,12 +82,60 @@ impl<T: Decodable + InMemorySize> PooledTransactions<T> {
     ) -> alloy_rlp::Result<Self> {
         decode_list_with_memory_budget(buf, memory_budget).map(Self)
     }
+
+    /// Decodes an eth/72 `PooledTransactions` response.
+    ///
+    /// eth/72 responses may use RLP nil for type 3 transaction blob payloads. Internally, this is
+    /// normalized to an empty blob list so existing pooled transaction types can decode the
+    /// commitments and proofs that remain in the sidecar.
+    pub fn decode_eth72_with_memory_budget(
+        buf: &mut &[u8],
+        memory_budget: usize,
+    ) -> alloy_rlp::Result<Self> {
+        let encoded_len = rlp_item_length(buf).ok_or(alloy_rlp::Error::InputTooShort)?;
+        if encoded_len > buf.len() {
+            return Err(alloy_rlp::Error::InputTooShort)
+        }
+
+        let mut normalized = buf[..encoded_len].to_vec();
+        normalize_eip4844_blob_nil(&mut normalized);
+
+        let decoded = Self::decode_with_memory_budget(&mut &normalized[..], memory_budget)?;
+        *buf = &buf[encoded_len..];
+        Ok(decoded)
+    }
 }
 
 impl<T: Encodable2718> PooledTransactions<T> {
     /// Returns an iterator over the transaction hashes in this response.
     pub fn hashes(&self) -> impl Iterator<Item = B256> + '_ {
         self.iter().map(|tx| tx.trie_hash())
+    }
+
+    /// Encodes an eth/72 `PooledTransactions` response.
+    ///
+    /// EIP-4844 sidecar blob payloads are elided by replacing the sidecar's blob field with RLP
+    /// nil. Commitments and proofs remain encoded as-is.
+    pub fn encode_eth72(&self, out: &mut dyn alloy_rlp::BufMut) {
+        let txs = self.eth72_encoded_transactions();
+        let payload_length = txs.iter().map(Vec::len).sum();
+
+        Header { list: true, payload_length }.encode(out);
+        for tx in txs {
+            out.put_slice(&tx);
+        }
+    }
+
+    /// Returns the length of the eth/72 `PooledTransactions` response.
+    pub fn length_eth72(&self) -> usize {
+        let payload_length: usize =
+            self.0.iter().map(|tx| elide_eip4844_blob_payload(tx.encoded_2718()).len()).sum();
+
+        Header { list: true, payload_length }.length() + payload_length
+    }
+
+    fn eth72_encoded_transactions(&self) -> Vec<Vec<u8>> {
+        self.0.iter().map(|tx| elide_eip4844_blob_payload(tx.encoded_2718())).collect()
     }
 }
 
@@ -110,6 +160,129 @@ impl<T> Default for PooledTransactions<T> {
     fn default() -> Self {
         Self(Default::default())
     }
+}
+
+fn elide_eip4844_blob_payload(mut encoded: Vec<u8>) -> Vec<u8> {
+    if encoded.first() != Some(&0x03) {
+        return encoded
+    }
+
+    let mut payload = &encoded[1..];
+    let Ok(outer_header) = Header::decode(&mut payload) else { return encoded };
+
+    if !outer_header.list {
+        return encoded
+    }
+
+    let outer_header_len = encoded.len() - 1 - payload.len();
+    let payload_start = 1 + outer_header_len;
+    let payload_end = payload_start + outer_header.payload_length;
+    if payload_end > encoded.len() {
+        return encoded
+    }
+
+    let payload = &encoded[payload_start..payload_end];
+    let Some(signed_tx_len) = rlp_item_length(payload) else { return encoded };
+
+    if signed_tx_len >= payload.len() {
+        return encoded
+    }
+
+    let sidecar = &payload[signed_tx_len..];
+    let (prefix_len, blobs) =
+        if sidecar.first() == Some(&0) { (1, &sidecar[1..]) } else { (0, sidecar) };
+
+    let Some(blobs_len) = rlp_item_length(blobs) else { return encoded };
+
+    let remaining_sidecar = &blobs[blobs_len..];
+    let new_payload_length = signed_tx_len + prefix_len + 1 + remaining_sidecar.len();
+    let mut elided = Vec::with_capacity(
+        1 + Header { list: true, payload_length: new_payload_length }.length() + new_payload_length,
+    );
+
+    elided.push(0x03);
+    Header { list: true, payload_length: new_payload_length }.encode(&mut elided);
+    elided.extend_from_slice(&payload[..signed_tx_len]);
+    elided.extend_from_slice(&sidecar[..prefix_len]);
+    elided.push(alloy_rlp::EMPTY_STRING_CODE);
+    elided.extend_from_slice(remaining_sidecar);
+
+    encoded = elided;
+    encoded
+}
+
+fn normalize_eip4844_blob_nil(encoded: &mut [u8]) {
+    let mut payload = &encoded[..];
+    let Ok(header) = Header::decode(&mut payload) else { return };
+    if !header.list {
+        return
+    }
+
+    let header_len = encoded.len() - payload.len();
+    let mut offset = header_len;
+    let end = offset + header.payload_length;
+    while offset < end && offset < encoded.len() {
+        if encoded[offset] <= 0x7f {
+            let tx_type = encoded[offset];
+            let Some(tx_len) = typed_transaction_length(&encoded[offset..]) else { return };
+            if tx_type == 0x03 {
+                normalize_eip4844_transaction_blob_nil(&mut encoded[offset..offset + tx_len]);
+            }
+            offset += tx_len;
+        } else {
+            let Some(tx_len) = rlp_item_length(&encoded[offset..]) else { return };
+            offset += tx_len;
+        }
+    }
+}
+
+fn normalize_eip4844_transaction_blob_nil(encoded_tx: &mut [u8]) {
+    if encoded_tx.first() != Some(&0x03) {
+        return
+    }
+
+    let mut payload = &encoded_tx[1..];
+    let Ok(header) = Header::decode(&mut payload) else { return };
+    if !header.list {
+        return
+    }
+
+    let header_len = encoded_tx.len() - 1 - payload.len();
+    let payload_start = 1 + header_len;
+    let payload_end = payload_start + header.payload_length;
+    if payload_end > encoded_tx.len() {
+        return
+    }
+
+    let payload = &encoded_tx[payload_start..payload_end];
+    let Some(signed_tx_len) = rlp_item_length(payload) else { return };
+    if signed_tx_len >= payload.len() {
+        return
+    }
+
+    let sidecar_offset = payload_start + signed_tx_len;
+    let blobs_offset =
+        if encoded_tx[sidecar_offset] == 0 { sidecar_offset + 1 } else { sidecar_offset };
+    if encoded_tx.get(blobs_offset) == Some(&alloy_rlp::EMPTY_STRING_CODE) {
+        encoded_tx[blobs_offset] = alloy_rlp::EMPTY_LIST_CODE;
+    }
+}
+
+fn typed_transaction_length(buf: &[u8]) -> Option<usize> {
+    let mut payload = &buf[1..];
+    let header = Header::decode(&mut payload).ok()?;
+    Some(1 + header.length() + header.payload_length)
+}
+
+fn rlp_item_length(buf: &[u8]) -> Option<usize> {
+    let first = *buf.first()?;
+    if first <= 0x7f {
+        return Some(1)
+    }
+
+    let mut tmp = buf;
+    let header = Header::decode(&mut tmp).ok()?;
+    Some(header.length() + header.payload_length)
 }
 
 /// A list of transaction hashes and the cell indices requested for each transaction.

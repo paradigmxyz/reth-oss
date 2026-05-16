@@ -291,9 +291,16 @@ impl<N: NetworkPrimitives> PeerResponseResult<N> {
             Self::BlockBodies(resp) => {
                 to_message!(resp, BlockBodies, id)
             }
-            Self::PooledTransactions(resp) | Self::PooledTransactions72(resp) => {
+            Self::PooledTransactions(resp) => {
                 to_message!(resp, PooledTransactions, id)
             }
+            Self::PooledTransactions72(resp) => match resp {
+                Ok(res) => {
+                    let request = RequestPair { request_id: id, message: PooledTransactions(res) };
+                    Ok(EthMessage::PooledTransactions72(request))
+                }
+                Err(err) => Err(err),
+            },
             Self::NodeData(resp) => {
                 to_message!(resp, NodeData, id)
             }
