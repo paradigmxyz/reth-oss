@@ -167,6 +167,8 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
             };
 
             self.spawn_with_state_at_block(base_block_id, move |this, mut db| {
+                db.transition_state = Some(Default::default());
+
                 let mut blocks: Vec<SimulatedBlock<RpcBlock<Self::NetworkTypes>>> =
                     Vec::with_capacity(block_state_calls.len());
 
@@ -249,35 +251,15 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                     let block_gas_limit = evm_env.block_env.gas_limit();
                     let chain_id = evm_env.cfg_env.chain_id;
 
-                    let default_gas_limit = {
-                        let total_specified_gas =
-                            calls.iter().filter_map(|tx| tx.as_ref().gas_limit()).sum::<u64>();
-                        let txs_without_gas_limit =
-                            calls.iter().filter(|tx| tx.as_ref().gas_limit().is_none()).count();
+                    let total_specified_gas =
+                        calls.iter().filter_map(|tx| tx.as_ref().gas_limit()).sum::<u64>();
 
-                        if total_specified_gas > block_gas_limit {
-                            return Err(EthApiError::Other(Box::new(
-                                EthSimulateError::BlockGasLimitExceeded,
-                            ))
-                            .into())
-                        }
-
-                        if txs_without_gas_limit > 0 {
-                            // Per spec: "gasLimit: blockGasLimit - soFarUsedGasInBlock"
-                            // Divide remaining gas equally among transactions without gas
-                            let gas_per_tx = (block_gas_limit - total_specified_gas) /
-                                txs_without_gas_limit as u64;
-                            // Cap to RPC gas limit, matching spec behavior
-                            let call_gas_limit = this.call_gas_limit();
-                            if call_gas_limit > 0 {
-                                gas_per_tx.min(call_gas_limit)
-                            } else {
-                                gas_per_tx
-                            }
-                        } else {
-                            0
-                        }
-                    };
+                    if total_specified_gas > block_gas_limit {
+                        return Err(EthApiError::Other(Box::new(
+                            EthSimulateError::BlockGasLimitExceeded,
+                        ))
+                        .into())
+                    }
 
                     let ctx = this
                         .evm_config()
@@ -318,7 +300,8 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                         simulate::execute_transactions(
                             builder,
                             calls,
-                            default_gas_limit,
+                            block_gas_limit,
+                            this.call_gas_limit(),
                             chain_id,
                             state_provider,
                             this.converter(),
@@ -346,7 +329,8 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                         simulate::execute_transactions(
                             builder,
                             calls,
-                            default_gas_limit,
+                            block_gas_limit,
+                            this.call_gas_limit(),
                             chain_id,
                             state_provider,
                             this.converter(),

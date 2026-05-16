@@ -166,7 +166,8 @@ pub fn apply_precompile_overrides(
 pub fn execute_transactions<S, T>(
     mut builder: S,
     calls: Vec<RpcTxReq<T::Network>>,
-    default_gas_limit: u64,
+    block_gas_limit: u64,
+    call_gas_limit: u64,
     chain_id: u64,
     state_provider: &dyn StateProvider,
     converter: &T,
@@ -184,7 +185,19 @@ where
     builder.apply_pre_execution_changes()?;
 
     let mut results = Vec::with_capacity(calls.len());
+    let mut cumulative_tx_gas_used = 0;
     for call in calls {
+        let default_gas_limit = if call.as_ref().gas_limit().is_none() {
+            let remaining_block_gas = block_gas_limit.saturating_sub(cumulative_tx_gas_used);
+            if call_gas_limit > 0 {
+                remaining_block_gas.min(call_gas_limit)
+            } else {
+                remaining_block_gas
+            }
+        } else {
+            0
+        };
+
         // Resolve transaction, populate missing fields and enforce calls
         // correctness.
         let tx = resolve_transaction(
@@ -199,9 +212,10 @@ where
         // The effect for a layer-2 execution client is that it does not charge L1 cost.
         let tx = WithEncoded::new(Default::default(), tx);
 
-        builder.execute_transaction_with_result_closure(tx, |result| {
+        let gas_output = builder.execute_transaction_with_result_closure(tx, |result| {
             results.push(result.result().result.clone())
         })?;
+        cumulative_tx_gas_used = cumulative_tx_gas_used.saturating_add(gas_output.tx_gas_used());
     }
 
     let result = builder.finish(state_provider, None)?;
@@ -315,7 +329,7 @@ where
                         ..SimulateError::invalid_params()
                     }),
                     gas_used: gas.tx_gas_used(),
-                    max_used_gas: Some(gas.total_gas_spent()),
+                    max_used_gas: Some(gas.tx_gas_used()),
                     logs: Vec::new(),
                     status: false,
                 }
@@ -330,7 +344,7 @@ where
                         ..SimulateError::invalid_params()
                     }),
                     gas_used: gas.tx_gas_used(),
-                    max_used_gas: Some(gas.total_gas_spent()),
+                    max_used_gas: Some(gas.tx_gas_used()),
                     status: false,
                     logs: Vec::new(),
                 }
@@ -339,7 +353,7 @@ where
                 return_data: output.into_data(),
                 error: None,
                 gas_used: gas.tx_gas_used(),
-                max_used_gas: Some(gas.total_gas_spent()),
+                max_used_gas: Some(gas.tx_gas_used()),
                 logs: logs
                     .into_iter()
                     .map(|log| {
