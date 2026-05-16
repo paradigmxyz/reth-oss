@@ -37,10 +37,13 @@ pub trait FullEthApiServer:
         TxTy<Self::Primitives>,
     > + FullEthApi
     + Clone
+where
+    <Self::Evm as reth_evm::ConfigureEvm>::NextBlockEnvCtx: crate::helpers::call::SimulateBlockEnv,
 {
 }
 
-impl<T> FullEthApiServer for T where
+impl<T> FullEthApiServer for T
+where
     T: EthApiServer<
             RpcTxReq<T::NetworkTypes>,
             RpcTransaction<T::NetworkTypes>,
@@ -49,7 +52,8 @@ impl<T> FullEthApiServer for T where
             RpcHeader<T::NetworkTypes>,
             TxTy<T::Primitives>,
         > + FullEthApi
-        + Clone
+        + Clone,
+    <T::Evm as reth_evm::ConfigureEvm>::NextBlockEnvCtx: crate::helpers::call::SimulateBlockEnv,
 {
 }
 
@@ -443,6 +447,7 @@ impl<T>
     > for T
 where
     T: FullEthApi,
+    <T::Evm as reth_evm::ConfigureEvm>::NextBlockEnvCtx: crate::helpers::call::SimulateBlockEnv,
     jsonrpsee_types::error::ErrorObject<'static>: From<T::Error>,
 {
     /// Handler for: `eth_protocolVersion`

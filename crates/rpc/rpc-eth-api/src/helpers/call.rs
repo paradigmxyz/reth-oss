@@ -18,10 +18,11 @@ use alloy_rpc_types_eth::{
     BlockId, Bundle, EthCallResponse, StateContext, TransactionInfo,
 };
 use futures::Future;
+use reth_chainspec::{ChainSpecProvider, EthereumHardforks};
 use reth_errors::{ProviderError, RethError};
 use reth_evm::{
     block::BlockExecutor, env::BlockEnvironment, execute::BlockBuilder, ConfigureEvm, Evm,
-    EvmEnvFor, HaltReasonFor, InspectorFor, TransactionEnvMut, TxEnvFor,
+    EvmEnvFor, HaltReasonFor, InspectorFor, NextBlockEnvAttributes, TransactionEnvMut, TxEnvFor,
 };
 use reth_node_api::BlockBody;
 use reth_primitives_traits::Recovered;
@@ -37,7 +38,9 @@ use reth_rpc_eth_types::{
     simulate::{self, EthSimulateError},
     EthApiError, StateCacheDb,
 };
-use reth_storage_api::{BlockIdReader, ProviderTx, StateProviderBox};
+use reth_storage_api::{
+    noop::NoopProvider, BlockIdReader, ProviderTx, StateProvider, StateProviderBox,
+};
 use revm::{
     context::Block,
     context_interface::{result::ResultAndState, Transaction},
@@ -49,9 +52,31 @@ use tracing::{trace, warn};
 /// Result type for `eth_simulateV1` RPC method.
 pub type SimulatedBlocksResult<N, E> = Result<Vec<SimulatedBlock<RpcBlock<N>>>, E>;
 
+/// Required operations on next-block attributes for `eth_simulateV1`.
+pub trait SimulateBlockEnv {
+    /// Returns the timestamp configured for the simulated block.
+    fn timestamp(&self) -> u64;
+
+    /// Sets the EIP-4788 parent beacon block root.
+    fn set_parent_beacon_block_root(&mut self, root: Option<B256>);
+}
+
+impl SimulateBlockEnv for NextBlockEnvAttributes {
+    fn timestamp(&self) -> u64 {
+        self.timestamp
+    }
+
+    fn set_parent_beacon_block_root(&mut self, root: Option<B256>) {
+        self.parent_beacon_block_root = root;
+    }
+}
+
 /// Execution related functions for the [`EthApiServer`](crate::EthApiServer) trait in
 /// the `eth_` namespace.
-pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthApiTypes {
+pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthApiTypes
+where
+    <Self::Evm as ConfigureEvm>::NextBlockEnvCtx: SimulateBlockEnv,
+{
     /// Estimate gas needed for execution of the `request` at the [`BlockId`].
     fn estimate_gas_at(
         &self,
@@ -91,9 +116,15 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
 
             let base_block =
                 self.recovered_block(block).await?.ok_or(EthApiError::HeaderNotFound(block))?;
+            let base_block_id = BlockId::Hash(base_block.hash().into());
+            let state_root_provider = if self.compute_state_root_for_eth_simulate() {
+                Some(self.state_at_block_id(base_block_id).await?)
+            } else {
+                None
+            };
             let mut parent = base_block.sealed_header().clone();
 
-            self.spawn_with_state_at_block(block, move |this, mut db| {
+            self.spawn_with_state_at_block(base_block_id, move |this, mut db| {
                 let mut blocks: Vec<SimulatedBlock<RpcBlock<Self::NetworkTypes>>> =
                     Vec::with_capacity(block_state_calls.len());
 
@@ -102,8 +133,10 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                 let mut prev_timestamp = parent.timestamp();
 
                 for block in block_state_calls {
+                    let SimBlock { block_overrides, state_overrides, calls } = block;
+
                     // Validate block number ordering if overridden
-                    if let Some(number) = block.block_overrides.as_ref().and_then(|o| o.number) {
+                    if let Some(number) = block_overrides.as_ref().and_then(|o| o.number) {
                         let number: u64 = number.try_into().unwrap_or(u64::MAX);
                         if number <= prev_block_number {
                             return Err(EthApiError::other(EthSimulateError::BlockNumberInvalid {
@@ -114,8 +147,7 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                         }
                     }
                     // Validate timestamp ordering if overridden
-                    if let Some(time) = block
-                        .block_overrides
+                    if let Some(time) = block_overrides
                         .as_ref()
                         .and_then(|o| o.time)
                         .filter(|&t| t <= prev_timestamp)
@@ -127,7 +159,22 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                         .into());
                     }
 
-                    let attributes = this.next_env_attributes(&parent)?;
+                    let mut attributes = this.next_env_attributes(&parent)?;
+                    let block_timestamp = block_overrides
+                        .as_ref()
+                        .and_then(|overrides| overrides.time)
+                        .unwrap_or_else(|| attributes.timestamp());
+                    attributes.set_parent_beacon_block_root(
+                        block_overrides
+                            .as_ref()
+                            .and_then(|overrides| overrides.beacon_root)
+                            .or_else(|| {
+                                this.provider()
+                                    .chain_spec()
+                                    .is_cancun_active_at_timestamp(block_timestamp)
+                                    .then_some(B256::ZERO)
+                            }),
+                    );
 
                     let mut evm_env = this
                         .evm_config()
@@ -145,8 +192,6 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                         evm_env.cfg_env.tx_gas_limit_cap = Some(u64::MAX);
                         evm_env.block_env.inner_mut().basefee = 0;
                     }
-
-                    let SimBlock { block_overrides, state_overrides, calls } = block;
 
                     // Set prevrandao to zero for simulated blocks by default,
                     // matching spec behavior where MixDigest is zero-initialized.
@@ -234,11 +279,16 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                             .map_err(|e| Self::Error::from_eth_err(EthApiError::other(e)))?;
                         }
 
+                        let noop_provider = NoopProvider::default();
+                        let state_provider: &dyn StateProvider = state_root_provider
+                            .as_deref()
+                            .map_or(&noop_provider as &dyn StateProvider, |provider| provider);
                         simulate::execute_transactions(
                             builder,
                             calls,
                             default_gas_limit,
                             chain_id,
+                            state_provider,
                             this.converter(),
                         )
                         .map_err(map_err)?
@@ -254,11 +304,16 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                             .map_err(|e| Self::Error::from_eth_err(EthApiError::other(e)))?;
                         }
 
+                        let noop_provider = NoopProvider::default();
+                        let state_provider: &dyn StateProvider = state_root_provider
+                            .as_deref()
+                            .map_or(&noop_provider as &dyn StateProvider, |provider| provider);
                         simulate::execute_transactions(
                             builder,
                             calls,
                             default_gas_limit,
                             chain_id,
+                            state_provider,
                             this.converter(),
                         )
                         .map_err(map_err)?
@@ -553,6 +608,9 @@ pub trait Call:
 
     /// Returns the maximum number of blocks accepted for `eth_simulateV1`.
     fn max_simulate_blocks(&self) -> u64;
+
+    /// Returns whether `eth_simulateV1` should compute state roots.
+    fn compute_state_root_for_eth_simulate(&self) -> bool;
 
     /// Returns the maximum memory the EVM can allocate per RPC request.
     fn evm_memory_limit(&self) -> u64;

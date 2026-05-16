@@ -21,7 +21,7 @@ use reth_evm::{
 use reth_primitives_traits::{BlockBody as _, BlockTy, NodePrimitives, Recovered, RecoveredBlock};
 use reth_rpc_convert::{RpcBlock, RpcConvert, RpcTxReq};
 use reth_rpc_server_types::result::rpc_err;
-use reth_storage_api::noop::NoopProvider;
+use reth_storage_api::StateProvider;
 use revm::{
     context::Block,
     context_interface::result::ExecutionResult,
@@ -168,6 +168,7 @@ pub fn execute_transactions<S, T>(
     calls: Vec<RpcTxReq<T::Network>>,
     default_gas_limit: u64,
     chain_id: u64,
+    state_provider: &dyn StateProvider,
     converter: &T,
 ) -> Result<
     (
@@ -203,8 +204,7 @@ where
         })?;
     }
 
-    // Pass noop provider to skip state root calculations.
-    let result = builder.finish(NoopProvider::default(), None)?;
+    let result = builder.finish(state_provider, None)?;
 
     Ok((result, results))
 }
@@ -315,7 +315,7 @@ where
                         ..SimulateError::invalid_params()
                     }),
                     gas_used: gas.tx_gas_used(),
-                    max_used_gas: Some(gas.total_gas_spent()),
+                    max_used_gas: Some(gas.tx_gas_used()),
                     logs: Vec::new(),
                     status: false,
                 }
@@ -330,7 +330,7 @@ where
                         ..SimulateError::invalid_params()
                     }),
                     gas_used: gas.tx_gas_used(),
-                    max_used_gas: Some(gas.total_gas_spent()),
+                    max_used_gas: Some(gas.tx_gas_used()),
                     status: false,
                     logs: Vec::new(),
                 }
@@ -339,7 +339,7 @@ where
                 return_data: output.into_data(),
                 error: None,
                 gas_used: gas.tx_gas_used(),
-                max_used_gas: Some(gas.total_gas_spent()),
+                max_used_gas: Some(gas.tx_gas_used()),
                 logs: logs
                     .into_iter()
                     .map(|log| {
