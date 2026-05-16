@@ -106,6 +106,15 @@ pub trait LoadPendingBlock:
         Ok(self.pending_env_builder().pending_env_attributes(parent)?)
     }
 
+    /// Returns [`ConfigureEvm::NextBlockEnvCtx`] for building an `eth_simulateV1` block.
+    fn simulate_env_attributes(
+        &self,
+        parent: &SealedHeader<ProviderHeader<Self::Provider>>,
+        parent_beacon_block_root: Option<B256>,
+    ) -> Result<<Self::Evm as ConfigureEvm>::NextBlockEnvCtx, Self::Error> {
+        Ok(self.pending_env_builder().simulate_env_attributes(parent, parent_beacon_block_root)?)
+    }
+
     /// Returns a [`StateProviderBox`] on a mem-pool built pending block overlaying latest.
     fn local_pending_state(
         &self,
@@ -450,6 +459,16 @@ pub trait PendingEnvBuilder<Evm: ConfigureEvm>: Send + Sync + Unpin + 'static {
         &self,
         parent: &SealedHeader<HeaderTy<Evm::Primitives>>,
     ) -> Result<Evm::NextBlockEnvCtx, EthApiError>;
+
+    /// Builds a [`ConfigureEvm::NextBlockEnvCtx`] for an `eth_simulateV1` block.
+    fn simulate_env_attributes(
+        &self,
+        parent: &SealedHeader<HeaderTy<Evm::Primitives>>,
+        parent_beacon_block_root: Option<B256>,
+    ) -> Result<Evm::NextBlockEnvCtx, EthApiError> {
+        let _ = parent_beacon_block_root;
+        self.pending_env_attributes(parent)
+    }
 }
 
 /// Trait that should be implemented on [`ConfigureEvm::NextBlockEnvCtx`] to provide a way for it to
@@ -460,6 +479,15 @@ pub trait PendingEnvBuilder<Evm: ConfigureEvm>: Send + Sync + Unpin + 'static {
 pub trait BuildPendingEnv<Header> {
     /// Builds a [`ConfigureEvm::NextBlockEnvCtx`] for pending block.
     fn build_pending_env(parent: &SealedHeader<Header>) -> Self;
+
+    /// Builds a [`ConfigureEvm::NextBlockEnvCtx`] for an `eth_simulateV1` block.
+    fn build_simulate_env(
+        parent: &SealedHeader<Header>,
+        parent_beacon_block_root: Option<B256>,
+    ) -> Self {
+        let _ = parent_beacon_block_root;
+        Self::build_pending_env(parent)
+    }
 }
 
 impl<Evm> PendingEnvBuilder<Evm> for ()
@@ -471,6 +499,14 @@ where
         parent: &SealedHeader<HeaderTy<Evm::Primitives>>,
     ) -> Result<Evm::NextBlockEnvCtx, EthApiError> {
         Ok(Evm::NextBlockEnvCtx::build_pending_env(parent))
+    }
+
+    fn simulate_env_attributes(
+        &self,
+        parent: &SealedHeader<HeaderTy<Evm::Primitives>>,
+        parent_beacon_block_root: Option<B256>,
+    ) -> Result<Evm::NextBlockEnvCtx, EthApiError> {
+        Ok(Evm::NextBlockEnvCtx::build_simulate_env(parent, parent_beacon_block_root))
     }
 }
 
@@ -486,6 +522,13 @@ impl<H: BlockHeader> BuildPendingEnv<H> for NextBlockEnvAttributes {
             extra_data: parent.extra_data().clone(),
             slot_number: parent.slot_number().map(|slot| slot.saturating_add(1)),
         }
+    }
+
+    fn build_simulate_env(
+        parent: &SealedHeader<H>,
+        parent_beacon_block_root: Option<B256>,
+    ) -> Self {
+        Self { parent_beacon_block_root, ..Self::build_pending_env(parent) }
     }
 }
 

@@ -18,6 +18,7 @@ use alloy_rpc_types_eth::{
     BlockId, Bundle, EthCallResponse, StateContext, TransactionInfo,
 };
 use futures::Future;
+use reth_chainspec::{ChainSpecProvider, EthereumHardforks};
 use reth_errors::{ProviderError, RethError};
 use reth_evm::{
     block::BlockExecutor, env::BlockEnvironment, execute::BlockBuilder, ConfigureEvm, Evm,
@@ -136,7 +137,21 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                         .into());
                     }
 
-                    let attributes = this.next_env_attributes(&parent)?;
+                    let block_timestamp = block_overrides
+                        .as_ref()
+                        .and_then(|overrides| overrides.time)
+                        .unwrap_or_else(|| parent.timestamp().saturating_add(12));
+                    let parent_beacon_block_root = block_overrides
+                        .as_ref()
+                        .and_then(|overrides| overrides.beacon_root)
+                        .or_else(|| {
+                            this.provider()
+                                .chain_spec()
+                                .is_cancun_active_at_timestamp(block_timestamp)
+                                .then_some(B256::ZERO)
+                        });
+                    let attributes =
+                        this.simulate_env_attributes(&parent, parent_beacon_block_root)?;
 
                     let mut evm_env = this
                         .evm_config()
