@@ -91,14 +91,15 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
 
             let base_block =
                 self.recovered_block(block).await?.ok_or(EthApiError::HeaderNotFound(block))?;
+            let base_block_id = BlockId::Hash(base_block.hash().into());
             let mut parent = base_block.sealed_header().clone();
             let state_root_provider = if self.compute_state_root_for_eth_simulate() {
-                Some(self.state_at_block_id(block).await?)
+                Some(self.state_at_block_id(base_block_id).await?)
             } else {
                 None
             };
 
-            self.spawn_with_state_at_block(block, move |this, mut db| {
+            self.spawn_with_state_at_block(base_block_id, move |this, mut db| {
                 let mut blocks: Vec<SimulatedBlock<RpcBlock<Self::NetworkTypes>>> =
                     Vec::with_capacity(block_state_calls.len());
 
@@ -147,6 +148,7 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                         // If not explicitly required, we disable nonce check <https://github.com/paradigmxyz/reth/issues/16108>
                         evm_env.cfg_env.disable_nonce_check = true;
                         evm_env.cfg_env.disable_base_fee = true;
+                        evm_env.cfg_env.disable_fee_charge = true;
                         evm_env.cfg_env.tx_gas_limit_cap = Some(u64::MAX);
                         evm_env.block_env.inner_mut().basefee = 0;
                     }
