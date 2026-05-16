@@ -20,11 +20,10 @@ use alloy_rpc_types_eth::{
     BlockId, BlockOverrides, Bundle, EthCallResponse, StateContext, TransactionInfo,
 };
 use futures::Future;
-use reth_chainspec::{ChainSpecProvider, EthereumHardforks};
 use reth_errors::{ProviderError, RethError};
 use reth_evm::{
     block::BlockExecutor, env::BlockEnvironment, execute::BlockBuilder, ConfigureEvm, Evm,
-    EvmEnvFor, HaltReasonFor, InspectorFor, NextBlockEnvAttributes, TransactionEnvMut, TxEnvFor,
+    EvmEnvFor, HaltReasonFor, InspectorFor, TransactionEnvMut, TxEnvFor,
 };
 use reth_node_api::BlockBody;
 use reth_primitives_traits::Recovered;
@@ -51,25 +50,6 @@ use tracing::{trace, warn};
 
 /// Result type for `eth_simulateV1` RPC method.
 pub type SimulatedBlocksResult<N, E> = Result<Vec<SimulatedBlock<RpcBlock<N>>>, E>;
-
-/// Environment attributes that can be adjusted for `eth_simulateV1` defaults.
-pub trait SimulateBlockEnv {
-    /// Returns the block timestamp.
-    fn timestamp(&self) -> u64;
-
-    /// Sets the parent beacon block root.
-    fn set_parent_beacon_block_root(&mut self, root: Option<B256>);
-}
-
-impl SimulateBlockEnv for NextBlockEnvAttributes {
-    fn timestamp(&self) -> u64 {
-        self.timestamp
-    }
-
-    fn set_parent_beacon_block_root(&mut self, root: Option<B256>) {
-        self.parent_beacon_block_root = root;
-    }
-}
 
 fn sanitize_simulate_blocks<TxReq>(
     blocks: Vec<SimBlock<TxReq>>,
@@ -131,10 +111,7 @@ fn sanitize_simulate_blocks<TxReq>(
 
 /// Execution related functions for the [`EthApiServer`](crate::EthApiServer) trait in
 /// the `eth_` namespace.
-pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthApiTypes
-where
-    <Self::Evm as ConfigureEvm>::NextBlockEnvCtx: SimulateBlockEnv,
-{
+pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthApiTypes {
     /// Estimate gas needed for execution of the `request` at the [`BlockId`].
     fn estimate_gas_at(
         &self,
@@ -225,22 +202,7 @@ where
 
                     let SimBlock { block_overrides, state_overrides, calls } = block;
 
-                    let mut attributes = this.next_env_attributes(&parent)?;
-                    let block_timestamp = block_overrides
-                        .as_ref()
-                        .and_then(|overrides| overrides.time)
-                        .unwrap_or_else(|| attributes.timestamp());
-                    attributes.set_parent_beacon_block_root(
-                        block_overrides
-                            .as_ref()
-                            .and_then(|overrides| overrides.beacon_root)
-                            .or_else(|| {
-                                this.provider()
-                                    .chain_spec()
-                                    .is_cancun_active_at_timestamp(block_timestamp)
-                                    .then_some(B256::ZERO)
-                            }),
-                    );
+                    let attributes = this.next_env_attributes(&parent)?;
 
                     let mut evm_env = this
                         .evm_config()
