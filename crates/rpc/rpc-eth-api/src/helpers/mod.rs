@@ -66,13 +66,10 @@ pub trait FullEthApi:
     + Trace
     + LoadReceipt
     + GetBlockAccessList
-where
-    <Self::Evm as reth_evm::ConfigureEvm>::NextBlockEnvCtx: call::SimulateBlockEnv,
 {
 }
 
-impl<T> FullEthApi for T
-where
+impl<T> FullEthApi for T where
     T: FullEthApiTypes
         + EthApiSpec
         + EthTransactions
@@ -82,7 +79,6 @@ where
         + EthFees
         + Trace
         + LoadReceipt
-        + GetBlockAccessList,
-    <T::Evm as reth_evm::ConfigureEvm>::NextBlockEnvCtx: call::SimulateBlockEnv,
+        + GetBlockAccessList
 {
 }
