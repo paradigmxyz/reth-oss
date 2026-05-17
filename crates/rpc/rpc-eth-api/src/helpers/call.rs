@@ -102,7 +102,7 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
             };
             let mut parent = base_block.sealed_header().clone();
 
-            self.spawn_with_state_at_block(base_block_id, move |this, mut db| {
+            self.spawn_with_state_at_block_with_bundle_update(base_block_id, move |this, mut db| {
                 let mut blocks: Vec<SimulatedBlock<RpcBlock<Self::NetworkTypes>>> =
                     Vec::with_capacity(block_state_calls.len());
 
@@ -703,6 +703,28 @@ pub trait Call:
             let state = this.state_at_block_id(at).await?;
             let db = State::builder()
                 .with_database(StateProviderDatabase::new(StateProviderTraitObjWrapper(state)))
+                .build();
+            f(this, db)
+        })
+    }
+
+    /// Executes the closure with the state that corresponds to the given [`BlockId`] on a new task,
+    /// tracking committed transitions in the state's bundle.
+    fn spawn_with_state_at_block_with_bundle_update<F, R>(
+        &self,
+        at: impl Into<BlockId>,
+        f: F,
+    ) -> impl Future<Output = Result<R, Self::Error>> + Send
+    where
+        F: FnOnce(Self, StateCacheDb) -> Result<R, Self::Error> + Send + 'static,
+        R: Send + 'static,
+    {
+        let at = at.into();
+        self.spawn_blocking_io_fut(async move |this| {
+            let state = this.state_at_block_id(at).await?;
+            let db = State::builder()
+                .with_database(StateProviderDatabase::new(StateProviderTraitObjWrapper(state)))
+                .with_bundle_update()
                 .build();
             f(this, db)
         })
