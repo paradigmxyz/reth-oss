@@ -484,7 +484,10 @@ pub trait BuildPendingEnv<Header> {
     fn build_simulate_env(
         parent: &SealedHeader<Header>,
         parent_beacon_block_root: Option<B256>,
-    ) -> Self {
+    ) -> Self
+    where
+        Self: Sized,
+    {
         let _ = parent_beacon_block_root;
         Self::build_pending_env(parent)
     }
