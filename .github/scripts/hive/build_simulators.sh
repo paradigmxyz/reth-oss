@@ -1,22 +1,8 @@
 #!/usr/bin/env bash
 set -eo pipefail
 
-fixture_variant="${1:-osaka}"
-
-case "${fixture_variant}" in
-    amsterdam)
-        eels_fixtures="https://github.com/ethereum/execution-spec-tests/releases/download/bal@v5.6.1/fixtures_bal.tar.gz"
-        eels_branch="devnets/bal/3"
-        ;;
-    osaka)
-        eels_fixtures="https://github.com/ethereum/execution-spec-tests/releases/download/v5.3.0/fixtures_develop.tar.gz"
-        eels_branch="forks/osaka"
-        ;;
-    *)
-        echo "unknown hive fixture variant: ${fixture_variant}"
-        exit 1
-        ;;
-esac
+bal_fixture="https://github.com/ethereum/execution-spec-tests/releases/download/bal@v5.6.1/fixtures_bal.tar.gz"
+eels_branch="devnets/bal/3"
 
 # Create the hive_assets directory
 mkdir hive_assets/
@@ -29,11 +15,11 @@ go build .
 # Run each hive command in the background for each simulator and wait
 echo "Building images"
 ./hive -client reth --sim "ethereum/eels/consume-engine" \
-    --sim.buildarg fixtures="${eels_fixtures}" \
+    --sim.buildarg fixtures="${bal_fixture}" \
     --sim.buildarg branch="${eels_branch}" \
     --sim.timelimit 1s || true &
 ./hive -client reth --sim "ethereum/eels/consume-rlp" \
-    --sim.buildarg fixtures="${eels_fixtures}" \
+    --sim.buildarg fixtures="${bal_fixture}" \
     --sim.buildarg branch="${eels_branch}" \
     --sim.timelimit 1s || true &
 ./hive -client reth --sim "ethereum/engine" -sim.timelimit 1s || true &
