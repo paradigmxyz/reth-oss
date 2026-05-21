@@ -3,6 +3,7 @@
 name: hive
 
 on:
+  pull_request:
   workflow_dispatch:
   schedule:
     - cron: "0 0 * * *"
@@ -28,9 +29,9 @@ jobs:
     secrets: inherit
 
   prepare-hive:
-    if: github.repository == 'paradigmxyz/reth'
+    if: github.repository == 'paradigmxyz/reth-oss'
     timeout-minutes: 45
-    runs-on: ${{ github.repository == 'paradigmxyz/reth' && 'depot-ubuntu-latest-16' || 'ubuntu-latest' }}
+    runs-on: ${{ github.repository == 'paradigmxyz/reth-oss' && 'depot-ubuntu-latest-16' || 'ubuntu-latest' }}
     permissions:
       contents: read
     strategy:
@@ -108,7 +109,7 @@ jobs:
           #  limit: eth
           #  include:
           #    - MaliciousHandshake
-          #    # failures tracked in https://github.com/paradigmxyz/reth/issues/14825
+          #    # failures tracked in https://github.com/paradigmxyz/reth-oss/issues/14825
           #    - Status
           #    - GetBlockHeaders
           #    - ZeroRequestID
@@ -118,7 +119,7 @@ jobs:
           - sim: devp2p
             limit: discv5
             include:
-              # failures tracked at https://github.com/paradigmxyz/reth/issues/14825
+              # failures tracked at https://github.com/paradigmxyz/reth-oss/issues/14825
               - PingLargeRequestID
           - sim: ethereum/engine
             limit: engine-exchange-capabilities
@@ -149,6 +150,7 @@ jobs:
               - eth_getTransactionCount
               - eth_getTransactionReceipt
               - eth_sendRawTransaction
+              - eth_simulate
               - eth_syncing
               # debug_ rpc methods
               - debug_
@@ -201,7 +203,7 @@ jobs:
       - prepare-hive
     name: Hive-Amsterdam / ${{ matrix.scenario.sim }}${{ matrix.scenario.limit && format(' - {0}', matrix.scenario.limit) }}
     # Use larger runners for eels tests to avoid OOM runner crashes
-    runs-on: ${{ github.repository == 'paradigmxyz/reth' && (contains(matrix.scenario.sim, 'eels') && 'depot-ubuntu-latest-8' || 'depot-ubuntu-latest-4') || 'ubuntu-latest' }}
+    runs-on: ${{ github.repository == 'paradigmxyz/reth-oss' && (contains(matrix.scenario.sim, 'eels') && 'depot-ubuntu-latest-8' || 'depot-ubuntu-latest-4') || 'ubuntu-latest' }}
     permissions:
       contents: read
       issues: write
@@ -292,7 +294,7 @@ jobs:
           #  limit: eth
           #  include:
           #    - MaliciousHandshake
-          #    # failures tracked in https://github.com/paradigmxyz/reth/issues/14825
+          #    # failures tracked in https://github.com/paradigmxyz/reth-oss/issues/14825
           #    - Status
           #    - GetBlockHeaders
           #    - ZeroRequestID
@@ -302,7 +304,7 @@ jobs:
           - sim: devp2p
             limit: discv5
             include:
-              # failures tracked at https://github.com/paradigmxyz/reth/issues/14825
+              # failures tracked at https://github.com/paradigmxyz/reth-oss/issues/14825
               - PingLargeRequestID
           - sim: ethereum/engine
             limit: engine-exchange-capabilities
@@ -333,6 +335,7 @@ jobs:
               - eth_getTransactionCount
               - eth_getTransactionReceipt
               - eth_sendRawTransaction
+              - eth_simulate
               - eth_syncing
               # debug_ rpc methods
               - debug_
@@ -381,7 +384,7 @@ jobs:
       - prepare-hive
     name: Hive-Osaka / ${{ matrix.scenario.sim }}${{ matrix.scenario.limit && format(' - {0}', matrix.scenario.limit) }}
     # Use larger runners for eels tests to avoid OOM runner crashes
-    runs-on: ${{ github.repository == 'paradigmxyz/reth' && (contains(matrix.scenario.sim, 'eels') && 'depot-ubuntu-latest-8' || 'depot-ubuntu-latest-4') || 'ubuntu-latest' }}
+    runs-on: ${{ github.repository == 'paradigmxyz/reth-oss' && (contains(matrix.scenario.sim, 'eels') && 'depot-ubuntu-latest-8' || 'depot-ubuntu-latest-4') || 'ubuntu-latest' }}
     permissions:
       contents: read
       issues: write
@@ -463,5 +466,5 @@ jobs:
         uses: rtCamp/action-slack-notify@e31e87e03dd19038e411e38ae27cbad084a90661 # v2.3.3
         env:
           SLACK_COLOR: ${{ job.status }}
-          SLACK_MESSAGE: "Failed run: https://github.com/paradigmxyz/reth/actions/runs/${{ github.run_id }}"
+          SLACK_MESSAGE: "Failed run: https://github.com/paradigmxyz/reth-oss/actions/runs/${{ github.run_id }}"
           SLACK_WEBHOOK: ${{ secrets.SLACK_HIVE_WEBHOOK_URL }}
