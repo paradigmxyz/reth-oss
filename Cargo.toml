@@ -699,3 +699,32 @@ vergen-git2 = "9.1.0"
 
 # networking
 ipnet = "2.11"
+
+[patch.crates-io]
+alloy-consensus = { git = "https://github.com/Rimeeeeee/alloy", branch = "eip8070-pooled-transactions" }
+alloy-contract = { git = "https://github.com/Rimeeeeee/alloy", branch = "eip8070-pooled-transactions" }
+alloy-eips = { git = "https://github.com/Rimeeeeee/alloy", branch = "eip8070-pooled-transactions" }
+alloy-genesis = { git = "https://github.com/Rimeeeeee/alloy", branch = "eip8070-pooled-transactions" }
+alloy-json-rpc = { git = "https://github.com/Rimeeeeee/alloy", branch = "eip8070-pooled-transactions" }
+alloy-network = { git = "https://github.com/Rimeeeeee/alloy", branch = "eip8070-pooled-transactions" }
+alloy-network-primitives = { git = "https://github.com/Rimeeeeee/alloy", branch = "eip8070-pooled-transactions" }
+alloy-provider = { git = "https://github.com/Rimeeeeee/alloy", branch = "eip8070-pooled-transactions" }
+alloy-pubsub = { git = "https://github.com/Rimeeeeee/alloy", branch = "eip8070-pooled-transactions" }
+alloy-rpc-client = { git = "https://github.com/Rimeeeeee/alloy", branch = "eip8070-pooled-transactions" }
+alloy-rpc-types = { git = "https://github.com/Rimeeeeee/alloy", branch = "eip8070-pooled-transactions" }
+alloy-rpc-types-admin = { git = "https://github.com/Rimeeeeee/alloy", branch = "eip8070-pooled-transactions" }
+alloy-rpc-types-anvil = { git = "https://github.com/Rimeeeeee/alloy", branch = "eip8070-pooled-transactions" }
+alloy-rpc-types-beacon = { git = "https://github.com/Rimeeeeee/alloy", branch = "eip8070-pooled-transactions" }
+alloy-rpc-types-debug = { git = "https://github.com/Rimeeeeee/alloy", branch = "eip8070-pooled-transactions" }
+alloy-rpc-types-engine = { git = "https://github.com/Rimeeeeee/alloy", branch = "eip8070-pooled-transactions" }
+alloy-rpc-types-eth = { git = "https://github.com/Rimeeeeee/alloy", branch = "eip8070-pooled-transactions" }
+alloy-rpc-types-mev = { git = "https://github.com/Rimeeeeee/alloy", branch = "eip8070-pooled-transactions" }
+alloy-rpc-types-trace = { git = "https://github.com/Rimeeeeee/alloy", branch = "eip8070-pooled-transactions" }
+alloy-rpc-types-txpool = { git = "https://github.com/Rimeeeeee/alloy", branch = "eip8070-pooled-transactions" }
+alloy-serde = { git = "https://github.com/Rimeeeeee/alloy", branch = "eip8070-pooled-transactions" }
+alloy-signer = { git = "https://github.com/Rimeeeeee/alloy", branch = "eip8070-pooled-transactions" }
+alloy-signer-local = { git = "https://github.com/Rimeeeeee/alloy", branch = "eip8070-pooled-transactions" }
+alloy-transport = { git = "https://github.com/Rimeeeeee/alloy", branch = "eip8070-pooled-transactions" }
+alloy-transport-http = { git = "https://github.com/Rimeeeeee/alloy", branch = "eip8070-pooled-transactions" }
+alloy-transport-ipc = { git = "https://github.com/Rimeeeeee/alloy", branch = "eip8070-pooled-transactions" }
+alloy-transport-ws = { git = "https://github.com/Rimeeeeee/alloy", branch = "eip8070-pooled-transactions" }

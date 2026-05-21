@@ -2,12 +2,22 @@
 
 use crate::broadcast::decode_list_with_memory_budget;
 use alloc::vec::Vec;
-use alloy_consensus::transaction::PooledTransaction;
-use alloy_eips::{eip2718::Encodable2718, eip7594::Cell};
+use alloy_consensus::{
+    transaction::{PooledTransaction, RlpEcdsaEncodableTx},
+    Signed, TxType,
+};
+use alloy_eips::{
+    eip2718::{Decodable2718, Encodable2718},
+    eip7594::Cell,
+};
 use alloy_primitives::{B128, B256};
-use alloy_rlp::{Decodable, RlpDecodable, RlpDecodableWrapper, RlpEncodable, RlpEncodableWrapper};
+use alloy_rlp::{
+    BufMut, Decodable, Encodable, Header, RlpDecodable, RlpDecodableWrapper, RlpEncodable,
+    RlpEncodableWrapper,
+};
 use derive_more::{Constructor, Deref, IntoIterator};
 use reth_codecs_derive::add_arbitrary_tests;
+use reth_ethereum_primitives::PooledTransactionVariant;
 use reth_primitives_traits::InMemorySize;
 
 /// A list of transaction hashes that the peer would like transaction bodies for.
@@ -82,11 +92,167 @@ impl<T: Decodable + InMemorySize> PooledTransactions<T> {
     }
 }
 
+impl<T: PooledTransactionResponse> PooledTransactions<T> {
+    /// Decodes an eth/72 `PooledTransactions` response, stopping once the cumulative
+    /// [`InMemorySize`] of decoded transactions exceeds `memory_budget` bytes.
+    pub fn decode_eth72_with_memory_budget(
+        buf: &mut &[u8],
+        memory_budget: usize,
+    ) -> alloy_rlp::Result<Self> {
+        decode_pooled_transactions_with_memory_budget(
+            buf,
+            memory_budget,
+            T::pooled_response_eth72_decode_2718,
+        )
+        .map(Self)
+    }
+}
+
 impl<T: Encodable2718> PooledTransactions<T> {
     /// Returns an iterator over the transaction hashes in this response.
     pub fn hashes(&self) -> impl Iterator<Item = B256> + '_ {
         self.iter().map(|tx| tx.trie_hash())
     }
+}
+
+/// An eth/72 `PooledTransactions` response.
+#[derive(Clone, Debug, PartialEq, Eq, Deref, Constructor)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct PooledTransactionsEth72<T = PooledTransaction>(
+    /// The transaction bodies, encoded with eth/72 sparse blob payload rules.
+    pub PooledTransactions<T>,
+);
+
+impl<T: PooledTransactionResponse> Encodable for PooledTransactionsEth72<T> {
+    fn encode(&self, out: &mut dyn BufMut) {
+        Header { list: true, payload_length: self.0.eth72_payload_length() }.encode(out);
+        for tx in &self.0 .0 {
+            tx.pooled_response_eth72_encode_2718(out);
+        }
+    }
+
+    fn length(&self) -> usize {
+        Header { list: true, payload_length: self.0.eth72_payload_length() }.length_with_payload()
+    }
+}
+
+impl<T: PooledTransactionResponse> PooledTransactions<T> {
+    fn eth72_payload_length(&self) -> usize {
+        self.0.iter().map(PooledTransactionResponse::pooled_response_eth72_encoded_2718_len).sum()
+    }
+}
+
+/// Version-aware encoding hooks for transactions in `PooledTransactions` responses.
+pub trait PooledTransactionResponse: Sized + InMemorySize {
+    /// Returns the eth/72 encoded length for this transaction in a `PooledTransactions` response.
+    fn pooled_response_eth72_encoded_2718_len(&self) -> usize;
+
+    /// Encodes this transaction for an eth/72 `PooledTransactions` response.
+    fn pooled_response_eth72_encode_2718(&self, out: &mut dyn BufMut);
+
+    /// Decodes this transaction from an eth/72 `PooledTransactions` response.
+    fn pooled_response_eth72_decode_2718(buf: &mut &[u8]) -> alloy_rlp::Result<Self>;
+}
+
+impl PooledTransactionResponse for PooledTransaction {
+    fn pooled_response_eth72_encoded_2718_len(&self) -> usize {
+        self.pooled_response_eth72_encoded_2718_len()
+    }
+
+    fn pooled_response_eth72_encode_2718(&self, out: &mut dyn BufMut) {
+        self.pooled_response_eth72_encode_2718(out);
+    }
+
+    fn pooled_response_eth72_decode_2718(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
+        Self::pooled_response_eth72_decode_2718(buf).map_err(Into::into)
+    }
+}
+
+impl PooledTransactionResponse for PooledTransactionVariant {
+    fn pooled_response_eth72_encoded_2718_len(&self) -> usize {
+        match self {
+            Self::Eip4844(tx) => {
+                let Some(sidecar) = tx.tx().sidecar.as_eip7594() else {
+                    return self.encode_2718_len()
+                };
+
+                let payload_length = tx.tx().tx.rlp_encoded_length_with_signature(tx.signature()) +
+                    sidecar.rlp_encoded_sparse_fields_length();
+                1 + (Header { list: true, payload_length }).length_with_payload()
+            }
+            _ => self.encode_2718_len(),
+        }
+    }
+
+    fn pooled_response_eth72_encode_2718(&self, out: &mut dyn BufMut) {
+        match self {
+            Self::Eip4844(tx) => {
+                let Some(sidecar) = tx.tx().sidecar.as_eip7594() else {
+                    self.encode_2718(out);
+                    return
+                };
+
+                let payload_length = tx.tx().tx.rlp_encoded_length_with_signature(tx.signature()) +
+                    sidecar.rlp_encoded_sparse_fields_length();
+
+                out.put_u8(TxType::Eip4844 as u8);
+                Header { list: true, payload_length }.encode(out);
+                tx.tx().tx.rlp_encode_signed(tx.signature(), out);
+                sidecar.rlp_encode_sparse_fields(out);
+            }
+            _ => self.encode_2718(out),
+        }
+    }
+
+    fn pooled_response_eth72_decode_2718(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
+        let tx = <Self as Decodable2718>::decode_2718(buf)?;
+
+        Ok(match tx {
+            Self::Eip4844(tx) => {
+                let (tx, signature, _) = tx.into_parts();
+                Signed::new_unhashed(tx, signature).into()
+            }
+            tx => tx,
+        })
+    }
+}
+
+fn decode_pooled_transactions_with_memory_budget<T, F>(
+    buf: &mut &[u8],
+    memory_budget: usize,
+    mut decode: F,
+) -> alloy_rlp::Result<Vec<T>>
+where
+    T: InMemorySize,
+    F: FnMut(&mut &[u8]) -> alloy_rlp::Result<T>,
+{
+    let header = Header::decode(buf)?;
+    if !header.list {
+        return Err(alloy_rlp::Error::UnexpectedString)
+    }
+    if buf.len() < header.payload_length {
+        return Err(alloy_rlp::Error::InputTooShort)
+    }
+
+    let (payload, rest) = buf.split_at(header.payload_length);
+    let mut payload = payload;
+
+    let mut txs = Vec::new();
+    let mut total_size = 0usize;
+
+    while !payload.is_empty() {
+        let item = decode(&mut payload)?;
+        total_size = total_size.saturating_add(item.size());
+
+        if total_size > memory_budget {
+            break
+        }
+
+        txs.push(item);
+    }
+
+    *buf = rest;
+    Ok(txs)
 }
 
 impl<T, U> TryFrom<Vec<U>> for PooledTransactions<T>

@@ -294,6 +294,9 @@ impl<N: NetworkPrimitives> ActiveSession<N> {
             EthMessage::NewPooledTransactionHashes68(msg) => {
                 self.try_emit_broadcast(PeerMessage::PooledTransactions(msg.into())).into()
             }
+            EthMessage::NewPooledTransactionHashes72(msg) => {
+                self.try_emit_broadcast(PeerMessage::PooledTransactions(msg.into())).into()
+            }
             EthMessage::GetBlockHeaders(req) => {
                 on_request!(req, BlockHeaders, GetBlockHeaders)
             }
@@ -310,6 +313,10 @@ impl<N: NetworkPrimitives> ActiveSession<N> {
                 on_request!(req, PooledTransactions, GetPooledTransactions)
             }
             EthMessage::PooledTransactions(resp) => {
+                on_response!(resp, GetPooledTransactions)
+            }
+            EthMessage::PooledTransactionsEth72(resp) => {
+                let resp = resp.map(|txs| txs.0);
                 on_response!(resp, GetPooledTransactions)
             }
             EthMessage::GetNodeData(req) => {
@@ -460,7 +467,7 @@ impl<N: NetworkPrimitives> ActiveSession<N> {
     fn handle_outgoing_response(&mut self, id: u64, resp: PeerResponseResult<N>) {
         match resp.try_into_message(id) {
             Ok(msg) => {
-                self.queued_outgoing.push_back(msg.into());
+                self.queued_outgoing.push_back(msg.map_versioned(self.conn.version()).into());
             }
             Err(err) => {
                 debug!(target: "net", %err, "Failed to respond to received request");
@@ -1018,6 +1025,15 @@ impl<N: NetworkPrimitives> OutgoingMessage<N> {
                 EthMessage::NewPooledTransactionHashes68(existing),
                 NewPooledTransactionHashes::Eth68(inc),
             ) => {
+                existing.hashes.extend(inc.hashes);
+                existing.sizes.extend(inc.sizes);
+                existing.types.extend(inc.types);
+                None
+            }
+            (
+                EthMessage::NewPooledTransactionHashes72(existing),
+                NewPooledTransactionHashes::Eth72(inc),
+            ) if existing.cell_mask == inc.cell_mask => {
                 existing.hashes.extend(inc.hashes);
                 existing.sizes.extend(inc.sizes);
                 existing.types.extend(inc.types);
