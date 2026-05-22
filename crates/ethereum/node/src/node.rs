@@ -580,6 +580,7 @@ where
     Pool: TransactionPool<Transaction: PoolTransaction<Consensus = TxTy<Node::Types>>>
         + Unpin
         + 'static,
+    PoolPooledTx<Pool>: reth_network::types::PooledTransactionResponse,
 {
     type Network =
         NetworkHandle<BasicNetworkPrimitives<PrimitivesTy<Node::Types>, PoolPooledTx<Pool>>>;
