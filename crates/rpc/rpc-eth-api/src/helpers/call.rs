@@ -43,7 +43,7 @@ use reth_storage_api::{
 };
 use revm::{
     context::Block,
-    context_interface::{result::ResultAndState, Transaction},
+    context_interface::{block::BlobExcessGasAndPrice, result::ResultAndState, Transaction},
     Database, DatabaseCommit,
 };
 use revm_inspectors::{access_list::AccessListInspector, transfer::TransferInspector};
@@ -165,6 +165,7 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                     if !validation {
                         // If not explicitly required, we disable nonce check <https://github.com/paradigmxyz/reth/issues/16108>
                         evm_env.cfg_env.disable_nonce_check = true;
+                        evm_env.cfg_env.disable_balance_check = true;
                         evm_env.cfg_env.disable_base_fee = true;
                         evm_env.cfg_env.tx_gas_limit_cap = Some(u64::MAX);
                         evm_env.block_env.inner_mut().basefee = 0;
@@ -176,6 +177,8 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                     evm_env.block_env.inner_mut().prevrandao = Some(B256::ZERO);
 
                     if let Some(block_overrides) = block_overrides {
+                        let blob_base_fee = block_overrides.blob_base_fee;
+
                         // ensure we don't allow uncapped gas limit per block
                         if let Some(gas_limit_override) = block_overrides.gas_limit &&
                             gas_limit_override > evm_env.block_env.gas_limit() &&
@@ -188,6 +191,16 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                             &mut db,
                             evm_env.block_env.inner_mut(),
                         );
+
+                        if let Some(blob_base_fee) = blob_base_fee {
+                            let excess_blob_gas =
+                                evm_env.block_env.blob_excess_gas().unwrap_or_default();
+                            evm_env.block_env.inner_mut().blob_excess_gas_and_price =
+                                Some(BlobExcessGasAndPrice {
+                                    excess_blob_gas,
+                                    blob_gasprice: blob_base_fee.saturating_to(),
+                                });
+                        }
                     }
                     if let Some(ref state_overrides) = state_overrides {
                         apply_state_overrides(state_overrides.clone(), &mut db)

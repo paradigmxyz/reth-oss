@@ -103,6 +103,9 @@ pub enum EthSimulateError {
     /// Attempted to move a non-precompile address.
     #[error("account {0} is not a precompile")]
     NotAPrecompile(Address),
+    /// Attempted to move a precompile to its own address.
+    #[error("cannot move precompile {0} to itself")]
+    MovePrecompileToSelf(Address),
 }
 
 impl EthSimulateError {
@@ -120,6 +123,7 @@ impl EthSimulateError {
             Self::SenderNotEOA => -38024,
             Self::MaxInitCodeSizeExceeded => -38025,
             Self::TooManyBlocks | Self::GasLimitReached => -38026,
+            Self::MovePrecompileToSelf(_) => -38022,
             Self::NotAPrecompile(_) => -32000,
         }
     }
@@ -147,11 +151,17 @@ pub fn apply_precompile_overrides(
         })
         .collect();
 
-    precompiles.move_precompiles(moves).map_err(
-        |alloy_evm::precompiles::MovePrecompileError::NotAPrecompile(addr)| {
-            EthSimulateError::NotAPrecompile(addr)
-        },
-    )?;
+    for (source, dest) in moves {
+        if source == dest {
+            return Err(EthSimulateError::MovePrecompileToSelf(source))
+        }
+
+        precompiles.move_precompiles([(source, dest)]).map_err(
+            |alloy_evm::precompiles::MovePrecompileError::NotAPrecompile(addr)| {
+                EthSimulateError::NotAPrecompile(addr)
+            },
+        )?;
+    }
 
     Ok(())
 }
