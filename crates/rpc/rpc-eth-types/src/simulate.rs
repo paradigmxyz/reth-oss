@@ -176,7 +176,7 @@ pub fn apply_precompile_overrides(
 pub fn execute_transactions<S, T>(
     mut builder: S,
     calls: Vec<RpcTxReq<T::Network>>,
-    default_gas_limit: u64,
+    call_gas_limit: u64,
     chain_id: u64,
     state_provider: &dyn StateProvider,
     converter: &T,
@@ -194,7 +194,12 @@ where
     builder.apply_pre_execution_changes()?;
 
     let mut results = Vec::with_capacity(calls.len());
+    let block_gas_limit = builder.evm().block().gas_limit();
+    let default_gas_limit_cap =
+        if call_gas_limit > 0 { block_gas_limit.min(call_gas_limit) } else { block_gas_limit };
+    let mut cumulative_gas_used = 0u64;
     for call in calls {
+        let default_gas_limit = default_gas_limit_cap.saturating_sub(cumulative_gas_used);
         // Resolve transaction, populate missing fields and enforce calls
         // correctness.
         let tx = resolve_transaction(
@@ -209,9 +214,10 @@ where
         // The effect for a layer-2 execution client is that it does not charge L1 cost.
         let tx = WithEncoded::new(Default::default(), tx);
 
-        builder.execute_transaction_with_result_closure(tx, |result| {
+        let gas_output = builder.execute_transaction_with_result_closure(tx, |result| {
             results.push(result.result().result.clone())
         })?;
+        cumulative_gas_used = cumulative_gas_used.saturating_add(gas_output.tx_gas_used());
     }
 
     let result = builder.finish(state_provider, None)?;
