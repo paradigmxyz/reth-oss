@@ -47,7 +47,7 @@ use revm::{
     context_interface::{block::BlobExcessGasAndPrice, result::ResultAndState, Transaction},
     Database, DatabaseCommit,
 };
-use revm_inspectors::{access_list::AccessListInspector, transfer::TransferInspector};
+use revm_inspectors::access_list::AccessListInspector;
 use std::collections::HashMap;
 use tracing::{trace, warn};
 
@@ -209,7 +209,8 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                             .map_or(&noop_provider as &dyn StateProvider, |provider| provider);
 
                         let result = if trace_transfers {
-                            let inspector = TransferInspector::new(false).with_logs(true);
+                            let (inspector, transfer_logs) =
+                                simulate::SimulateTransferInspector::new(false);
                             let evm = this
                                 .evm_config()
                                 .evm_with_env_and_inspector(&mut db, evm_env, inspector);
@@ -223,6 +224,7 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                                 this.converter(),
                                 !validation,
                                 &mut base_nonces,
+                                Some(&transfer_logs),
                             )
                             .map_err(map_err)?
                             .0
@@ -238,6 +240,7 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                                 this.converter(),
                                 !validation,
                                 &mut base_nonces,
+                                None,
                             )
                             .map_err(map_err)?
                             .0
@@ -388,7 +391,8 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                     let (result, results) = if trace_transfers {
                         // prepare inspector to capture transfer inside the evm so they are recorded
                         // and included in logs
-                        let inspector = TransferInspector::new(false).with_logs(true);
+                        let (inspector, transfer_logs) =
+                            simulate::SimulateTransferInspector::new(false);
                         let evm = this
                             .evm_config()
                             .evm_with_env_and_inspector(&mut db, evm_env, inspector);
@@ -415,6 +419,7 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                             this.converter(),
                             !validation,
                             &mut base_nonces,
+                            Some(&transfer_logs),
                         )
                         .map_err(map_err)?
                     } else {
@@ -442,6 +447,7 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                             this.converter(),
                             !validation,
                             &mut base_nonces,
+                            None,
                         )
                         .map_err(map_err)?
                     };

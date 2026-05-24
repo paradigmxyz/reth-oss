@@ -8,11 +8,13 @@ use alloy_consensus::{transaction::TxHashRef, BlockHeader, Transaction};
 use alloy_eips::eip2718::WithEncoded;
 use alloy_evm::{block::TxResult, precompiles::PrecompilesMap};
 use alloy_network::{NetworkTransactionBuilder, TransactionBuilder};
+use alloy_primitives::{Log, LogData, B256};
 use alloy_rpc_types_eth::{
     simulate::{SimCallResult, SimulateError, SimulatedBlock},
     state::StateOverride,
     BlockTransactionsKind,
 };
+use alloy_sol_types::SolValue;
 use jsonrpsee_types::ErrorObject;
 use reth_evm::{
     execute::{BlockBuilder, BlockBuilderOutcome, BlockExecutor},
@@ -23,12 +25,19 @@ use reth_rpc_convert::{RpcBlock, RpcConvert, RpcTxReq};
 use reth_rpc_server_types::result::rpc_err;
 use reth_storage_api::StateProvider;
 use revm::{
-    context::Block,
-    context_interface::result::ExecutionResult,
+    context::{Block, JournalTr},
+    context_interface::{result::ExecutionResult, ContextTr, CreateScheme},
+    interpreter::{CallInputs, CallOutcome, CreateInputs, CreateOutcome},
     primitives::{Address, Bytes, TxKind, U256},
-    Database,
+    Database, Inspector,
 };
-use std::collections::HashMap;
+use revm_inspectors::transfer::{
+    TransferKind, TransferOperation, TRANSFER_EVENT_TOPIC, TRANSFER_LOG_EMITTER,
+};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
 
 /// Error code for execution reverted in `eth_simulateV1`.
 ///
@@ -109,6 +118,172 @@ pub enum EthSimulateError {
     MovePrecompileToSelf(Address),
 }
 
+/// Collects ETH transfers for `eth_simulateV1` without inserting them into the EVM journal.
+#[derive(Clone, Debug, Default)]
+pub struct SimulateTransferInspector {
+    internal_only: bool,
+    transfers: Vec<TransferOperation>,
+    checkpoints: Vec<usize>,
+    collector: TransferLogCollector,
+}
+
+impl SimulateTransferInspector {
+    /// Creates a new transfer inspector and a collector for synthetic transfer logs.
+    pub fn new(internal_only: bool) -> (Self, TransferLogCollector) {
+        let collector = TransferLogCollector::default();
+        (
+            Self {
+                internal_only,
+                transfers: Vec::new(),
+                checkpoints: Vec::new(),
+                collector: collector.clone(),
+            },
+            collector,
+        )
+    }
+
+    fn sync_collector(&self) {
+        *self.collector.transfers.lock().expect("transfer collector lock poisoned") =
+            self.transfers.clone();
+    }
+
+    fn push_transfer<DB: Database, JOURNAL: JournalTr<Database = DB>>(
+        &mut self,
+        from: Address,
+        to: Address,
+        value: U256,
+        kind: TransferKind,
+        journaled_state: &JOURNAL,
+    ) {
+        if self.internal_only && journaled_state.depth() == 0 {
+            return
+        }
+
+        if value.is_zero() {
+            return
+        }
+
+        self.transfers.push(TransferOperation { kind, from, to, value });
+        self.sync_collector();
+    }
+}
+
+impl<CTX> Inspector<CTX> for SimulateTransferInspector
+where
+    CTX: ContextTr,
+{
+    fn call(&mut self, context: &mut CTX, inputs: &mut CallInputs) -> Option<CallOutcome> {
+        self.checkpoints.push(self.transfers.len());
+
+        if let Some(value) = inputs.transfer_value() {
+            self.push_transfer(
+                inputs.transfer_from(),
+                inputs.transfer_to(),
+                value,
+                TransferKind::Call,
+                context.journal(),
+            );
+        }
+
+        None
+    }
+
+    fn call_end(&mut self, _context: &mut CTX, _inputs: &CallInputs, outcome: &mut CallOutcome) {
+        let checkpoint = self.checkpoints.pop().unwrap_or_default();
+        if !outcome.instruction_result().is_ok() {
+            self.transfers.truncate(checkpoint);
+            self.sync_collector();
+        }
+    }
+
+    fn create(&mut self, context: &mut CTX, inputs: &mut CreateInputs) -> Option<CreateOutcome> {
+        self.checkpoints.push(self.transfers.len());
+
+        let kind = match inputs.scheme() {
+            CreateScheme::Create => TransferKind::Create,
+            CreateScheme::Create2 { .. } => TransferKind::Create2,
+            CreateScheme::Custom { .. } => return None,
+        };
+
+        let nonce = match context.journal_mut().load_account(inputs.caller()) {
+            Ok(account) => account.data.info.nonce,
+            Err(_) => return None,
+        };
+
+        self.push_transfer(
+            inputs.caller(),
+            inputs.created_address(nonce),
+            inputs.value(),
+            kind,
+            context.journal(),
+        );
+
+        None
+    }
+
+    fn create_end(
+        &mut self,
+        _context: &mut CTX,
+        _inputs: &CreateInputs,
+        outcome: &mut CreateOutcome,
+    ) {
+        let checkpoint = self.checkpoints.pop().unwrap_or_default();
+        if !outcome.instruction_result().is_ok() {
+            self.transfers.truncate(checkpoint);
+            self.sync_collector();
+        }
+    }
+
+    fn selfdestruct(&mut self, contract: Address, target: Address, value: U256) {
+        self.transfers.push(TransferOperation {
+            kind: TransferKind::SelfDestruct,
+            from: contract,
+            to: target,
+            value,
+        });
+        self.sync_collector();
+    }
+}
+
+/// Shared synthetic transfer log collector.
+#[derive(Clone, Debug, Default)]
+pub struct TransferLogCollector {
+    transfers: Arc<Mutex<Vec<TransferOperation>>>,
+}
+
+impl TransferLogCollector {
+    fn append_new_logs<HaltReasonTy>(
+        &self,
+        result: &mut ExecutionResult<HaltReasonTy>,
+        next_transfer: &mut usize,
+    ) {
+        let transfers = self.transfers.lock().expect("transfer collector lock poisoned");
+        if *next_transfer >= transfers.len() {
+            return
+        }
+
+        let logs = match result {
+            ExecutionResult::Success { logs, .. } |
+            ExecutionResult::Revert { logs, .. } |
+            ExecutionResult::Halt { logs, .. } => logs,
+        };
+
+        logs.extend(transfers[*next_transfer..].iter().map(transfer_to_log));
+        *next_transfer = transfers.len();
+    }
+}
+
+fn transfer_to_log(transfer: &TransferOperation) -> Log {
+    let from = B256::from_slice(&transfer.from.abi_encode());
+    let to = B256::from_slice(&transfer.to.abi_encode());
+    let data = transfer.value.abi_encode();
+
+    Log {
+        address: TRANSFER_LOG_EMITTER,
+        data: LogData::new_unchecked(vec![TRANSFER_EVENT_TOPIC, from, to], data.into()),
+    }
+}
+
 impl EthSimulateError {
     /// Returns the JSON-RPC error code for a `eth_simulateV1` error.
     pub const fn error_code(&self) -> i32 {
@@ -183,6 +358,7 @@ pub fn execute_transactions<S, T>(
     converter: &T,
     enforce_value_balance: bool,
     base_nonces: &mut HashMap<Address, u64>,
+    transfer_logs: Option<&TransferLogCollector>,
 ) -> Result<
     (
         BlockBuilderOutcome<S::Primitives>,
@@ -202,6 +378,7 @@ where
         if call_gas_limit > 0 { block_gas_limit.min(call_gas_limit) } else { block_gas_limit };
     let mut cumulative_gas_used = 0u64;
     let mut next_nonces = HashMap::new();
+    let mut next_transfer = 0;
     for mut call in calls {
         let default_gas_limit = default_gas_limit_cap.saturating_sub(cumulative_gas_used);
         if call.as_ref().nonce().is_none() {
@@ -241,7 +418,11 @@ where
         let tx = WithEncoded::new(Default::default(), tx);
 
         let gas_output = builder.execute_transaction_with_result_closure(tx, |result| {
-            results.push(result.result().result.clone())
+            let mut result = result.result().result.clone();
+            if let Some(transfer_logs) = transfer_logs {
+                transfer_logs.append_new_logs(&mut result, &mut next_transfer);
+            }
+            results.push(result)
         })?;
         cumulative_gas_used = cumulative_gas_used.saturating_add(gas_output.tx_gas_used());
     }
