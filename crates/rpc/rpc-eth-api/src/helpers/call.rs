@@ -38,6 +38,7 @@ use reth_rpc_eth_types::{
     simulate::{self, EthSimulateError},
     EthApiError, StateCacheDb,
 };
+use reth_rpc_server_types::result::{block_id_to_str, invalid_params_rpc_err, rpc_error_with_code};
 use reth_storage_api::{
     noop::NoopProvider, BlockIdReader, ProviderTx, StateProvider, StateProviderBox,
 };
@@ -47,6 +48,7 @@ use revm::{
     Database, DatabaseCommit,
 };
 use revm_inspectors::{access_list::AccessListInspector, transfer::TransferInspector};
+use std::collections::HashMap;
 use tracing::{trace, warn};
 
 /// Result type for `eth_simulateV1` RPC method.
@@ -92,8 +94,12 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                 return Err(EthApiError::InvalidParams(String::from("calls are empty.")).into())
             }
 
-            let base_block =
-                self.recovered_block(block).await?.ok_or(EthApiError::HeaderNotFound(block))?;
+            let base_block = self.recovered_block(block).await?.ok_or_else(|| {
+                EthApiError::other(rpc_error_with_code(
+                    -32000,
+                    format!("block not found: {}", block_id_to_str(block)),
+                ))
+            })?;
             let base_block_id = BlockId::Hash(base_block.hash().into());
             let state_root_provider = if self.compute_state_root_for_eth_simulate() {
                 Some(self.state_at_block_id(base_block_id).await?)
@@ -105,16 +111,31 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
             self.spawn_with_state_at_block_with_bundle_update(base_block_id, move |this, mut db| {
                 let mut blocks: Vec<SimulatedBlock<RpcBlock<Self::NetworkTypes>>> =
                     Vec::with_capacity(block_state_calls.len());
+                let mut base_nonces = HashMap::new();
 
                 // Track previous block number and timestamp for validation
                 let mut prev_block_number = parent.number();
-                let mut prev_timestamp = parent.timestamp();
+                let map_err = |e: EthApiError| -> Self::Error {
+                    if validation {
+                        if e.as_simulate_error().is_some() {
+                            return Self::Error::from_eth_err(EthApiError::other(
+                                invalid_params_rpc_err(e.to_string()),
+                            ))
+                        }
+                    } else if let Some(sim_err) = e.as_simulate_error() {
+                        return Self::Error::from_eth_err(EthApiError::other(sim_err))
+                    }
+
+                    Self::Error::from_eth_err(e)
+                };
 
                 for block in block_state_calls {
                     let SimBlock { block_overrides, state_overrides, calls } = block;
 
                     // Validate block number ordering if overridden
-                    if let Some(number) = block_overrides.as_ref().and_then(|o| o.number) {
+                    let target_block_number = if let Some(number) =
+                        block_overrides.as_ref().and_then(|o| o.number)
+                    {
                         let number: u64 = number.try_into().unwrap_or(u64::MAX);
                         if number <= prev_block_number {
                             return Err(EthApiError::other(EthSimulateError::BlockNumberInvalid {
@@ -123,16 +144,121 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                             })
                             .into());
                         }
+                        number
+                    } else {
+                        parent.number().saturating_add(1)
+                    };
+                    while parent.number().saturating_add(1) < target_block_number {
+                        if blocks.len() >= this.max_simulate_blocks() as usize {
+                            return Err(EthApiError::other(EthSimulateError::TooManyBlocks).into())
+                        }
+
+                        let block_timestamp = parent.timestamp().saturating_add(12);
+                        let parent_beacon_block_root = this
+                            .provider()
+                            .chain_spec()
+                            .is_cancun_active_at_timestamp(block_timestamp)
+                            .then_some(B256::ZERO);
+                        let attributes =
+                            this.simulate_env_attributes(&parent, parent_beacon_block_root)?;
+
+                        let mut evm_env = this
+                            .evm_config()
+                            .next_evm_env(&parent, &attributes)
+                            .map_err(RethError::other)
+                            .map_err(Self::Error::from_eth_err)?;
+
+                        evm_env.cfg_env.disable_eip3607 = true;
+
+                        if !validation {
+                            evm_env.cfg_env.disable_nonce_check = true;
+                            evm_env.cfg_env.disable_balance_check = true;
+                            evm_env.cfg_env.disable_base_fee = true;
+                            evm_env.cfg_env.tx_gas_limit_cap = Some(u64::MAX);
+                            evm_env.block_env.inner_mut().basefee = 0;
+                        }
+
+                        evm_env.block_env.inner_mut().prevrandao = Some(B256::ZERO);
+                        if !this
+                            .provider()
+                            .chain_spec()
+                            .is_paris_active_at_block(evm_env.block_env.number().saturating_to())
+                        {
+                            evm_env.block_env.inner_mut().difficulty = parent.difficulty();
+                        }
+                        let chain_id = evm_env.cfg_env.chain_id;
+
+                        let ctx = this
+                            .evm_config()
+                            .context_for_next_block(&parent, attributes)
+                            .map_err(RethError::other)
+                            .map_err(Self::Error::from_eth_err)?;
+
+                        let noop_provider = NoopProvider::default();
+                        let state_provider: &dyn StateProvider = state_root_provider
+                            .as_deref()
+                            .map_or(&noop_provider as &dyn StateProvider, |provider| provider);
+
+                        let result = if trace_transfers {
+                            let inspector = TransferInspector::new(false).with_logs(true);
+                            let evm = this
+                                .evm_config()
+                                .evm_with_env_and_inspector(&mut db, evm_env, inspector);
+                            let builder = this.evm_config().create_block_builder(evm, &parent, ctx);
+                            simulate::execute_transactions(
+                                builder,
+                                Vec::new(),
+                                this.call_gas_limit(),
+                                chain_id,
+                                state_provider,
+                                this.converter(),
+                                !validation,
+                                &mut base_nonces,
+                            )
+                            .map_err(map_err)?
+                            .0
+                        } else {
+                            let evm = this.evm_config().evm_with_env(&mut db, evm_env);
+                            let builder = this.evm_config().create_block_builder(evm, &parent, ctx);
+                            simulate::execute_transactions(
+                                builder,
+                                Vec::new(),
+                                this.call_gas_limit(),
+                                chain_id,
+                                state_provider,
+                                this.converter(),
+                                !validation,
+                                &mut base_nonces,
+                            )
+                            .map_err(map_err)?
+                            .0
+                        };
+
+                        parent = result.block.clone_sealed_header();
+
+                        let block = simulate::build_simulated_block::<Self::Error, _>(
+                            result.block,
+                            Vec::new(),
+                            return_full_transactions.into(),
+                            this.converter(),
+                        )?;
+
+                        blocks.push(block);
                     }
-                    // Validate timestamp ordering if overridden
+
+                    if blocks.len() >= this.max_simulate_blocks() as usize {
+                        return Err(EthApiError::other(EthSimulateError::TooManyBlocks).into())
+                    }
+
+                    // Validate timestamp ordering after skipped blocks have been inserted.
                     if let Some(time) = block_overrides
                         .as_ref()
                         .and_then(|o| o.time)
-                        .filter(|&t| t <= prev_timestamp)
+                        .filter(|&t| t <= parent.timestamp())
                     {
                         return Err(EthApiError::other(EthSimulateError::BlockTimestampInvalid {
                             got: time,
-                            parent: prev_timestamp,
+                            parent: parent.timestamp(),
                         })
                         .into());
                     }
@@ -175,6 +301,13 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                     // matching spec behavior where MixDigest is zero-initialized.
                     // If user provides an override, it will be applied by apply_block_overrides.
                     evm_env.block_env.inner_mut().prevrandao = Some(B256::ZERO);
+                    if !this
+                        .provider()
+                        .chain_spec()
+                        .is_paris_active_at_block(evm_env.block_env.number().saturating_to())
+                    {
+                        evm_env.block_env.inner_mut().difficulty = parent.difficulty();
+                    }
 
                     if let Some(block_overrides) = block_overrides {
                         let blob_base_fee = block_overrides.blob_base_fee;
@@ -226,12 +359,6 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                         .context_for_next_block(&parent, attributes)
                         .map_err(RethError::other)
                         .map_err(Self::Error::from_eth_err)?;
-                    let map_err = |e: EthApiError| -> Self::Error {
-                        match e.as_simulate_error() {
-                            Some(sim_err) => Self::Error::from_eth_err(EthApiError::other(sim_err)),
-                            None => Self::Error::from_eth_err(e),
-                        }
-                    };
 
                     let (result, results) = if trace_transfers {
                         // prepare inspector to capture transfer inside the evm so they are recorded
@@ -261,6 +388,8 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                             chain_id,
                             state_provider,
                             this.converter(),
+                            !validation,
+                            &mut base_nonces,
                         )
                         .map_err(map_err)?
                     } else {
@@ -286,6 +415,8 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                             chain_id,
                             state_provider,
                             this.converter(),
+                            !validation,
+                            &mut base_nonces,
                         )
                         .map_err(map_err)?
                     };
@@ -294,7 +425,6 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
 
                     // Update tracking for next iteration's validation
                     prev_block_number = parent.number();
-                    prev_timestamp = parent.timestamp();
 
                     let block = simulate::build_simulated_block::<Self::Error, _>(
                         result.block,

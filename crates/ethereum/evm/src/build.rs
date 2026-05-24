@@ -70,6 +70,11 @@ where
             .chain_spec
             .is_prague_active_at_timestamp(timestamp)
             .then(|| requests.requests_hash());
+        let block_number = evm_env.block_env.number().saturating_to();
+        let base_fee_per_gas = self
+            .chain_spec
+            .is_london_active_at_block(block_number)
+            .then(|| evm_env.block_env.basefee());
 
         let mut excess_blob_gas = None;
         let mut block_blob_gas_used = None;
@@ -103,8 +108,8 @@ where
             timestamp,
             mix_hash: evm_env.block_env.prevrandao().unwrap_or_default(),
             nonce: BEACON_NONCE.into(),
-            base_fee_per_gas: Some(evm_env.block_env.basefee()),
-            number: evm_env.block_env.number().saturating_to(),
+            base_fee_per_gas,
+            number: block_number,
             gas_limit: evm_env.block_env.gas_limit(),
             difficulty: evm_env.block_env.difficulty(),
             gas_used: *gas_used,

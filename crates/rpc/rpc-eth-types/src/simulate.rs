@@ -4,7 +4,7 @@ use crate::{
     error::{api::FromEthApiError, FromEvmError, ToRpcError},
     EthApiError,
 };
-use alloy_consensus::{transaction::TxHashRef, BlockHeader, Transaction as _};
+use alloy_consensus::{transaction::TxHashRef, BlockHeader, Transaction};
 use alloy_eips::eip2718::WithEncoded;
 use alloy_evm::{block::TxResult, precompiles::PrecompilesMap};
 use alloy_network::{NetworkTransactionBuilder, TransactionBuilder};
@@ -28,6 +28,7 @@ use revm::{
     primitives::{Address, Bytes, TxKind, U256},
     Database,
 };
+use std::collections::HashMap;
 
 /// Error code for execution reverted in `eth_simulateV1`.
 ///
@@ -180,6 +181,8 @@ pub fn execute_transactions<S, T>(
     chain_id: u64,
     state_provider: &dyn StateProvider,
     converter: &T,
+    enforce_value_balance: bool,
+    base_nonces: &mut HashMap<Address, u64>,
 ) -> Result<
     (
         BlockBuilderOutcome<S::Primitives>,
@@ -198,8 +201,30 @@ where
     let default_gas_limit_cap =
         if call_gas_limit > 0 { block_gas_limit.min(call_gas_limit) } else { block_gas_limit };
     let mut cumulative_gas_used = 0u64;
-    for call in calls {
+    let mut next_nonces = HashMap::new();
+    for mut call in calls {
         let default_gas_limit = default_gas_limit_cap.saturating_sub(cumulative_gas_used);
+        if call.as_ref().nonce().is_none() {
+            let from = call.as_ref().from().unwrap_or_default();
+            let nonce = if let Some(nonce) = next_nonces.get(&from).copied() {
+                nonce
+            } else if let Some(nonce) = base_nonces.get(&from).copied() {
+                nonce
+            } else {
+                let nonce = builder
+                    .evm_mut()
+                    .db_mut()
+                    .basic(from)
+                    .map_err(Into::into)?
+                    .map(|acc| acc.nonce)
+                    .unwrap_or_default();
+                base_nonces.insert(from, nonce);
+                nonce
+            };
+            call.as_mut().set_nonce(nonce);
+            next_nonces.insert(from, nonce.saturating_add(1));
+        }
+
         // Resolve transaction, populate missing fields and enforce calls
         // correctness.
         let tx = resolve_transaction(
@@ -209,6 +234,7 @@ where
             chain_id,
             builder.evm_mut().db_mut(),
             converter,
+            enforce_value_balance,
         )?;
         // Create transaction with an empty envelope.
         // The effect for a layer-2 execution client is that it does not charge L1 cost.
@@ -238,10 +264,12 @@ pub fn resolve_transaction<DB: Database, Tx, T>(
     chain_id: u64,
     db: &mut DB,
     converter: &T,
+    enforce_value_balance: bool,
 ) -> Result<Recovered<Tx>, EthApiError>
 where
     DB::Error: Into<EthApiError>,
     T: RpcConvert<Primitives: NodePrimitives<SignedTx = Tx>>,
+    Tx: Transaction,
 {
     // If we're missing any fields we try to fill nonce, gas and
     // gas price.
@@ -297,6 +325,20 @@ where
 
     let tx =
         converter.build_simulate_v1_transaction(tx).map_err(|e| EthApiError::other(e.into()))?;
+
+    if enforce_value_balance {
+        let value = tx.value();
+        if !value.is_zero() {
+            let balance =
+                db.basic(from).map_err(Into::into)?.map(|acc| acc.balance).unwrap_or_default();
+            if balance < value {
+                return Err(EthApiError::other(EthSimulateError::InsufficientFunds {
+                    cost: value,
+                    balance,
+                }))
+            }
+        }
+    }
 
     Ok(Recovered::new_unchecked(tx, from))
 }

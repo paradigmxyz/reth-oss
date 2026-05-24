@@ -9,6 +9,7 @@ use alloy_rpc_types_eth::{
 use reth_chainspec::{ChainSpecBuilder, MAINNET};
 use reth_e2e_test_utils::setup_engine;
 use reth_node_ethereum::EthereumNode;
+use reth_provider::BlockNumReader;
 use std::sync::Arc;
 
 /// Tests that `eth_simulateV1` handles a transaction with `maxFeePerBlobGas` set but no
@@ -77,6 +78,51 @@ async fn test_simulate_v1_with_max_fee_per_blob_gas_only() -> eyre::Result<()> {
     assert!(call.status, "expected call to succeed");
     assert!(call.error.is_none(), "expected no error");
     assert_eq!(call.max_used_gas, Some(call.gas_used), "expected maxUsedGas in call result");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_simulate_v1_includes_skipped_blocks() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let chain_spec = Arc::new(
+        ChainSpecBuilder::default()
+            .chain(MAINNET.chain)
+            .genesis(serde_json::from_str(include_str!("../assets/genesis.json")).unwrap())
+            .cancun_activated()
+            .build(),
+    );
+
+    let (mut nodes, wallet) = setup_engine::<EthereumNode>(
+        1,
+        chain_spec,
+        false,
+        Default::default(),
+        eth_payload_attributes,
+    )
+    .await?;
+    let node = nodes.pop().unwrap();
+    let provider = ProviderBuilder::new()
+        .wallet(EthereumWallet::new(wallet.wallet_gen().swap_remove(0)))
+        .connect_http(node.rpc_url());
+
+    let latest = node.inner.provider.best_block_number()?;
+    let payload: SimulatePayload<TransactionRequest> = SimulatePayload::default()
+        .extend(SimBlock::default())
+        .extend(SimBlock::default().with_block_overrides(BlockOverrides {
+            number: Some(U256::from(latest + 3)),
+            ..Default::default()
+        }));
+
+    let result: Vec<SimulatedBlock> =
+        provider.raw_request("eth_simulateV1".into(), (&payload, "latest")).await?;
+
+    assert_eq!(result.len(), 3);
+    for (index, block) in result.iter().enumerate() {
+        assert_eq!(block.inner.header.number, latest + index as u64 + 1);
+        assert!(block.calls.is_empty());
+    }
 
     Ok(())
 }
