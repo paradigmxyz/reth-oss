@@ -313,12 +313,18 @@ pub struct Cells {
 
 #[cfg(test)]
 mod tests {
-    use crate::{message::RequestPair, GetPooledTransactions, PooledTransactions};
-    use alloy_consensus::{transaction::PooledTransaction, TxEip1559, TxLegacy};
-    use alloy_primitives::{hex, Signature, TxKind, U256};
+    use crate::{
+        message::RequestPair, GetPooledTransactions, PooledTransactions, PooledTransactionsEth72,
+    };
+    use alloy_consensus::{transaction::PooledTransaction, Signed, TxEip1559, TxEip4844, TxLegacy};
+    use alloy_eips::{
+        eip4844::Blob,
+        eip7594::{BlobTransactionSidecarEip7594, BlobTransactionSidecarVariant},
+    };
+    use alloy_primitives::{hex, Address, Bytes, Signature, TxKind, B256, U256};
     use alloy_rlp::{Decodable, Encodable};
     use reth_chainspec::MIN_TRANSACTION_GAS;
-    use reth_ethereum_primitives::{Transaction, TransactionSigned};
+    use reth_ethereum_primitives::{PooledTransactionVariant, Transaction, TransactionSigned};
     use std::str::FromStr;
 
     #[test]
@@ -768,5 +774,56 @@ mod tests {
         let expected_str = hex::encode(expected);
         assert_eq!(encoded_str.len(), expected_str.len());
         assert_eq!(encoded_str, expected_str);
+    }
+
+    #[test]
+    fn eth72_pooled_transactions_elides_blob_payloads() {
+        let commitment = [0x11; 48].into();
+        let cell_proof = [0x22; 48].into();
+        let sidecar = BlobTransactionSidecarVariant::Eip7594(BlobTransactionSidecarEip7594 {
+            blobs: vec![Blob::default()],
+            commitments: vec![commitment],
+            cell_proofs: vec![cell_proof],
+        });
+        let tx = TxEip4844 {
+            chain_id: 1,
+            nonce: 1,
+            gas_limit: MIN_TRANSACTION_GAS,
+            max_fee_per_gas: 1,
+            max_priority_fee_per_gas: 1,
+            to: Address::ZERO,
+            value: U256::ZERO,
+            access_list: Default::default(),
+            blob_versioned_hashes: vec![B256::repeat_byte(0x33)],
+            max_fee_per_blob_gas: 1,
+            input: Bytes::new(),
+        };
+        let tx: PooledTransactionVariant =
+            Signed::new_unhashed(tx.with_sidecar(sidecar), Signature::test_signature()).into();
+
+        let sparse = PooledTransactionsEth72(PooledTransactions(vec![tx.clone()]));
+        let mut sparse_encoded = Vec::new();
+        sparse.encode(&mut sparse_encoded);
+
+        let mut full_encoded = Vec::new();
+        PooledTransactions(vec![tx]).encode(&mut full_encoded);
+        assert!(sparse_encoded.len() < full_encoded.len());
+
+        let decoded =
+            PooledTransactions::<PooledTransactionVariant>::decode_eth72_with_memory_budget(
+                &mut sparse_encoded.as_ref(),
+                usize::MAX,
+            )
+            .unwrap();
+        let PooledTransactionVariant::Eip4844(decoded) = &decoded.0[0] else {
+            panic!("expected blob transaction")
+        };
+        let BlobTransactionSidecarVariant::Eip7594(decoded_sidecar) = &decoded.tx().sidecar else {
+            panic!("expected eip7594 sidecar")
+        };
+
+        assert!(decoded_sidecar.blobs.is_empty());
+        assert_eq!(decoded_sidecar.commitments, vec![commitment]);
+        assert_eq!(decoded_sidecar.cell_proofs, vec![cell_proof]);
     }
 }
