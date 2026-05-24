@@ -36,7 +36,7 @@ use reth_rpc_eth_types::{
     cache::db::StateProviderTraitObjWrapper,
     error::{AsEthApiError, FromEthApiError},
     simulate::{self, EthSimulateError},
-    EthApiError, StateCacheDb,
+    EthApiError, RpcInvalidTransactionError, StateCacheDb,
 };
 use reth_rpc_server_types::result::{block_id_to_str, invalid_params_rpc_err, rpc_error_with_code};
 use reth_storage_api::{
@@ -117,6 +117,15 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                 let mut prev_block_number = parent.number();
                 let map_err = |e: EthApiError| -> Self::Error {
                     if validation {
+                        if matches!(
+                            e,
+                            EthApiError::InvalidTransaction(
+                                RpcInvalidTransactionError::NonceMaxValue
+                            )
+                        ) {
+                            return Self::Error::from_eth_err(EthApiError::InternalEthError)
+                        }
+
                         if e.as_simulate_error().is_some() {
                             return Self::Error::from_eth_err(EthApiError::other(
                                 invalid_params_rpc_err(e.to_string()),
@@ -335,6 +344,22 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                                 });
                         }
                     }
+                    let state_overrides = state_overrides.map(|mut overrides| {
+                        if !validation {
+                            for call in &calls {
+                                if call.as_ref().nonce().is_none() {
+                                    let from = call.as_ref().from().unwrap_or_default();
+                                    if let Some(account_override) = overrides.get_mut(&from) &&
+                                        account_override.nonce == Some(u64::MAX)
+                                    {
+                                        account_override.nonce = None;
+                                    }
+                                }
+                            }
+                        }
+                        overrides
+                    });
+
                     if let Some(ref state_overrides) = state_overrides {
                         apply_state_overrides(state_overrides.clone(), &mut db)
                             .map_err(Self::Error::from_eth_err)?;
