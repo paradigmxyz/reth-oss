@@ -325,7 +325,7 @@ where
                         ..SimulateError::invalid_params()
                     }),
                     gas_used: gas.tx_gas_used(),
-                    max_used_gas: Some(gas.tx_gas_used()),
+                    max_used_gas: Some(gas.total_gas_spent()),
                     logs: Vec::new(),
                     status: false,
                 }
@@ -340,7 +340,7 @@ where
                         ..SimulateError::invalid_params()
                     }),
                     gas_used: gas.tx_gas_used(),
-                    max_used_gas: Some(gas.tx_gas_used()),
+                    max_used_gas: Some(gas.total_gas_spent()),
                     status: false,
                     logs: Vec::new(),
                 }
@@ -349,7 +349,7 @@ where
                 return_data: output.into_data(),
                 error: None,
                 gas_used: gas.tx_gas_used(),
-                max_used_gas: Some(gas.tx_gas_used()),
+                max_used_gas: Some(gas.total_gas_spent()),
                 logs: logs
                     .into_iter()
                     .map(|log| {

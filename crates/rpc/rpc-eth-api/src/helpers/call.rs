@@ -15,7 +15,7 @@ use alloy_primitives::{Bytes, B256, U256};
 use alloy_rpc_types_eth::{
     simulate::{SimBlock, SimulatePayload, SimulatedBlock},
     state::{EvmOverrides, StateOverride},
-    BlockId, Bundle, EthCallResponse, StateContext, TransactionInfo,
+    BlockId, BlockOverrides, Bundle, EthCallResponse, StateContext, TransactionInfo,
 };
 use futures::Future;
 use reth_chainspec::{ChainSpecProvider, EthereumHardforks};
@@ -75,14 +75,10 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
         block: Option<BlockId>,
     ) -> impl Future<Output = SimulatedBlocksResult<Self::NetworkTypes, Self::Error>> + Send {
         async move {
-            if payload.block_state_calls.len() > self.max_simulate_blocks() as usize {
-                return Err(EthApiError::other(EthSimulateError::TooManyBlocks).into())
-            }
-
             let block = block.unwrap_or_default();
 
             let SimulatePayload {
-                block_state_calls,
+                mut block_state_calls,
                 trace_transfers,
                 validation,
                 return_full_transactions,
@@ -101,6 +97,13 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                 None
             };
             let mut parent = base_block.sealed_header().clone();
+
+            block_state_calls = simulate_block_sequence(
+                block_state_calls,
+                parent.number(),
+                parent.timestamp(),
+                self.max_simulate_blocks(),
+            )?;
 
             self.spawn_with_state_at_block_with_bundle_update(base_block_id, move |this, mut db| {
                 let mut blocks: Vec<SimulatedBlock<RpcBlock<Self::NetworkTypes>>> =
@@ -998,5 +1001,105 @@ pub trait Call:
         }
 
         Ok((evm_env, tx_env))
+    }
+}
+
+fn simulate_block_sequence<T>(
+    blocks: Vec<SimBlock<T>>,
+    base_number: u64,
+    base_timestamp: u64,
+    max_blocks: u64,
+) -> Result<Vec<SimBlock<T>>, EthApiError> {
+    let mut expanded = Vec::with_capacity(blocks.len());
+    let mut prev_number = base_number;
+    let mut prev_timestamp = base_timestamp;
+
+    for mut block in blocks {
+        let block_overrides = block.block_overrides.get_or_insert_with(BlockOverrides::default);
+        let number = block_overrides
+            .number
+            .map(|number| number.try_into().unwrap_or(u64::MAX))
+            .unwrap_or_else(|| prev_number.saturating_add(1));
+
+        if number <= prev_number {
+            return Err(EthApiError::other(EthSimulateError::BlockNumberInvalid {
+                got: number,
+                parent: prev_number,
+            }))
+        }
+
+        while prev_number.saturating_add(1) < number {
+            prev_number = prev_number.saturating_add(1);
+            prev_timestamp = prev_timestamp.saturating_add(12);
+            expanded.push(SimBlock {
+                block_overrides: Some(BlockOverrides {
+                    number: Some(U256::from(prev_number)),
+                    time: Some(prev_timestamp),
+                    ..Default::default()
+                }),
+                state_overrides: None,
+                calls: Vec::new(),
+            });
+
+            if expanded.len() > max_blocks as usize {
+                return Err(EthApiError::other(EthSimulateError::TooManyBlocks))
+            }
+        }
+
+        block_overrides.number.get_or_insert(U256::from(number));
+
+        let timestamp = block_overrides.time.unwrap_or_else(|| prev_timestamp.saturating_add(12));
+        if timestamp <= prev_timestamp {
+            return Err(EthApiError::other(EthSimulateError::BlockTimestampInvalid {
+                got: timestamp,
+                parent: prev_timestamp,
+            }))
+        }
+        block_overrides.time.get_or_insert(timestamp);
+
+        prev_number = number;
+        prev_timestamp = timestamp;
+        expanded.push(block);
+
+        if expanded.len() > max_blocks as usize {
+            return Err(EthApiError::other(EthSimulateError::TooManyBlocks))
+        }
+    }
+
+    Ok(expanded)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn simulate_block_sequence_fills_number_gaps() {
+        let blocks = vec![SimBlock::<()> {
+            block_overrides: Some(BlockOverrides {
+                number: Some(U256::from(13)),
+                ..Default::default()
+            }),
+            state_overrides: None,
+            calls: Vec::new(),
+        }];
+
+        let blocks = simulate_block_sequence(blocks, 10, 100, 256).unwrap();
+
+        assert_eq!(blocks.len(), 3);
+        assert_eq!(
+            blocks
+                .iter()
+                .map(|block| block.block_overrides.as_ref().unwrap().number.unwrap())
+                .collect::<Vec<_>>(),
+            vec![U256::from(11), U256::from(12), U256::from(13)]
+        );
+        assert_eq!(
+            blocks
+                .iter()
+                .map(|block| block.block_overrides.as_ref().unwrap().time.unwrap())
+                .collect::<Vec<_>>(),
+            vec![112, 124, 136]
+        );
     }
 }
