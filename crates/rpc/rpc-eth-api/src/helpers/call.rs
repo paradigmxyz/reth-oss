@@ -112,6 +112,7 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                 let mut blocks: Vec<SimulatedBlock<RpcBlock<Self::NetworkTypes>>> =
                     Vec::with_capacity(block_state_calls.len());
                 let mut base_nonces = HashMap::new();
+                let mut remaining_call_gas_limit = this.call_gas_limit();
 
                 // Track previous block number and timestamp for validation
                 let mut prev_block_number = parent.number();
@@ -218,7 +219,7 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                             simulate::execute_transactions(
                                 builder,
                                 Vec::new(),
-                                this.call_gas_limit(),
+                                &mut remaining_call_gas_limit,
                                 chain_id,
                                 state_provider,
                                 this.converter(),
@@ -234,7 +235,7 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                             simulate::execute_transactions(
                                 builder,
                                 Vec::new(),
-                                this.call_gas_limit(),
+                                &mut remaining_call_gas_limit,
                                 chain_id,
                                 state_provider,
                                 this.converter(),
@@ -371,7 +372,6 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                     let block_gas_limit = evm_env.block_env.gas_limit();
                     let chain_id = evm_env.cfg_env.chain_id;
 
-                    let call_gas_limit = this.call_gas_limit();
                     let total_specified_gas =
                         calls.iter().filter_map(|tx| tx.as_ref().gas_limit()).sum::<u64>();
 
@@ -413,7 +413,7 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                         simulate::execute_transactions(
                             builder,
                             calls,
-                            call_gas_limit,
+                            &mut remaining_call_gas_limit,
                             chain_id,
                             state_provider,
                             this.converter(),
@@ -441,7 +441,7 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                         simulate::execute_transactions(
                             builder,
                             calls,
-                            call_gas_limit,
+                            &mut remaining_call_gas_limit,
                             chain_id,
                             state_provider,
                             this.converter(),

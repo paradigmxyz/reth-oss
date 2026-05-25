@@ -352,7 +352,7 @@ pub fn apply_precompile_overrides(
 pub fn execute_transactions<S, T>(
     mut builder: S,
     calls: Vec<RpcTxReq<T::Network>>,
-    call_gas_limit: u64,
+    remaining_call_gas_limit: &mut u64,
     chain_id: u64,
     state_provider: &dyn StateProvider,
     converter: &T,
@@ -374,13 +374,16 @@ where
 
     let mut results = Vec::with_capacity(calls.len());
     let block_gas_limit = builder.evm().block().gas_limit();
-    let default_gas_limit_cap =
-        if call_gas_limit > 0 { block_gas_limit.min(call_gas_limit) } else { block_gas_limit };
     let mut cumulative_gas_used = 0u64;
     let mut next_nonces = HashMap::new();
     let mut next_transfer = 0;
     for mut call in calls {
-        let default_gas_limit = default_gas_limit_cap.saturating_sub(cumulative_gas_used);
+        let block_remaining_gas = block_gas_limit.saturating_sub(cumulative_gas_used);
+        let default_gas_limit = if *remaining_call_gas_limit > 0 {
+            block_remaining_gas.min(*remaining_call_gas_limit)
+        } else {
+            block_remaining_gas
+        };
         let from = call.as_ref().from().unwrap_or_default();
         if call.as_ref().nonce().is_none() {
             let nonce = if let Some(nonce) = next_nonces.get(&from).copied() {
@@ -400,6 +403,12 @@ where
             };
             call.as_mut().set_nonce(nonce);
             next_nonces.insert(from, nonce.saturating_add(1));
+        }
+        if let Some(gas_limit) = call.as_ref().gas_limit() &&
+            *remaining_call_gas_limit > 0 &&
+            gas_limit > *remaining_call_gas_limit
+        {
+            call.as_mut().set_gas_limit(*remaining_call_gas_limit);
         }
 
         // Resolve transaction, populate missing fields and enforce calls
@@ -428,6 +437,10 @@ where
         })?;
         next_nonces.insert(from, next_nonce);
         cumulative_gas_used = cumulative_gas_used.saturating_add(gas_output.tx_gas_used());
+        if *remaining_call_gas_limit > 0 {
+            *remaining_call_gas_limit =
+                remaining_call_gas_limit.saturating_sub(gas_output.tx_gas_used());
+        }
     }
 
     base_nonces.extend(next_nonces);
