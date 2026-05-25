@@ -1,5 +1,5 @@
 use crate::utils::eth_payload_attributes;
-use alloy_primitives::{Address, Bytes, B256, U256};
+use alloy_primitives::{Address, Bytes, U256};
 use alloy_provider::{network::EthereumWallet, Provider, ProviderBuilder};
 use alloy_rpc_types_eth::{
     simulate::{SimBlock, SimulatePayload, SimulatedBlock},
@@ -128,7 +128,7 @@ async fn test_simulate_v1_includes_skipped_blocks() -> eyre::Result<()> {
 }
 
 #[tokio::test]
-async fn test_simulate_v1_blockhash_reads_skipped_blocks() -> eyre::Result<()> {
+async fn test_simulate_v1_blockhash_returns_zero_for_skipped_blocks() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
     let chain_spec = Arc::new(
@@ -177,10 +177,8 @@ async fn test_simulate_v1_blockhash_reads_skipped_blocks() -> eyre::Result<()> {
 
     assert_eq!(result.len(), 2);
     assert_eq!(result[1].calls.len(), 1);
-    assert_eq!(
-        B256::from_slice(result[1].calls[0].return_data.as_ref()),
-        result[1].inner.header.inner.parent_hash
-    );
+    assert_eq!(result[1].inner.header.inner.parent_hash, result[0].inner.header.hash);
+    assert_eq!(result[1].calls[0].return_data, Bytes::from([0; 32]));
 
     Ok(())
 }
