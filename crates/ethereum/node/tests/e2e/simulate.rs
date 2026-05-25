@@ -128,7 +128,7 @@ async fn test_simulate_v1_includes_skipped_blocks() -> eyre::Result<()> {
 }
 
 #[tokio::test]
-async fn test_simulate_v1_blockhash_returns_zero_for_skipped_blocks() -> eyre::Result<()> {
+async fn test_simulate_v1_blockhash_uses_skipped_block_hashes() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
     let chain_spec = Arc::new(
@@ -178,7 +178,10 @@ async fn test_simulate_v1_blockhash_returns_zero_for_skipped_blocks() -> eyre::R
     assert_eq!(result.len(), 2);
     assert_eq!(result[1].calls.len(), 1);
     assert_eq!(result[1].inner.header.inner.parent_hash, result[0].inner.header.hash);
-    assert_eq!(result[1].calls[0].return_data, Bytes::from([0; 32]));
+    assert_eq!(
+        result[1].calls[0].return_data,
+        Bytes::copy_from_slice(result[0].inner.header.hash.as_slice())
+    );
 
     Ok(())
 }

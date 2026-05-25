@@ -114,6 +114,7 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                     Vec::with_capacity(block_state_calls.len());
                 let mut base_nonces = HashMap::new();
                 let mut remaining_call_gas_limit = this.call_gas_limit();
+                let mut block_hashes = BTreeMap::new();
 
                 // Track previous block number and timestamp for validation
                 let mut prev_block_number = parent.number();
@@ -250,7 +251,8 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
 
                         let block_hash = result.block.hash();
                         let block_number = result.block.number();
-                        db.override_block_hashes(BTreeMap::from([(block_number, block_hash)]));
+                        block_hashes.insert(block_number, block_hash);
+                        db.override_block_hashes(block_hashes.clone());
                         parent = result.block.clone_sealed_header();
 
                         let block = simulate::build_simulated_block::<Self::Error, _>(
@@ -442,7 +444,8 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
 
                     let block_hash = result.block.hash();
                     let block_number = result.block.number();
-                    db.override_block_hashes(BTreeMap::from([(block_number, block_hash)]));
+                    block_hashes.insert(block_number, block_hash);
+                    db.override_block_hashes(block_hashes.clone());
                     parent = result.block.clone_sealed_header();
 
                     // Update tracking for next iteration's validation
