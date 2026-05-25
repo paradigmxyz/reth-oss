@@ -30,6 +30,7 @@ use reth_storage_api::StateProvider;
 use revm::{
     context::{Block, JournalTr, TxEnv},
     context_interface::{result::ExecutionResult, ContextTr, CreateScheme},
+    database::{State as RevmState, StorageWithOriginalValues},
     interpreter::{CallInputs, CallOutcome, CreateInputs, CreateOutcome},
     primitives::{Address, Bytes, TxKind, U256},
     Database, Inspector,
@@ -294,6 +295,43 @@ fn set_execution_nonce<T: Any>(tx_env: &mut T, nonce: u64) {
     }
 }
 
+/// Updates the executable state nonce without changing the transaction committed to the synthetic
+/// block.
+pub trait SimulateStateNonce {
+    /// Database error type.
+    type Error;
+
+    /// Sets an account nonce in the active state cache and records the transition.
+    fn set_simulate_account_nonce(
+        &mut self,
+        address: Address,
+        nonce: u64,
+    ) -> Result<(), Self::Error>;
+}
+
+impl<DB: Database> SimulateStateNonce for &mut RevmState<DB> {
+    type Error = DB::Error;
+
+    fn set_simulate_account_nonce(
+        &mut self,
+        address: Address,
+        nonce: u64,
+    ) -> Result<(), Self::Error> {
+        let transition = {
+            let account = self.load_cache_account(address)?;
+            let mut info = account.account_info().unwrap_or_default();
+            info.nonce = nonce;
+            account.change(info, StorageWithOriginalValues::default())
+        };
+
+        if let Some(transition_state) = self.transition_state.as_mut() {
+            transition_state.add_transitions([(address, transition)]);
+        }
+
+        Ok(())
+    }
+}
+
 impl EthSimulateError {
     /// Returns the JSON-RPC error code for a `eth_simulateV1` error.
     pub const fn error_code(&self) -> i32 {
@@ -393,6 +431,7 @@ pub fn execute_transactions<S, T>(
 >
 where
     S: BlockBuilder<Executor: BlockExecutor<Evm: Evm<DB: Database<Error: Into<EthApiError>>>>>,
+    <<S::Executor as BlockExecutor>::Evm as Evm>::DB: SimulateStateNonce<Error: Into<EthApiError>>,
     <<S::Executor as BlockExecutor>::Evm as Evm>::Tx: Any,
     T: RpcConvert<Primitives = S::Primitives>,
 {
@@ -474,6 +513,13 @@ where
                 results.push(result)
             })?
         };
+        if enforce_value_balance && tx_nonce == u64::MAX {
+            builder
+                .evm_mut()
+                .db_mut()
+                .set_simulate_account_nonce(from, next_nonce)
+                .map_err(Into::into)?;
+        }
         next_nonces.insert(from, next_nonce);
         cumulative_gas_used = cumulative_gas_used.saturating_add(gas_output.tx_gas_used());
         if *remaining_call_gas_limit > 0 {
