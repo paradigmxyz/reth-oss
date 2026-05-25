@@ -6,7 +6,10 @@ use crate::{
 };
 use alloy_consensus::{transaction::TxHashRef, BlockHeader, Transaction};
 use alloy_eips::eip2718::WithEncoded;
-use alloy_evm::{block::TxResult, precompiles::PrecompilesMap};
+use alloy_evm::{
+    block::TxResult,
+    precompiles::{DynPrecompile, PrecompilesMap},
+};
 use alloy_network::{NetworkTransactionBuilder, TransactionBuilder};
 use alloy_primitives::{Log, LogData, B256};
 use alloy_rpc_types_eth::{
@@ -327,6 +330,7 @@ pub fn apply_precompile_overrides(
         })
         .collect();
 
+    let mut moved_precompiles = HashMap::with_capacity(moves.len());
     for (source, dest) in moves {
         if source == dest {
             if precompiles.get(&source).is_none() {
@@ -335,11 +339,22 @@ pub fn apply_precompile_overrides(
             return Err(EthSimulateError::MovePrecompileToSelf(source))
         }
 
-        precompiles.move_precompiles([(source, dest)]).map_err(
-            |alloy_evm::precompiles::MovePrecompileError::NotAPrecompile(addr)| {
-                EthSimulateError::NotAPrecompile(addr)
-            },
-        )?;
+        let mut moved_precompile = None;
+        precompiles.apply_precompile(&source, |existing| {
+            moved_precompile = existing;
+            None
+        });
+
+        let Some(precompile) = moved_precompile else {
+            return Err(EthSimulateError::NotAPrecompile(source))
+        };
+        moved_precompiles.insert(dest, precompile);
+    }
+
+    if !moved_precompiles.is_empty() {
+        precompiles.set_precompile_lookup(move |address: &Address| -> Option<DynPrecompile> {
+            moved_precompiles.get(address).cloned()
+        });
     }
 
     Ok(())
@@ -678,5 +693,23 @@ mod tests {
         let err = apply_precompile_overrides(&state_overrides, &mut precompiles).unwrap_err();
 
         assert!(matches!(err, EthSimulateError::MovePrecompileToSelf(addr) if addr == address));
+    }
+
+    #[test]
+    fn moved_precompile_is_callable_but_not_warm() {
+        let source = address!("0000000000000000000000000000000000000001");
+        let dest = address!("0000000000000000000000000000000000123456");
+        let mut state_overrides = StateOverride::default();
+        state_overrides.insert(
+            source,
+            AccountOverride { move_precompile_to: Some(dest), ..Default::default() },
+        );
+        let mut precompiles = PrecompilesMap::from_static(Precompiles::prague());
+
+        apply_precompile_overrides(&state_overrides, &mut precompiles).unwrap();
+
+        assert!(precompiles.get(&source).is_none());
+        assert!(precompiles.get(&dest).is_some());
+        assert!(!precompiles.addresses().any(|address| address == &dest));
     }
 }
