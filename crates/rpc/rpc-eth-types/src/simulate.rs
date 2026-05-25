@@ -381,8 +381,8 @@ where
     let mut next_transfer = 0;
     for mut call in calls {
         let default_gas_limit = default_gas_limit_cap.saturating_sub(cumulative_gas_used);
+        let from = call.as_ref().from().unwrap_or_default();
         if call.as_ref().nonce().is_none() {
-            let from = call.as_ref().from().unwrap_or_default();
             let nonce = if let Some(nonce) = next_nonces.get(&from).copied() {
                 nonce
             } else if let Some(nonce) = base_nonces.get(&from).copied() {
@@ -413,6 +413,8 @@ where
             converter,
             enforce_value_balance,
         )?;
+        let next_nonce = tx.nonce().saturating_add(1);
+
         // Create transaction with an empty envelope.
         // The effect for a layer-2 execution client is that it does not charge L1 cost.
         let tx = WithEncoded::new(Default::default(), tx);
@@ -424,8 +426,11 @@ where
             }
             results.push(result)
         })?;
+        next_nonces.insert(from, next_nonce);
         cumulative_gas_used = cumulative_gas_used.saturating_add(gas_output.tx_gas_used());
     }
+
+    base_nonces.extend(next_nonces);
 
     let result = builder.finish(state_provider, None)?;
 
