@@ -179,7 +179,7 @@ async fn test_simulate_v1_blockhash_reads_skipped_blocks() -> eyre::Result<()> {
     assert_eq!(result[1].calls.len(), 1);
     assert_eq!(
         B256::from_slice(result[1].calls[0].return_data.as_ref()),
-        result[0].inner.header.hash
+        result[1].inner.header.inner.parent_hash
     );
 
     Ok(())
