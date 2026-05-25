@@ -430,8 +430,6 @@ where
         cumulative_gas_used = cumulative_gas_used.saturating_add(gas_output.tx_gas_used());
     }
 
-    base_nonces.extend(next_nonces);
-
     let result = builder.finish(state_provider, None)?;
 
     Ok((result, results))
