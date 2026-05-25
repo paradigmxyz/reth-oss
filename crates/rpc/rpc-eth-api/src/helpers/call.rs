@@ -48,7 +48,7 @@ use revm::{
     Database, DatabaseCommit,
 };
 use revm_inspectors::access_list::AccessListInspector;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use tracing::{trace, warn};
 
 /// Result type for `eth_simulateV1` RPC method.
@@ -247,6 +247,9 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                             .0
                         };
 
+                        let block_hash = result.block.hash();
+                        let block_number = result.block.number();
+                        db.override_block_hashes(BTreeMap::from([(block_number, block_hash)]));
                         parent = result.block.clone_sealed_header();
 
                         let block = simulate::build_simulated_block::<Self::Error, _>(
@@ -452,6 +455,9 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                         .map_err(map_err)?
                     };
 
+                    let block_hash = result.block.hash();
+                    let block_number = result.block.number();
+                    db.override_block_hashes(BTreeMap::from([(block_number, block_hash)]));
                     parent = result.block.clone_sealed_header();
 
                     // Update tracking for next iteration's validation
