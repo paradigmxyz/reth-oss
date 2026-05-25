@@ -259,6 +259,7 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                             result.block,
                             Vec::new(),
                             return_full_transactions.into(),
+                            trace_transfers,
                             this.converter(),
                         )?;
 
@@ -455,6 +456,7 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                         result.block,
                         results,
                         return_full_transactions.into(),
+                        trace_transfers,
                         this.converter(),
                     )?;
 

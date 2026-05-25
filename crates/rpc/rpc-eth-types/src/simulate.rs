@@ -635,6 +635,7 @@ pub fn build_simulated_block<Err, T>(
     block: RecoveredBlock<BlockTy<T::Primitives>>,
     results: Vec<ExecutionResult<HaltReasonFor<T::Evm>>>,
     txs_kind: BlockTransactionsKind,
+    trace_transfers: bool,
     converter: &T,
 ) -> Result<SimulatedBlock<RpcBlock<T::Network>>, Err>
 where
@@ -651,6 +652,9 @@ where
     for (index, (result, tx)) in results.into_iter().zip(block.body().transactions()).enumerate() {
         let call = match result {
             ExecutionResult::Halt { reason, gas, .. } => {
+                if trace_transfers && !tx.value().is_zero() {
+                    log_index += 1;
+                }
                 let error = Err::from_evm_halt(reason, tx.gas_limit());
                 SimCallResult {
                     return_data: Bytes::new(),
@@ -666,6 +670,9 @@ where
                 }
             }
             ExecutionResult::Revert { output, gas, .. } => {
+                if trace_transfers && !tx.value().is_zero() {
+                    log_index += 1;
+                }
                 let error = Err::from_revert(output.clone());
                 SimCallResult {
                     return_data: Bytes::new(),
