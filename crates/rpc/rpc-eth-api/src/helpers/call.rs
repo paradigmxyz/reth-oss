@@ -93,7 +93,7 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
             if block_state_calls.is_empty() {
                 return Err(EthApiError::InvalidParams(String::from("calls are empty.")).into())
             }
-          
+
             let _permit = self.acquire_owned_blocking_io().await;
             let base_block = self.recovered_block(block).await?.ok_or_else(|| {
                 EthApiError::other(rpc_error_with_code(
@@ -352,22 +352,6 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                                 });
                         }
                     }
-                    let state_overrides = state_overrides.map(|mut overrides| {
-                        if !validation {
-                            for call in &calls {
-                                if call.as_ref().nonce().is_none() {
-                                    let from = call.as_ref().from().unwrap_or_default();
-                                    if let Some(account_override) = overrides.get_mut(&from) &&
-                                        account_override.nonce == Some(u64::MAX)
-                                    {
-                                        account_override.nonce = None;
-                                    }
-                                }
-                            }
-                        }
-                        overrides
-                    });
-
                     if let Some(ref state_overrides) = state_overrides {
                         apply_state_overrides(state_overrides.clone(), &mut db)
                             .map_err(Self::Error::from_eth_err)?;
