@@ -580,10 +580,11 @@ where
             ExecutionResult::Revert { output, gas, .. } => {
                 let error = Err::from_revert(output.clone());
                 SimCallResult {
-                    return_data: output,
+                    return_data: output.clone(),
                     error: Some(SimulateError {
                         message: error.to_string(),
                         code: SIMULATE_REVERT_CODE,
+                        data: Some(output),
                         ..SimulateError::invalid_params()
                     }),
                     gas_used: gas.tx_gas_used(),
