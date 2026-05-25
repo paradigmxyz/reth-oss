@@ -93,7 +93,8 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
             if block_state_calls.is_empty() {
                 return Err(EthApiError::InvalidParams(String::from("calls are empty.")).into())
             }
-
+          
+            let _permit = self.acquire_owned_blocking_io().await;
             let base_block = self.recovered_block(block).await?.ok_or_else(|| {
                 EthApiError::other(rpc_error_with_code(
                     -32000,
@@ -492,6 +493,8 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
             if bundles.is_empty() {
                 return Err(EthApiError::InvalidParams(String::from("bundles are empty.")).into());
             }
+
+            let _permit = self.acquire_owned_blocking_io().await;
 
             let StateContext { transaction_index, block_number } =
                 state_context.unwrap_or_default();
