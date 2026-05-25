@@ -587,7 +587,7 @@ where
             ExecutionResult::Revert { output, gas, .. } => {
                 let error = Err::from_revert(output.clone());
                 SimCallResult {
-                    return_data: output.clone(),
+                    return_data: Bytes::new(),
                     error: Some(SimulateError {
                         message: error.to_string(),
                         code: SIMULATE_REVERT_CODE,
