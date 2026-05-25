@@ -267,10 +267,9 @@ impl TransferLogCollector {
             return
         }
 
-        let logs = match result {
-            ExecutionResult::Success { logs, .. } |
-            ExecutionResult::Revert { logs, .. } |
-            ExecutionResult::Halt { logs, .. } => logs,
+        let ExecutionResult::Success { logs, .. } = result else {
+            *next_transfer = transfers.len();
+            return
         };
 
         logs.extend(transfers[*next_transfer..].iter().map(transfer_to_log));
