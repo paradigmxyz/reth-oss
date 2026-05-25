@@ -329,6 +329,9 @@ pub fn apply_precompile_overrides(
 
     for (source, dest) in moves {
         if source == dest {
+            if precompiles.get(&source).is_none() {
+                return Err(EthSimulateError::NotAPrecompile(source))
+            }
             return Err(EthSimulateError::MovePrecompileToSelf(source))
         }
 
@@ -402,7 +405,7 @@ where
                 nonce
             };
             call.as_mut().set_nonce(nonce);
-            next_nonces.insert(from, nonce.saturating_add(1));
+            next_nonces.insert(from, next_simulated_nonce(nonce));
         }
         if let Some(gas_limit) = call.as_ref().gas_limit() &&
             *remaining_call_gas_limit > 0 &&
@@ -422,7 +425,7 @@ where
             converter,
             enforce_value_balance,
         )?;
-        let next_nonce = tx.nonce().saturating_add(1);
+        let next_nonce = next_simulated_nonce(tx.nonce());
 
         // Create transaction with an empty envelope.
         // The effect for a layer-2 execution client is that it does not charge L1 cost.
@@ -448,6 +451,10 @@ where
     let result = builder.finish(state_provider, None)?;
 
     Ok((result, results))
+}
+
+const fn next_simulated_nonce(nonce: u64) -> u64 {
+    nonce.wrapping_add(1)
 }
 
 /// Goes over the list of [`TransactionRequest`]s and populates missing fields trying to resolve
@@ -627,4 +634,49 @@ where
         |header, size| converter.convert_header(header, size),
     )?;
     Ok(SimulatedBlock { inner: block, calls })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{apply_precompile_overrides, next_simulated_nonce, EthSimulateError};
+    use alloy_evm::precompiles::PrecompilesMap;
+    use alloy_primitives::address;
+    use alloy_rpc_types_eth::state::{AccountOverride, StateOverride};
+    use revm::precompile::Precompiles;
+
+    #[test]
+    fn simulated_nonce_wraps_at_max() {
+        assert_eq!(next_simulated_nonce(0), 1);
+        assert_eq!(next_simulated_nonce(u64::MAX), 0);
+    }
+
+    #[test]
+    fn precompile_self_move_requires_existing_precompile() {
+        let address = address!("c100000000000000000000000000000000000000");
+        let mut state_overrides = StateOverride::default();
+        state_overrides.insert(
+            address,
+            AccountOverride { move_precompile_to: Some(address), ..Default::default() },
+        );
+        let mut precompiles = PrecompilesMap::from_static(Precompiles::prague());
+
+        let err = apply_precompile_overrides(&state_overrides, &mut precompiles).unwrap_err();
+
+        assert!(matches!(err, EthSimulateError::NotAPrecompile(addr) if addr == address));
+    }
+
+    #[test]
+    fn precompile_self_move_errors_for_existing_precompile() {
+        let address = address!("0000000000000000000000000000000000000001");
+        let mut state_overrides = StateOverride::default();
+        state_overrides.insert(
+            address,
+            AccountOverride { move_precompile_to: Some(address), ..Default::default() },
+        );
+        let mut precompiles = PrecompilesMap::from_static(Precompiles::prague());
+
+        let err = apply_precompile_overrides(&state_overrides, &mut precompiles).unwrap_err();
+
+        assert!(matches!(err, EthSimulateError::MovePrecompileToSelf(addr) if addr == address));
+    }
 }
