@@ -20,7 +20,7 @@ use alloy_rpc_types_eth::{
 use alloy_sol_types::SolValue;
 use jsonrpsee_types::ErrorObject;
 use reth_evm::{
-    execute::{BlockBuilder, BlockBuilderOutcome, BlockExecutor, ExecutorTx},
+    execute::{BlockBuilder, BlockBuilderOutcome, BlockExecutor},
     Evm, HaltReasonFor,
 };
 use reth_primitives_traits::{BlockBody as _, BlockTy, NodePrimitives, Recovered, RecoveredBlock};
@@ -28,7 +28,7 @@ use reth_rpc_convert::{RpcBlock, RpcConvert, RpcTxReq};
 use reth_rpc_server_types::result::rpc_err;
 use reth_storage_api::StateProvider;
 use revm::{
-    context::{Block, JournalTr, TxEnv},
+    context::{Block, JournalTr},
     context_interface::{result::ExecutionResult, ContextTr, CreateScheme},
     interpreter::{CallInputs, CallOutcome, CreateInputs, CreateOutcome},
     primitives::{Address, Bytes, TxKind, U256},
@@ -38,7 +38,6 @@ use revm_inspectors::transfer::{
     TransferKind, TransferOperation, TRANSFER_EVENT_TOPIC, TRANSFER_LOG_EMITTER,
 };
 use std::{
-    any::Any,
     collections::HashMap,
     sync::{Arc, Mutex},
 };
@@ -288,12 +287,6 @@ fn transfer_to_log(transfer: &TransferOperation) -> Log {
     }
 }
 
-fn set_execution_nonce<T: Any>(tx_env: &mut T, nonce: u64) {
-    if let Some(tx_env) = (tx_env as &mut dyn Any).downcast_mut::<TxEnv>() {
-        tx_env.nonce = nonce;
-    }
-}
-
 impl EthSimulateError {
     /// Returns the JSON-RPC error code for a `eth_simulateV1` error.
     pub const fn error_code(&self) -> i32 {
@@ -393,7 +386,6 @@ pub fn execute_transactions<S, T>(
 >
 where
     S: BlockBuilder<Executor: BlockExecutor<Evm: Evm<DB: Database<Error: Into<EthApiError>>>>>,
-    <<S::Executor as BlockExecutor>::Evm as Evm>::Tx: Any,
     T: RpcConvert<Primitives = S::Primitives>,
 {
     builder.apply_pre_execution_changes()?;
@@ -448,32 +440,19 @@ where
             converter,
             enforce_value_balance,
         )?;
-        let tx_nonce = tx.nonce();
-        let next_nonce = next_simulated_nonce(tx_nonce);
+        let next_nonce = next_simulated_nonce(tx.nonce());
 
         // Create transaction with an empty envelope.
         // The effect for a layer-2 execution client is that it does not charge L1 cost.
         let tx = WithEncoded::new(Default::default(), tx);
 
-        let gas_output = if tx_nonce == u64::MAX {
-            let (mut tx_env, tx) = ExecutorTx::<S::Executor>::into_parts(tx);
-            set_execution_nonce(&mut tx_env, next_nonce);
-            builder.execute_transaction_with_result_closure((tx_env, tx), |result| {
-                let mut result = result.result().result.clone();
-                if let Some(transfer_logs) = transfer_logs {
-                    transfer_logs.append_new_logs(&mut result, &mut next_transfer);
-                }
-                results.push(result)
-            })?
-        } else {
-            builder.execute_transaction_with_result_closure(tx, |result| {
-                let mut result = result.result().result.clone();
-                if let Some(transfer_logs) = transfer_logs {
-                    transfer_logs.append_new_logs(&mut result, &mut next_transfer);
-                }
-                results.push(result)
-            })?
-        };
+        let gas_output = builder.execute_transaction_with_result_closure(tx, |result| {
+            let mut result = result.result().result.clone();
+            if let Some(transfer_logs) = transfer_logs {
+                transfer_logs.append_new_logs(&mut result, &mut next_transfer);
+            }
+            results.push(result)
+        })?;
         next_nonces.insert(from, next_nonce);
         cumulative_gas_used = cumulative_gas_used.saturating_add(gas_output.tx_gas_used());
         if *remaining_call_gas_limit > 0 {
@@ -674,27 +653,16 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        apply_precompile_overrides, next_simulated_nonce, set_execution_nonce, EthSimulateError,
-    };
+    use super::{apply_precompile_overrides, next_simulated_nonce, EthSimulateError};
     use alloy_evm::precompiles::PrecompilesMap;
     use alloy_primitives::address;
     use alloy_rpc_types_eth::state::{AccountOverride, StateOverride};
-    use revm::{context::TxEnv, precompile::Precompiles};
+    use revm::precompile::Precompiles;
 
     #[test]
     fn simulated_nonce_wraps_at_max() {
         assert_eq!(next_simulated_nonce(0), 1);
         assert_eq!(next_simulated_nonce(u64::MAX), 0);
-    }
-
-    #[test]
-    fn execution_nonce_can_be_sanitized_for_max_nonce_transaction() {
-        let mut tx_env = TxEnv { nonce: u64::MAX, ..Default::default() };
-
-        set_execution_nonce(&mut tx_env, 0);
-
-        assert_eq!(tx_env.nonce, 0);
     }
 
     #[test]
