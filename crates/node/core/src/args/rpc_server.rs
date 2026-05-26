@@ -84,6 +84,7 @@ pub struct DefaultRpcServerArgs {
     rpc_evm_memory_limit: u64,
     rpc_tx_fee_cap: u128,
     rpc_max_simulate_blocks: u64,
+    rpc_compute_state_root_for_eth_simulate: bool,
     rpc_eth_proof_window: u64,
     rpc_proof_permits: usize,
     rpc_pending_block: PendingBlockKind,
@@ -309,6 +310,12 @@ impl DefaultRpcServerArgs {
         self
     }
 
+    /// Set whether to compute state roots for `eth_simulateV1` responses by default.
+    pub const fn with_rpc_compute_state_root_for_eth_simulate(mut self, v: bool) -> Self {
+        self.rpc_compute_state_root_for_eth_simulate = v;
+        self
+    }
+
     /// Set the default eth proof window
     pub const fn with_rpc_eth_proof_window(mut self, v: u64) -> Self {
         self.rpc_eth_proof_window = v;
@@ -395,6 +402,7 @@ impl Default for DefaultRpcServerArgs {
             rpc_evm_memory_limit: (1 << 32) - 1,
             rpc_tx_fee_cap: constants::DEFAULT_TX_FEE_CAP_WEI,
             rpc_max_simulate_blocks: constants::DEFAULT_MAX_SIMULATE_BLOCKS,
+            rpc_compute_state_root_for_eth_simulate: false,
             rpc_eth_proof_window: constants::DEFAULT_ETH_PROOF_WINDOW,
             rpc_proof_permits: constants::DEFAULT_PROOF_PERMITS,
             rpc_pending_block: PendingBlockKind::Full,
@@ -593,6 +601,14 @@ pub struct RpcServerArgs {
         default_value_t = DefaultRpcServerArgs::get_global().rpc_max_simulate_blocks
     )]
     pub rpc_max_simulate_blocks: u64,
+
+    /// Compute state roots for `eth_simulateV1` responses.
+    #[arg(
+        long = "rpc.compute-state-root-for-eth-simulate",
+        env = "RETH_RPC_COMPUTE_STATE_ROOT_FOR_ETH_SIMULATE",
+        default_value_t = DefaultRpcServerArgs::get_global().rpc_compute_state_root_for_eth_simulate
+    )]
+    pub rpc_compute_state_root_for_eth_simulate: bool,
 
     /// The maximum proof window for historical proof generation.
     /// This value allows for generating historical proofs up to
@@ -841,6 +857,7 @@ impl Default for RpcServerArgs {
             rpc_evm_memory_limit,
             rpc_tx_fee_cap,
             rpc_max_simulate_blocks,
+            rpc_compute_state_root_for_eth_simulate,
             rpc_eth_proof_window,
             rpc_proof_permits,
             rpc_pending_block,
@@ -885,6 +902,7 @@ impl Default for RpcServerArgs {
             rpc_evm_memory_limit,
             rpc_tx_fee_cap,
             rpc_max_simulate_blocks,
+            rpc_compute_state_root_for_eth_simulate,
             rpc_eth_proof_window,
             rpc_proof_permits,
             rpc_pending_block,
@@ -1051,6 +1069,7 @@ mod tests {
             rpc_evm_memory_limit: 256,
             rpc_tx_fee_cap: 2_000_000_000_000_000_000u128,
             rpc_max_simulate_blocks: 256,
+            rpc_compute_state_root_for_eth_simulate: false,
             rpc_eth_proof_window: 100_000,
             rpc_proof_permits: 16,
             rpc_pending_block: PendingBlockKind::Full,

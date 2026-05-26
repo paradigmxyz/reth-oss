@@ -93,9 +93,15 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
 
             let base_block =
                 self.recovered_block(block).await?.ok_or(EthApiError::HeaderNotFound(block))?;
+            let base_block_id = BlockId::Hash(base_block.hash().into());
+            let state_root_provider = if self.compute_state_root_for_eth_simulate() {
+                Some(self.state_at_block_id(base_block_id).await?)
+            } else {
+                None
+            };
             let mut parent = base_block.sealed_header().clone();
 
-            self.spawn_with_state_at_block(block, move |this, mut db| {
+            self.spawn_with_state_at_block(base_block_id, move |this, mut db| {
                 let mut blocks: Vec<SimulatedBlock<RpcBlock<Self::NetworkTypes>>> =
                     Vec::with_capacity(block_state_calls.len());
 
@@ -241,6 +247,7 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                             calls,
                             default_gas_limit,
                             chain_id,
+                            state_root_provider.as_deref(),
                             this.converter(),
                         )
                         .map_err(map_err)?
@@ -261,6 +268,7 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                             calls,
                             default_gas_limit,
                             chain_id,
+                            state_root_provider.as_deref(),
                             this.converter(),
                         )
                         .map_err(map_err)?
@@ -557,6 +565,9 @@ pub trait Call:
 
     /// Returns the maximum number of blocks accepted for `eth_simulateV1`.
     fn max_simulate_blocks(&self) -> u64;
+
+    /// Returns whether `eth_simulateV1` should compute state roots.
+    fn compute_state_root_for_eth_simulate(&self) -> bool;
 
     /// Returns the maximum memory the EVM can allocate per RPC request.
     fn evm_memory_limit(&self) -> u64;
