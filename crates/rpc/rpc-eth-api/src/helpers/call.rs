@@ -1,8 +1,6 @@
 //! Loads a pending block from database. Helper trait for `eth_` transaction, call and trace RPC
 //! methods.
 
-use core::fmt;
-
 use super::{LoadBlock, LoadPendingBlock, LoadState, LoadTransaction, SpawnBlocking, Trace};
 use crate::{
     helpers::estimate::EstimateCall, FromEvmError, FullEthApiTypes, RpcBlock, RpcNodeCore,
@@ -17,11 +15,13 @@ use alloy_rpc_types_eth::{
     state::{EvmOverrides, StateOverride},
     BlockId, Bundle, EthCallResponse, StateContext, TransactionInfo,
 };
+use core::fmt;
 use futures::Future;
 use reth_errors::{ProviderError, RethError};
 use reth_evm::{
-    env::BlockEnvironment, ConfigureEvm, EvmEnvFor, HaltReasonFor, InspectorFor, TransactionEnvMut,
-    TxEnvFor,
+    env::BlockEnvironment,
+    execute::{BlockBuilder, BlockExecutor},
+    ConfigureEvm, Evm, EvmEnvFor, HaltReasonFor, InspectorFor, TransactionEnvMut, TxEnvFor,
 };
 use reth_node_api::BlockBody;
 use reth_primitives_traits::Recovered;
