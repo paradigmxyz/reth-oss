@@ -15,13 +15,12 @@ use alloy_rpc_types_eth::{
 };
 use jsonrpsee_types::ErrorObject;
 use reth_evm::{
-    execute::{BlockBuilder, BlockBuilderOutcome, BlockExecutor},
+    execute::{BlockBuilder, BlockExecutor},
     Evm, HaltReasonFor,
 };
 use reth_primitives_traits::{BlockBody as _, BlockTy, NodePrimitives, Recovered, RecoveredBlock};
 use reth_rpc_convert::{RpcBlock, RpcConvert, RpcTxReq};
 use reth_rpc_server_types::result::rpc_err;
-use reth_storage_api::{noop::NoopProvider, StateProvider};
 use revm::{
     context::Block,
     context_interface::result::ExecutionResult,
@@ -159,7 +158,7 @@ pub fn apply_precompile_overrides(
 /// Converts all [`TransactionRequest`]s into [`Recovered`] transactions and applies them to the
 /// given [`BlockExecutor`].
 ///
-/// Returns all executed transactions and the result of the execution.
+/// Returns the block builder with all transactions applied and all execution results.
 ///
 /// [`TransactionRequest`]: alloy_rpc_types_eth::TransactionRequest
 #[expect(clippy::type_complexity)]
@@ -168,13 +167,9 @@ pub fn execute_transactions<S, T>(
     calls: Vec<RpcTxReq<T::Network>>,
     default_gas_limit: u64,
     chain_id: u64,
-    state_provider: Option<&dyn StateProvider>,
     converter: &T,
 ) -> Result<
-    (
-        BlockBuilderOutcome<S::Primitives>,
-        Vec<ExecutionResult<<<S::Executor as BlockExecutor>::Evm as Evm>::HaltReason>>,
-    ),
+    (S, Vec<ExecutionResult<<<S::Executor as BlockExecutor>::Evm as Evm>::HaltReason>>),
     EthApiError,
 >
 where
@@ -204,11 +199,7 @@ where
         })?;
     }
 
-    let noop_provider = NoopProvider::default();
-    let state_provider = state_provider.unwrap_or(&noop_provider);
-    let result = builder.finish(state_provider, None)?;
-
-    Ok((result, results))
+    Ok((builder, results))
 }
 
 /// Goes over the list of [`TransactionRequest`]s and populates missing fields trying to resolve
