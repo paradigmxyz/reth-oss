@@ -1,6 +1,7 @@
 //! Utilities for serving `eth_simulateV1`
 
 use crate::{
+    cache::db::StateCacheDb,
     error::{api::FromEthApiError, FromEvmError, ToRpcError},
     EthApiError,
 };
@@ -15,12 +16,13 @@ use alloy_rpc_types_eth::{
 };
 use jsonrpsee_types::ErrorObject;
 use reth_evm::{
-    execute::{BlockBuilder, BlockExecutor},
+    execute::{BlockBuilder, BlockBuilderOutcome, BlockExecutor},
     Evm, HaltReasonFor,
 };
 use reth_primitives_traits::{BlockBody as _, BlockTy, NodePrimitives, Recovered, RecoveredBlock};
 use reth_rpc_convert::{RpcBlock, RpcConvert, RpcTxReq};
 use reth_rpc_server_types::result::rpc_err;
+use reth_storage_api::{noop::NoopProvider, StateProviderBox};
 use revm::{
     context::Block,
     context_interface::result::ExecutionResult,
@@ -158,22 +160,26 @@ pub fn apply_precompile_overrides(
 /// Converts all [`TransactionRequest`]s into [`Recovered`] transactions and applies them to the
 /// given [`BlockExecutor`].
 ///
-/// Returns the block builder with all transactions applied and all execution results.
+/// Returns all executed transactions and the result of the execution.
 ///
 /// [`TransactionRequest`]: alloy_rpc_types_eth::TransactionRequest
 #[expect(clippy::type_complexity)]
-pub fn execute_transactions<S, T>(
+pub fn execute_transactions<'a, S, T>(
     mut builder: S,
     calls: Vec<RpcTxReq<T::Network>>,
     default_gas_limit: u64,
     chain_id: u64,
+    compute_state_root: bool,
     converter: &T,
 ) -> Result<
-    (S, Vec<ExecutionResult<<<S::Executor as BlockExecutor>::Evm as Evm>::HaltReason>>),
+    (
+        BlockBuilderOutcome<S::Primitives>,
+        Vec<ExecutionResult<<<S::Executor as BlockExecutor>::Evm as Evm>::HaltReason>>,
+    ),
     EthApiError,
 >
 where
-    S: BlockBuilder<Executor: BlockExecutor<Evm: Evm<DB: Database<Error: Into<EthApiError>>>>>,
+    S: BlockBuilder<Executor: BlockExecutor<Evm: Evm<DB = &'a mut StateCacheDb>>>,
     T: RpcConvert<Primitives = S::Primitives>,
 {
     builder.apply_pre_execution_changes()?;
@@ -199,7 +205,16 @@ where
         })?;
     }
 
-    Ok((builder, results))
+    let result = if compute_state_root {
+        let noop_provider: StateProviderBox = Box::new(NoopProvider::default());
+        let state_provider =
+            core::mem::replace(&mut builder.evm_mut().db_mut().database.0 .0, noop_provider);
+        builder.finish(state_provider, None)?
+    } else {
+        builder.finish(NoopProvider::default(), None)?
+    };
+
+    Ok((result, results))
 }
 
 /// Goes over the list of [`TransactionRequest`]s and populates missing fields trying to resolve

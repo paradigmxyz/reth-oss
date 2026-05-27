@@ -20,10 +20,8 @@ use alloy_rpc_types_eth::{
 use futures::Future;
 use reth_errors::{ProviderError, RethError};
 use reth_evm::{
-    block::BlockExecutor,
-    env::BlockEnvironment,
-    execute::{BlockBuilder, BlockBuilderOutcome},
-    ConfigureEvm, Evm, EvmEnvFor, HaltReasonFor, InspectorFor, TransactionEnvMut, TxEnvFor,
+    env::BlockEnvironment, ConfigureEvm, EvmEnvFor, HaltReasonFor, InspectorFor, TransactionEnvMut,
+    TxEnvFor,
 };
 use reth_node_api::BlockBody;
 use reth_primitives_traits::Recovered;
@@ -39,7 +37,7 @@ use reth_rpc_eth_types::{
     simulate::{self, EthSimulateError},
     EthApiError, StateCacheDb,
 };
-use reth_storage_api::{noop::NoopProvider, BlockIdReader, ProviderTx, StateProviderBox};
+use reth_storage_api::{BlockIdReader, ProviderTx, StateProviderBox};
 use revm::{
     context::Block,
     context_interface::{result::ResultAndState, Transaction},
@@ -50,26 +48,6 @@ use tracing::{trace, warn};
 
 /// Result type for `eth_simulateV1` RPC method.
 pub type SimulatedBlocksResult<N, E> = Result<Vec<SimulatedBlock<RpcBlock<N>>>, E>;
-
-fn finish_simulated_block<'a, Err, S>(
-    mut builder: S,
-    compute_state_root: bool,
-) -> Result<BlockBuilderOutcome<S::Primitives>, Err>
-where
-    Err: FromEthApiError,
-    S: BlockBuilder<Executor: BlockExecutor<Evm: Evm<DB = &'a mut StateCacheDb>>>,
-{
-    let result = if compute_state_root {
-        let noop_provider: StateProviderBox = Box::new(NoopProvider::default());
-        let state_provider =
-            std::mem::replace(&mut builder.evm_mut().db_mut().database.0 .0, noop_provider);
-        builder.finish(state_provider, None)
-    } else {
-        builder.finish(NoopProvider::default(), None)
-    };
-
-    result.map_err(Err::from_eth_err)
-}
 
 /// Execution related functions for the [`EthApiServer`](crate::EthApiServer) trait in
 /// the `eth_` namespace.
@@ -259,18 +237,15 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                             .map_err(|e| Self::Error::from_eth_err(EthApiError::other(e)))?;
                         }
 
-                        let (builder, results) = simulate::execute_transactions(
+                        let (result, results) = simulate::execute_transactions(
                             builder,
                             calls,
                             default_gas_limit,
                             chain_id,
+                            this.compute_state_root_for_eth_simulate(),
                             this.converter(),
                         )
                         .map_err(map_err)?;
-                        let result = finish_simulated_block::<Self::Error, _>(
-                            builder,
-                            this.compute_state_root_for_eth_simulate(),
-                        )?;
                         (result, results)
                     } else {
                         let evm = this.evm_config().evm_with_env(&mut db, evm_env);
@@ -284,18 +259,15 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                             .map_err(|e| Self::Error::from_eth_err(EthApiError::other(e)))?;
                         }
 
-                        let (builder, results) = simulate::execute_transactions(
+                        let (result, results) = simulate::execute_transactions(
                             builder,
                             calls,
                             default_gas_limit,
                             chain_id,
+                            this.compute_state_root_for_eth_simulate(),
                             this.converter(),
                         )
                         .map_err(map_err)?;
-                        let result = finish_simulated_block::<Self::Error, _>(
-                            builder,
-                            this.compute_state_root_for_eth_simulate(),
-                        )?;
                         (result, results)
                     };
 
