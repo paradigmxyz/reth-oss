@@ -60,7 +60,7 @@ where
     S: BlockBuilder<Executor: BlockExecutor<Evm: Evm<DB = &'a mut StateCacheDb>>>,
 {
     let result = if compute_state_root {
-        let noop_provider: StateProviderBox = Box::new(NoopProvider::default());
+        let noop_provider: StateProviderBox = Box::default();
         let state_provider =
             std::mem::replace(&mut builder.evm_mut().db_mut().database.0 .0, noop_provider);
         builder.finish(state_provider, None)
