@@ -206,7 +206,7 @@ where
     }
 
     let result = if compute_state_root {
-        let noop_provider: StateProviderBox = Box::new(NoopProvider::default());
+        let noop_provider: StateProviderBox =  Box::<NoopProvider>::default();
         let state_provider =
             core::mem::replace(&mut builder.evm_mut().db_mut().database.0 .0, noop_provider);
         builder.finish(state_provider, None)?
