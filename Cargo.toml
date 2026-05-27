@@ -702,7 +702,9 @@ ipnet = "2.11"
 
 [patch.crates-io]
 alloy-dyn-abi = { git = "https://github.com/alloy-rs/core", branch = "main" }
+alloy-json-abi = { git = "https://github.com/alloy-rs/core", branch = "main" }
 alloy-primitives = { git = "https://github.com/alloy-rs/core", branch = "main" }
+alloy-sol-type-parser = { git = "https://github.com/alloy-rs/core", branch = "main" }
 alloy-sol-types = { git = "https://github.com/alloy-rs/core", branch = "main" }
 alloy-chains = { git = "https://github.com/alloy-rs/chains", branch = "main" }
 alloy-eip2124 = { git = "https://github.com/alloy-rs/eips", branch = "main" }
