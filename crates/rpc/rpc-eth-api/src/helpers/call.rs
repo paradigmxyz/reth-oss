@@ -22,10 +22,10 @@ use reth_chainspec::{ChainSpecProvider, EthereumHardforks};
 use reth_errors::{ProviderError, RethError};
 use reth_evm::{
     block::BlockExecutor, env::BlockEnvironment, execute::BlockBuilder, ConfigureEvm, Evm,
-    EvmEnvFor, HaltReasonFor, InspectorFor, NextBlockEnvAttributes, TransactionEnvMut, TxEnvFor,
+    EvmEnvFor, HaltReasonFor, InspectorFor, TransactionEnvMut, TxEnvFor,
 };
 use reth_node_api::BlockBody;
-use reth_primitives_traits::Recovered;
+use reth_primitives_traits::{Recovered, SealedHeader};
 use reth_revm::{
     cancelled::CancelOnDrop,
     database::StateProviderDatabase,
@@ -38,7 +38,7 @@ use reth_rpc_eth_types::{
     simulate::{self, EthSimulateError},
     EthApiError, StateCacheDb,
 };
-use reth_storage_api::{BlockIdReader, ProviderTx, StateProviderBox};
+use reth_storage_api::{BlockIdReader, ProviderHeader, ProviderTx, StateProviderBox};
 use revm::{
     context::Block,
     context_interface::{result::ResultAndState, Transaction},
@@ -51,12 +51,21 @@ use tracing::{trace, warn};
 /// Result type for `eth_simulateV1` RPC method.
 pub type SimulatedBlocksResult<N, E> = Result<Vec<SimulatedBlock<RpcBlock<N>>>, E>;
 
+fn record_simulated_block_hash<DB>(
+    db: &mut DB,
+    block_hashes: &mut BTreeMap<u64, B256>,
+    block_number: u64,
+    block_hash: B256,
+) where
+    DB: OverrideBlockHashes,
+{
+    block_hashes.insert(block_number, block_hash);
+    db.override_block_hashes(block_hashes.clone());
+}
+
 /// Execution related functions for the [`EthApiServer`](crate::EthApiServer) trait in
 /// the `eth_` namespace.
-pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthApiTypes
-where
-    Self::Evm: ConfigureEvm<NextBlockEnvCtx = NextBlockEnvAttributes>,
-{
+pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthApiTypes {
     /// Estimate gas needed for execution of the `request` at the [`BlockId`].
     fn estimate_gas_at(
         &self,
@@ -108,6 +117,35 @@ where
                 // Track previous block number for validation.
                 let mut prev_block_number = parent.number();
 
+                let map_err = |e: EthApiError| -> Self::Error {
+                    match e.as_simulate_error() {
+                        Some(sim_err) => Self::Error::from_eth_err(EthApiError::other(sim_err)),
+                        None => Self::Error::from_eth_err(e),
+                    }
+                };
+                let configure_evm_env =
+                    |evm_env: &mut EvmEnvFor<Self::Evm>,
+                     parent: &SealedHeader<ProviderHeader<Self::Provider>>| {
+                        evm_env.cfg_env.disable_eip3607 = true;
+
+                        if !validation {
+                            evm_env.cfg_env.disable_nonce_check = true;
+                            evm_env.cfg_env.disable_balance_check = true;
+                            evm_env.cfg_env.disable_base_fee = true;
+                            evm_env.cfg_env.tx_gas_limit_cap = Some(u64::MAX);
+                            evm_env.block_env.inner_mut().basefee = 0;
+                        }
+
+                        evm_env.block_env.inner_mut().prevrandao = Some(B256::ZERO);
+                        if !this
+                            .provider()
+                            .chain_spec()
+                            .is_paris_active_at_block(evm_env.block_env.number().saturating_to())
+                        {
+                            evm_env.block_env.inner_mut().difficulty = parent.difficulty();
+                        }
+                    };
+
                 for block in block_state_calls {
                     let SimBlock { block_overrides, state_overrides, calls } = block;
 
@@ -133,14 +171,7 @@ where
                             return Err(EthApiError::other(EthSimulateError::TooManyBlocks).into())
                         }
 
-                        let block_timestamp = parent.timestamp().saturating_add(12);
-                        let parent_beacon_block_root = this
-                            .provider()
-                            .chain_spec()
-                            .is_cancun_active_at_timestamp(block_timestamp)
-                            .then_some(B256::ZERO);
-                        let mut attributes = this.next_env_attributes(&parent)?;
-                        attributes.parent_beacon_block_root = parent_beacon_block_root;
+                        let attributes = this.next_env_attributes(&parent)?;
 
                         let mut evm_env = this
                             .evm_config()
@@ -148,24 +179,7 @@ where
                             .map_err(RethError::other)
                             .map_err(Self::Error::from_eth_err)?;
 
-                        evm_env.cfg_env.disable_eip3607 = true;
-
-                        if !validation {
-                            evm_env.cfg_env.disable_nonce_check = true;
-                            evm_env.cfg_env.disable_balance_check = true;
-                            evm_env.cfg_env.disable_base_fee = true;
-                            evm_env.cfg_env.tx_gas_limit_cap = Some(u64::MAX);
-                            evm_env.block_env.inner_mut().basefee = 0;
-                        }
-
-                        evm_env.block_env.inner_mut().prevrandao = Some(B256::ZERO);
-                        if !this
-                            .provider()
-                            .chain_spec()
-                            .is_paris_active_at_block(evm_env.block_env.number().saturating_to())
-                        {
-                            evm_env.block_env.inner_mut().difficulty = parent.difficulty();
-                        }
+                        configure_evm_env(&mut evm_env, &parent);
                         let chain_id = evm_env.cfg_env.chain_id;
 
                         let ctx = this
@@ -173,15 +187,6 @@ where
                             .context_for_next_block(&parent, attributes)
                             .map_err(RethError::other)
                             .map_err(Self::Error::from_eth_err)?;
-
-                        let map_err = |e: EthApiError| -> Self::Error {
-                            match e.as_simulate_error() {
-                                Some(sim_err) => {
-                                    Self::Error::from_eth_err(EthApiError::other(sim_err))
-                                }
-                                None => Self::Error::from_eth_err(e),
-                            }
-                        };
 
                         let result = if trace_transfers {
                             let inspector = TransferInspector::new(false).with_logs(true);
@@ -216,8 +221,12 @@ where
 
                         let block_hash = result.block.hash();
                         let block_number = result.block.number();
-                        block_hashes.insert(block_number, block_hash);
-                        db.override_block_hashes(block_hashes.clone());
+                        record_simulated_block_hash(
+                            &mut db,
+                            &mut block_hashes,
+                            block_number,
+                            block_hash,
+                        );
                         parent = result.block.clone_sealed_header();
 
                         let block = simulate::build_simulated_block::<Self::Error, _>(
@@ -247,21 +256,7 @@ where
                         .into());
                     }
 
-                    let block_timestamp = block_overrides
-                        .as_ref()
-                        .and_then(|overrides| overrides.time)
-                        .unwrap_or_else(|| parent.timestamp().saturating_add(12));
-                    let parent_beacon_block_root = block_overrides
-                        .as_ref()
-                        .and_then(|overrides| overrides.beacon_root)
-                        .or_else(|| {
-                            this.provider()
-                                .chain_spec()
-                                .is_cancun_active_at_timestamp(block_timestamp)
-                                .then_some(B256::ZERO)
-                        });
-                    let mut attributes = this.next_env_attributes(&parent)?;
-                    attributes.parent_beacon_block_root = parent_beacon_block_root;
+                    let attributes = this.next_env_attributes(&parent)?;
 
                     let mut evm_env = this
                         .evm_config()
@@ -269,28 +264,10 @@ where
                         .map_err(RethError::other)
                         .map_err(Self::Error::from_eth_err)?;
 
-                    // Always disable EIP-3607
-                    evm_env.cfg_env.disable_eip3607 = true;
-
-                    if !validation {
-                        // If not explicitly required, we disable nonce check <https://github.com/paradigmxyz/reth/issues/16108>
-                        evm_env.cfg_env.disable_nonce_check = true;
-                        evm_env.cfg_env.disable_base_fee = true;
-                        evm_env.cfg_env.tx_gas_limit_cap = Some(u64::MAX);
-                        evm_env.block_env.inner_mut().basefee = 0;
-                    }
-
                     // Set prevrandao to zero for simulated blocks by default,
                     // matching spec behavior where MixDigest is zero-initialized.
                     // If user provides an override, it will be applied by apply_block_overrides.
-                    evm_env.block_env.inner_mut().prevrandao = Some(B256::ZERO);
-                    if !this
-                        .provider()
-                        .chain_spec()
-                        .is_paris_active_at_block(evm_env.block_env.number().saturating_to())
-                    {
-                        evm_env.block_env.inner_mut().difficulty = parent.difficulty();
-                    }
+                    configure_evm_env(&mut evm_env, &parent);
 
                     if let Some(block_overrides) = block_overrides {
                         // ensure we don't allow uncapped gas limit per block
@@ -349,13 +326,6 @@ where
                         .context_for_next_block(&parent, attributes)
                         .map_err(RethError::other)
                         .map_err(Self::Error::from_eth_err)?;
-                    let map_err = |e: EthApiError| -> Self::Error {
-                        match e.as_simulate_error() {
-                            Some(sim_err) => Self::Error::from_eth_err(EthApiError::other(sim_err)),
-                            None => Self::Error::from_eth_err(e),
-                        }
-                    };
-
                     let (result, results) = if trace_transfers {
                         // prepare inspector to capture transfer inside the evm so they are recorded
                         // and included in logs
@@ -405,8 +375,12 @@ where
 
                     let block_hash = result.block.hash();
                     let block_number = result.block.number();
-                    block_hashes.insert(block_number, block_hash);
-                    db.override_block_hashes(block_hashes.clone());
+                    record_simulated_block_hash(
+                        &mut db,
+                        &mut block_hashes,
+                        block_number,
+                        block_hash,
+                    );
                     parent = result.block.clone_sealed_header();
 
                     // Update tracking for next iteration's validation
