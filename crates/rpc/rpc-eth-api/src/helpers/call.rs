@@ -18,10 +18,11 @@ use alloy_rpc_types_eth::{
     BlockId, Bundle, EthCallResponse, StateContext, TransactionInfo,
 };
 use futures::Future;
+use reth_chainspec::{ChainSpecProvider, EthereumHardforks};
 use reth_errors::{ProviderError, RethError};
 use reth_evm::{
     block::BlockExecutor, env::BlockEnvironment, execute::BlockBuilder, ConfigureEvm, Evm,
-    EvmEnvFor, HaltReasonFor, InspectorFor, TransactionEnvMut, TxEnvFor,
+    EvmEnvFor, HaltReasonFor, InspectorFor, NextBlockEnvAttributes, TransactionEnvMut, TxEnvFor,
 };
 use reth_node_api::BlockBody;
 use reth_primitives_traits::Recovered;
@@ -44,6 +45,7 @@ use revm::{
     Database, DatabaseCommit,
 };
 use revm_inspectors::{access_list::AccessListInspector, transfer::TransferInspector};
+use std::collections::BTreeMap;
 use tracing::{trace, warn};
 
 /// Result type for `eth_simulateV1` RPC method.
@@ -51,7 +53,10 @@ pub type SimulatedBlocksResult<N, E> = Result<Vec<SimulatedBlock<RpcBlock<N>>>, 
 
 /// Execution related functions for the [`EthApiServer`](crate::EthApiServer) trait in
 /// the `eth_` namespace.
-pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthApiTypes {
+pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthApiTypes
+where
+    Self::Evm: ConfigureEvm<NextBlockEnvCtx = NextBlockEnvAttributes>,
+{
     /// Estimate gas needed for execution of the `request` at the [`BlockId`].
     fn estimate_gas_at(
         &self,
@@ -98,14 +103,18 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
             self.spawn_with_state_at_block(block, move |this, mut db| {
                 let mut blocks: Vec<SimulatedBlock<RpcBlock<Self::NetworkTypes>>> =
                     Vec::with_capacity(block_state_calls.len());
+                let mut block_hashes = BTreeMap::new();
 
-                // Track previous block number and timestamp for validation
+                // Track previous block number for validation.
                 let mut prev_block_number = parent.number();
-                let mut prev_timestamp = parent.timestamp();
 
                 for block in block_state_calls {
+                    let SimBlock { block_overrides, state_overrides, calls } = block;
+
                     // Validate block number ordering if overridden
-                    if let Some(number) = block.block_overrides.as_ref().and_then(|o| o.number) {
+                    let target_block_number = if let Some(number) =
+                        block_overrides.as_ref().and_then(|o| o.number)
+                    {
                         let number: u64 = number.try_into().unwrap_or(u64::MAX);
                         if number <= prev_block_number {
                             return Err(EthApiError::other(EthSimulateError::BlockNumberInvalid {
@@ -114,22 +123,145 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                             })
                             .into());
                         }
+                        number
+                    } else {
+                        parent.number().saturating_add(1)
+                    };
+
+                    while parent.number().saturating_add(1) < target_block_number {
+                        if blocks.len() >= this.max_simulate_blocks() as usize {
+                            return Err(EthApiError::other(EthSimulateError::TooManyBlocks).into())
+                        }
+
+                        let block_timestamp = parent.timestamp().saturating_add(12);
+                        let parent_beacon_block_root = this
+                            .provider()
+                            .chain_spec()
+                            .is_cancun_active_at_timestamp(block_timestamp)
+                            .then_some(B256::ZERO);
+                        let mut attributes = this.next_env_attributes(&parent)?;
+                        attributes.parent_beacon_block_root = parent_beacon_block_root;
+
+                        let mut evm_env = this
+                            .evm_config()
+                            .next_evm_env(&parent, &attributes)
+                            .map_err(RethError::other)
+                            .map_err(Self::Error::from_eth_err)?;
+
+                        evm_env.cfg_env.disable_eip3607 = true;
+
+                        if !validation {
+                            evm_env.cfg_env.disable_nonce_check = true;
+                            evm_env.cfg_env.disable_balance_check = true;
+                            evm_env.cfg_env.disable_base_fee = true;
+                            evm_env.cfg_env.tx_gas_limit_cap = Some(u64::MAX);
+                            evm_env.block_env.inner_mut().basefee = 0;
+                        }
+
+                        evm_env.block_env.inner_mut().prevrandao = Some(B256::ZERO);
+                        if !this
+                            .provider()
+                            .chain_spec()
+                            .is_paris_active_at_block(evm_env.block_env.number().saturating_to())
+                        {
+                            evm_env.block_env.inner_mut().difficulty = parent.difficulty();
+                        }
+                        let chain_id = evm_env.cfg_env.chain_id;
+
+                        let ctx = this
+                            .evm_config()
+                            .context_for_next_block(&parent, attributes)
+                            .map_err(RethError::other)
+                            .map_err(Self::Error::from_eth_err)?;
+
+                        let map_err = |e: EthApiError| -> Self::Error {
+                            match e.as_simulate_error() {
+                                Some(sim_err) => {
+                                    Self::Error::from_eth_err(EthApiError::other(sim_err))
+                                }
+                                None => Self::Error::from_eth_err(e),
+                            }
+                        };
+
+                        let result = if trace_transfers {
+                            let inspector = TransferInspector::new(false).with_logs(true);
+                            let evm = this
+                                .evm_config()
+                                .evm_with_env_and_inspector(&mut db, evm_env, inspector);
+                            let builder = this.evm_config().create_block_builder(evm, &parent, ctx);
+
+                            simulate::execute_transactions(
+                                builder,
+                                Vec::new(),
+                                this.call_gas_limit(),
+                                chain_id,
+                                this.converter(),
+                            )
+                            .map_err(map_err)?
+                            .0
+                        } else {
+                            let evm = this.evm_config().evm_with_env(&mut db, evm_env);
+                            let builder = this.evm_config().create_block_builder(evm, &parent, ctx);
+
+                            simulate::execute_transactions(
+                                builder,
+                                Vec::new(),
+                                this.call_gas_limit(),
+                                chain_id,
+                                this.converter(),
+                            )
+                            .map_err(map_err)?
+                            .0
+                        };
+
+                        let block_hash = result.block.hash();
+                        let block_number = result.block.number();
+                        block_hashes.insert(block_number, block_hash);
+                        db.override_block_hashes(block_hashes.clone());
+                        parent = result.block.clone_sealed_header();
+
+                        let block = simulate::build_simulated_block::<Self::Error, _>(
+                            result.block,
+                            Vec::new(),
+                            return_full_transactions.into(),
+                            this.converter(),
+                        )?;
+
+                        blocks.push(block);
                     }
-                    // Validate timestamp ordering if overridden
-                    if let Some(time) = block
-                        .block_overrides
+
+                    if blocks.len() >= this.max_simulate_blocks() as usize {
+                        return Err(EthApiError::other(EthSimulateError::TooManyBlocks).into())
+                    }
+
+                    // Validate timestamp ordering after skipped blocks have been inserted.
+                    if let Some(time) = block_overrides
                         .as_ref()
                         .and_then(|o| o.time)
-                        .filter(|&t| t <= prev_timestamp)
+                        .filter(|&t| t <= parent.timestamp())
                     {
                         return Err(EthApiError::other(EthSimulateError::BlockTimestampInvalid {
                             got: time,
-                            parent: prev_timestamp,
+                            parent: parent.timestamp(),
                         })
                         .into());
                     }
 
-                    let attributes = this.next_env_attributes(&parent)?;
+                    let block_timestamp = block_overrides
+                        .as_ref()
+                        .and_then(|overrides| overrides.time)
+                        .unwrap_or_else(|| parent.timestamp().saturating_add(12));
+                    let parent_beacon_block_root = block_overrides
+                        .as_ref()
+                        .and_then(|overrides| overrides.beacon_root)
+                        .or_else(|| {
+                            this.provider()
+                                .chain_spec()
+                                .is_cancun_active_at_timestamp(block_timestamp)
+                                .then_some(B256::ZERO)
+                        });
+                    let mut attributes = this.next_env_attributes(&parent)?;
+                    attributes.parent_beacon_block_root = parent_beacon_block_root;
 
                     let mut evm_env = this
                         .evm_config()
@@ -148,12 +280,17 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                         evm_env.block_env.inner_mut().basefee = 0;
                     }
 
-                    let SimBlock { block_overrides, state_overrides, calls } = block;
-
                     // Set prevrandao to zero for simulated blocks by default,
                     // matching spec behavior where MixDigest is zero-initialized.
                     // If user provides an override, it will be applied by apply_block_overrides.
                     evm_env.block_env.inner_mut().prevrandao = Some(B256::ZERO);
+                    if !this
+                        .provider()
+                        .chain_spec()
+                        .is_paris_active_at_block(evm_env.block_env.number().saturating_to())
+                    {
+                        evm_env.block_env.inner_mut().difficulty = parent.difficulty();
+                    }
 
                     if let Some(block_overrides) = block_overrides {
                         // ensure we don't allow uncapped gas limit per block
@@ -266,11 +403,14 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                         .map_err(map_err)?
                     };
 
+                    let block_hash = result.block.hash();
+                    let block_number = result.block.number();
+                    block_hashes.insert(block_number, block_hash);
+                    db.override_block_hashes(block_hashes.clone());
                     parent = result.block.clone_sealed_header();
 
                     // Update tracking for next iteration's validation
                     prev_block_number = parent.number();
-                    prev_timestamp = parent.timestamp();
 
                     let block = simulate::build_simulated_block::<Self::Error, _>(
                         result.block,
