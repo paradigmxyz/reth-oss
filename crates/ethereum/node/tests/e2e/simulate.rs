@@ -1,5 +1,5 @@
 use crate::utils::eth_payload_attributes;
-use alloy_primitives::{Address, U256};
+use alloy_primitives::{Address, B256, U256};
 use alloy_provider::{network::EthereumWallet, Provider, ProviderBuilder};
 use alloy_rpc_types_eth::{
     simulate::{SimBlock, SimulatePayload, SimulatedBlock},
@@ -117,6 +117,54 @@ async fn test_simulate_v1_too_many_blocks_error() -> eyre::Result<()> {
 
     assert_eq!(err.code, -38026);
     assert_eq!(err.message, "too many blocks");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_simulate_v1_parent_beacon_block_root_override() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let chain_spec = Arc::new(
+        ChainSpecBuilder::default()
+            .chain(MAINNET.chain)
+            .genesis(serde_json::from_str(include_str!("../assets/genesis.json")).unwrap())
+            .cancun_activated()
+            .build(),
+    );
+
+    let (mut nodes, wallet) = setup_engine::<EthereumNode>(
+        1,
+        chain_spec,
+        false,
+        Default::default(),
+        eth_payload_attributes,
+    )
+    .await?;
+    let node = nodes.pop().unwrap();
+    let provider = ProviderBuilder::new()
+        .wallet(EthereumWallet::new(wallet.wallet_gen().swap_remove(0)))
+        .connect_http(node.rpc_url());
+
+    let payload = SimulatePayload::<TransactionRequest>::default().extend(SimBlock::default());
+    let result: Vec<SimulatedBlock> =
+        provider.raw_request("eth_simulateV1".into(), (&payload, "latest")).await?;
+
+    assert_eq!(result.len(), 1, "expected exactly 1 simulated block");
+    assert_eq!(result[0].inner.header.parent_beacon_block_root, Some(B256::ZERO));
+
+    let beacon_root = B256::with_last_byte(0x69);
+    let sim_block = SimBlock::default().with_block_overrides(BlockOverrides {
+        beacon_root: Some(beacon_root),
+        ..Default::default()
+    });
+    let payload = SimulatePayload::<TransactionRequest>::default().extend(sim_block);
+
+    let result: Vec<SimulatedBlock> =
+        provider.raw_request("eth_simulateV1".into(), (&payload, "latest")).await?;
+
+    assert_eq!(result.len(), 1, "expected exactly 1 simulated block");
+    assert_eq!(result[0].inner.header.parent_beacon_block_root, Some(beacon_root));
 
     Ok(())
 }
