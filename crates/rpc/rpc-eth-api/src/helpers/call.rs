@@ -94,15 +94,27 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
 
             let base_block =
                 self.recovered_block(block).await?.ok_or(EthApiError::HeaderNotFound(block))?;
-            let mut parent = base_block.sealed_header().clone();
+            let parent = base_block.sealed_header().clone();
+            let max_simulate_blocks = self.max_simulate_blocks();
 
             self.spawn_with_state_at_block(block, move |this, mut db| {
+                let mut parent = parent;
+
+                let chain_id = this.provider().chain_spec().chain_id();
+
+                // Validate block ordering and fill gaps with empty blocks so every entry has an
+                // explicit `number` and `time` override and the chain is contiguous (see the
+                // execution-apis spec note: "If the block number is increased more than 1 compared
+                // to the previous block, new empty blocks are generated in between.").
+                let block_state_calls = simulate::sanitize_chain(
+                    block_state_calls,
+                    &parent,
+                    chain_id,
+                    max_simulate_blocks,
+                )?;
+
                 let mut blocks: Vec<SimulatedBlock<RpcBlock<Self::NetworkTypes>>> =
                     Vec::with_capacity(block_state_calls.len());
-
-                // Track previous block number and timestamp for validation
-                let mut prev_block_number = parent.number();
-                let mut prev_timestamp = parent.timestamp();
 
                 for block in block_state_calls {
                     // Validate block number ordering if overridden
@@ -191,7 +203,6 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                     }
 
                     let block_gas_limit = evm_env.block_env.gas_limit();
-                    let chain_id = evm_env.cfg_env.chain_id;
 
                     let default_gas_limit = {
                         let total_specified_gas =
@@ -283,10 +294,6 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                     };
 
                     parent = result.block.clone_sealed_header();
-
-                    // Update tracking for next iteration's validation
-                    prev_block_number = parent.number();
-                    prev_timestamp = parent.timestamp();
 
                     let block = simulate::build_simulated_block::<Self::Error, _>(
                         result.block,
