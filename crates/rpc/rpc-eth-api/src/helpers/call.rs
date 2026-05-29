@@ -93,10 +93,9 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
 
             let base_block =
                 self.recovered_block(block).await?.ok_or(EthApiError::HeaderNotFound(block))?;
-            let base_block_id = BlockId::Hash(base_block.hash().into());
             let mut parent = base_block.sealed_header().clone();
 
-            self.spawn_with_state_at_block(base_block_id, move |this, db| {
+            self.spawn_with_state_at_block(block, move |this, db| {
                 let state_provider = db.database.0 .0;
                 let mut db = State::builder()
                     .with_database(StateProviderDatabase::new(&state_provider))
