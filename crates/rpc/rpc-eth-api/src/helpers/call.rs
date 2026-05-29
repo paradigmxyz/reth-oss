@@ -240,7 +240,7 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                             .map_err(|e| Self::Error::from_eth_err(EthApiError::other(e)))?;
                         }
 
-                        let (result, results) = simulate::execute_transactions(
+                        simulate::execute_transactions(
                             builder,
                             &state_provider,
                             calls,
@@ -249,8 +249,7 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                             this.compute_state_root_for_eth_simulate(),
                             this.converter(),
                         )
-                        .map_err(map_err)?;
-                        (result, results)
+                        .map_err(map_err)?
                     } else {
                         let evm = this.evm_config().evm_with_env(&mut db, evm_env);
                         let mut builder = this.evm_config().create_block_builder(evm, &parent, ctx);
@@ -263,7 +262,7 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                             .map_err(|e| Self::Error::from_eth_err(EthApiError::other(e)))?;
                         }
 
-                        let (result, results) = simulate::execute_transactions(
+                        simulate::execute_transactions(
                             builder,
                             &state_provider,
                             calls,
@@ -272,8 +271,7 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                             this.compute_state_root_for_eth_simulate(),
                             this.converter(),
                         )
-                        .map_err(map_err)?;
-                        (result, results)
+                        .map_err(map_err)?
                     };
 
                     parent = result.block.clone_sealed_header();
