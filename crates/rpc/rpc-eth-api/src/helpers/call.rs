@@ -96,7 +96,11 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
             let base_block_id = BlockId::Hash(base_block.hash().into());
             let mut parent = base_block.sealed_header().clone();
 
-            self.spawn_with_state_at_block(base_block_id, move |this, mut db| {
+            self.spawn_with_state_at_block(base_block_id, move |this, db| {
+                let state_provider = db.database.0 .0;
+                let mut db = State::builder()
+                    .with_database(StateProviderDatabase::new(&state_provider))
+                    .build();
                 let mut blocks: Vec<SimulatedBlock<RpcBlock<Self::NetworkTypes>>> =
                     Vec::with_capacity(block_state_calls.len());
 
@@ -239,6 +243,7 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
 
                         let (result, results) = simulate::execute_transactions(
                             builder,
+                            &state_provider,
                             calls,
                             default_gas_limit,
                             chain_id,
@@ -261,6 +266,7 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
 
                         let (result, results) = simulate::execute_transactions(
                             builder,
+                            &state_provider,
                             calls,
                             default_gas_limit,
                             chain_id,

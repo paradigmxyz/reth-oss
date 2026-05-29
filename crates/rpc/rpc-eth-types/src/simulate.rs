@@ -1,7 +1,6 @@
 //! Utilities for serving `eth_simulateV1`
 
 use crate::{
-    cache::db::StateCacheDb,
     error::{api::FromEthApiError, FromEvmError, ToRpcError},
     EthApiError,
 };
@@ -22,7 +21,7 @@ use reth_evm::{
 use reth_primitives_traits::{BlockBody as _, BlockTy, NodePrimitives, Recovered, RecoveredBlock};
 use reth_rpc_convert::{RpcBlock, RpcConvert, RpcTxReq};
 use reth_rpc_server_types::result::rpc_err;
-use reth_storage_api::{noop::NoopProvider, StateProviderBox};
+use reth_storage_api::{noop::NoopProvider, StateProvider};
 use revm::{
     context::Block,
     context_interface::result::ExecutionResult,
@@ -164,8 +163,9 @@ pub fn apply_precompile_overrides(
 ///
 /// [`TransactionRequest`]: alloy_rpc_types_eth::TransactionRequest
 #[expect(clippy::type_complexity)]
-pub fn execute_transactions<'a, S, T>(
+pub fn execute_transactions<S, T>(
     mut builder: S,
+    state_provider: impl StateProvider,
     calls: Vec<RpcTxReq<T::Network>>,
     default_gas_limit: u64,
     chain_id: u64,
@@ -179,7 +179,8 @@ pub fn execute_transactions<'a, S, T>(
     EthApiError,
 >
 where
-    S: BlockBuilder<Executor: BlockExecutor<Evm: Evm<DB = &'a mut StateCacheDb>>>,
+    S: BlockBuilder<Executor: BlockExecutor>,
+    <<S::Executor as BlockExecutor>::Evm as Evm>::DB: Database<Error: Into<EthApiError>>,
     T: RpcConvert<Primitives = S::Primitives>,
 {
     builder.apply_pre_execution_changes()?;
@@ -206,9 +207,6 @@ where
     }
 
     let result = if compute_state_root {
-        let noop_provider: StateProviderBox = Box::<NoopProvider>::default();
-        let state_provider =
-            core::mem::replace(&mut builder.evm_mut().db_mut().database.0 .0, noop_provider);
         builder.finish(state_provider, None)?
     } else {
         builder.finish(NoopProvider::default(), None)?
@@ -264,21 +262,22 @@ where
         tx.as_mut().set_kind(TxKind::Create);
     }
 
-    // if we can't build the _entire_ transaction yet, fill the fee fields.
-    //
-    // Per the eth_simulateV1 spec, unspecified fee fields default to 0 (not the block base fee),
-    // matching geth's `CallDefaults` behavior. This lets simulation behave like a free-gas
-    // `eth_call` when validation is off, and surfaces "max fee per gas less than block base fee"
-    // errors when validation is on with a real base fee.
-    let _ = block_base_fee_per_gas;
+    // if we can't build the _entire_ transaction yet, we need to check the fee values
     if tx.as_ref().output_tx_type_checked().is_none() {
         if tx_type.is_legacy() || tx_type.is_eip2930() {
             if tx.as_ref().gas_price().is_none() {
-                tx.as_mut().set_gas_price(0);
+                tx.as_mut().set_gas_price(block_base_fee_per_gas as u128);
             }
         } else {
+            // set dynamic 1559 fees
             if tx.as_ref().max_fee_per_gas().is_none() {
-                tx.as_mut().set_max_fee_per_gas(0);
+                let mut max_fee_per_gas = block_base_fee_per_gas as u128;
+                if let Some(prio_fee) = tx.as_ref().max_priority_fee_per_gas() {
+                    // if a prio fee is provided we need to select the max fee accordingly
+                    // because the base fee must be higher than the prio fee.
+                    max_fee_per_gas = prio_fee.max(max_fee_per_gas);
+                }
+                tx.as_mut().set_max_fee_per_gas(max_fee_per_gas);
             }
             if tx.as_ref().max_priority_fee_per_gas().is_none() {
                 tx.as_mut().set_max_priority_fee_per_gas(0);
