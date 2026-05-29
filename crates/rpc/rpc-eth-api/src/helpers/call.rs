@@ -117,31 +117,6 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                     Vec::with_capacity(block_state_calls.len());
 
                 for block in block_state_calls {
-                    // Validate block number ordering if overridden
-                    if let Some(number) = block.block_overrides.as_ref().and_then(|o| o.number) {
-                        let number: u64 = number.try_into().unwrap_or(u64::MAX);
-                        if number <= prev_block_number {
-                            return Err(EthApiError::other(EthSimulateError::BlockNumberInvalid {
-                                got: number,
-                                parent: prev_block_number,
-                            })
-                            .into());
-                        }
-                    }
-                    // Validate timestamp ordering if overridden
-                    if let Some(time) = block
-                        .block_overrides
-                        .as_ref()
-                        .and_then(|o| o.time)
-                        .filter(|&t| t <= prev_timestamp)
-                    {
-                        return Err(EthApiError::other(EthSimulateError::BlockTimestampInvalid {
-                            got: time,
-                            parent: prev_timestamp,
-                        })
-                        .into());
-                    }
-
                     let SimBlock { block_overrides, state_overrides, calls } = block;
 
                     let mut attributes = this.next_env_attributes(&parent)?;
