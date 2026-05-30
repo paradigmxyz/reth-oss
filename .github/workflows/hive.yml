@@ -337,6 +337,7 @@ jobs:
               - eth_getTransactionReceipt
               - eth_sendRawTransaction
               - eth_simulateV1
+              - eth_simulateV1/ethSimulate-blockhash-complex
               - eth_syncing
               # debug_ rpc methods
               - debug_

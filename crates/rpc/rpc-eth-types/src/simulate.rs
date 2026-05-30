@@ -326,7 +326,12 @@ where
         } else {
             block_gas_limit.saturating_sub(cumulative_tx_gas_used)
         };
-        let mut default_gas_limit = block_gas_remaining;
+        // let mut default_gas_limit = block_gas_remaining;
+        let default_gas_limit = if *remaining_call_gas_limit > Some(0) {
+            block_gas_remaining.min((*remaining_call_gas_limit).unwrap_or(u64::MAX))
+        } else {
+            block_gas_remaining
+        };
 
         if let Some(gas_limit) = call.as_ref().gas_limit() {
             let exceeds_gas_limit = if is_amsterdam {
@@ -349,9 +354,10 @@ where
                 if gas_limit > remaining_call_gas_limit {
                     call.as_mut().set_gas_limit(remaining_call_gas_limit);
                 }
-            } else {
-                default_gas_limit = default_gas_limit.min(remaining_call_gas_limit);
             }
+            // } else {
+            //     default_gas_limit = default_gas_limit.min(remaining_call_gas_limit);
+            // }
         }
 
         // Resolve transaction, populate missing fields and enforce calls
