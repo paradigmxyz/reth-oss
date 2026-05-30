@@ -101,6 +101,7 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                 let state_provider = db.database.0 .0;
                 let mut db = State::builder()
                     .with_database(StateProviderDatabase::new(&state_provider))
+                    .with_bundle_update()
                     .build();
                 let mut parent = parent;
 
