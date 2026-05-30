@@ -1,8 +1,6 @@
 //! Loads a pending block from database. Helper trait for `eth_` transaction, call and trace RPC
 //! methods.
 
-use core::fmt;
-
 use super::{LoadBlock, LoadPendingBlock, LoadState, LoadTransaction, SpawnBlocking, Trace};
 use crate::{
     helpers::estimate::EstimateCall, FromEvmError, FullEthApiTypes, RpcBlock, RpcNodeCore,
@@ -17,12 +15,14 @@ use alloy_rpc_types_eth::{
     state::{EvmOverrides, StateOverride},
     BlockId, Bundle, EthCallResponse, StateContext, TransactionInfo,
 };
+use core::fmt;
 use futures::Future;
 use reth_chainspec::{ChainSpecProvider, EthChainSpec};
 use reth_errors::{ProviderError, RethError};
 use reth_evm::{
-    block::BlockExecutor, env::BlockEnvironment, execute::BlockBuilder, ConfigureEvm, Evm,
-    EvmEnvFor, HaltReasonFor, InspectorFor, TransactionEnvMut, TxEnvFor,
+    env::BlockEnvironment,
+    execute::{BlockBuilder, BlockExecutor},
+    ConfigureEvm, Evm, EvmEnvFor, HaltReasonFor, InspectorFor, TransactionEnvMut, TxEnvFor,
 };
 use reth_node_api::BlockBody;
 use reth_primitives_traits::Recovered;
@@ -97,7 +97,11 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
             let parent = base_block.sealed_header().clone();
             let max_simulate_blocks = self.max_simulate_blocks();
 
-            self.spawn_with_state_at_block(block, move |this, mut db| {
+            self.spawn_with_state_at_block(block, move |this, db| {
+                let state_provider = db.database.0 .0;
+                let mut db = State::builder()
+                    .with_database(StateProviderDatabase::new(&state_provider))
+                    .build();
                 let mut parent = parent;
 
                 let chain_id = this.provider().chain_spec().chain_id();
@@ -201,9 +205,11 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
 
                         simulate::execute_transactions(
                             builder,
+                            &state_provider,
                             calls,
                             &mut remaining_call_gas_limit,
                             chain_id,
+                            this.compute_state_root_for_eth_simulate(),
                             this.converter(),
                         )
                         .map_err(map_err)?
@@ -221,9 +227,11 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
 
                         simulate::execute_transactions(
                             builder,
+                            &state_provider,
                             calls,
                             &mut remaining_call_gas_limit,
                             chain_id,
+                            this.compute_state_root_for_eth_simulate(),
                             this.converter(),
                         )
                         .map_err(map_err)?
@@ -516,6 +524,9 @@ pub trait Call:
 
     /// Returns the maximum number of blocks accepted for `eth_simulateV1`.
     fn max_simulate_blocks(&self) -> u64;
+
+    /// Returns whether `eth_simulateV1` should compute state roots.
+    fn compute_state_root_for_eth_simulate(&self) -> bool;
 
     /// Returns the maximum memory the EVM can allocate per RPC request.
     fn evm_memory_limit(&self) -> u64;
