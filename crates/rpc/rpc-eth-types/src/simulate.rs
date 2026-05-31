@@ -2,7 +2,7 @@
 
 use crate::{
     error::{api::FromEthApiError, FromEvmError, ToRpcError},
-    EthApiError, RpcInvalidTransactionError,
+    EthApiError,
 };
 use alloy_consensus::{transaction::TxHashRef, BlockHeader, Transaction};
 use alloy_eips::eip2718::WithEncoded;
@@ -449,27 +449,22 @@ where
             block_remaining_gas
         };
         let from = call.as_ref().from().unwrap_or_default();
-        let nonce = if let Some(nonce) = next_nonces.get(&from).copied() {
-            nonce
-        } else if let Some(nonce) = base_nonces.get(&from).copied() {
-            nonce
-        } else {
-            let nonce = builder
-                .evm_mut()
-                .db_mut()
-                .basic(from)
-                .map_err(Into::into)?
-                .map(|acc| acc.nonce)
-                .unwrap_or_default();
-            base_nonces.insert(from, nonce);
-            nonce
-        };
-
-        if let Some(tx_nonce) = call.as_ref().nonce() {
-            if enforce_value_balance {
-                validate_simulate_tx_nonce(tx_nonce, nonce)?;
-            }
-        } else {
+        if call.as_ref().nonce().is_none() {
+            let nonce = if let Some(nonce) = next_nonces.get(&from).copied() {
+                nonce
+            } else if let Some(nonce) = base_nonces.get(&from).copied() {
+                nonce
+            } else {
+                let nonce = builder
+                    .evm_mut()
+                    .db_mut()
+                    .basic(from)
+                    .map_err(Into::into)?
+                    .map(|acc| acc.nonce)
+                    .unwrap_or_default();
+                base_nonces.insert(from, nonce);
+                nonce
+            };
             call.as_mut().set_nonce(nonce);
             next_nonces.insert(from, next_simulated_nonce(nonce));
         }
@@ -541,21 +536,6 @@ where
 
 const fn next_simulated_nonce(nonce: u64) -> u64 {
     nonce.wrapping_add(1)
-}
-
-fn validate_simulate_tx_nonce(tx: u64, state: u64) -> Result<(), EthApiError> {
-    if tx < state {
-        return Err(EthApiError::InvalidTransaction(RpcInvalidTransactionError::NonceTooLow {
-            tx,
-            state,
-        }))
-    }
-
-    if tx > state {
-        return Err(EthApiError::InvalidTransaction(RpcInvalidTransactionError::NonceTooHigh))
-    }
-
-    Ok(())
 }
 
 /// Goes over the list of [`TransactionRequest`]s and populates missing fields trying to resolve
@@ -746,11 +726,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        apply_precompile_overrides, next_simulated_nonce, validate_simulate_tx_nonce,
-        EthSimulateError,
-    };
-    use crate::{EthApiError, RpcInvalidTransactionError};
+    use super::{apply_precompile_overrides, next_simulated_nonce, EthSimulateError};
     use alloy_evm::precompiles::PrecompilesMap;
     use alloy_primitives::address;
     use alloy_rpc_types_eth::state::{AccountOverride, StateOverride};
@@ -760,26 +736,6 @@ mod tests {
     fn simulated_nonce_wraps_at_max() {
         assert_eq!(next_simulated_nonce(0), 1);
         assert_eq!(next_simulated_nonce(u64::MAX), 0);
-    }
-
-    #[test]
-    fn validate_simulate_tx_nonce_rejects_out_of_sequence_nonce() {
-        let err = validate_simulate_tx_nonce(0, 2).unwrap_err();
-        assert!(matches!(
-            err,
-            EthApiError::InvalidTransaction(RpcInvalidTransactionError::NonceTooLow {
-                tx: 0,
-                state: 2
-            })
-        ));
-
-        let err = validate_simulate_tx_nonce(2, 0).unwrap_err();
-        assert!(matches!(
-            err,
-            EthApiError::InvalidTransaction(RpcInvalidTransactionError::NonceTooHigh)
-        ));
-
-        validate_simulate_tx_nonce(1, 1).unwrap();
     }
 
     #[test]
