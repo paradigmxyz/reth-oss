@@ -7,7 +7,7 @@ use crate::{
 use alloy_chains::Chain;
 use alloy_consensus::{transaction::TxHashRef, BlockHeader, Transaction as _};
 use alloy_eips::eip2718::WithEncoded;
-use alloy_evm::{block::TxResult, precompiles::PrecompilesMap};
+use alloy_evm::{block::TxResult, precompiles::PrecompilesMap, TransactionEnvMut};
 use alloy_network::{NetworkTransactionBuilder, TransactionBuilder};
 use alloy_primitives::{Log, LogData, B256};
 use alloy_rpc_types_eth::{
@@ -18,7 +18,7 @@ use alloy_rpc_types_eth::{
 use alloy_sol_types::SolValue;
 use jsonrpsee_types::ErrorObject;
 use reth_evm::{
-    execute::{BlockBuilder, BlockBuilderOutcome, BlockExecutor},
+    execute::{BlockBuilder, BlockBuilderOutcome, BlockExecutor, ExecutorTx},
     Evm, HaltReasonFor,
 };
 use reth_primitives_traits::{
@@ -491,6 +491,7 @@ pub fn execute_transactions<S, T>(
 where
     S: BlockBuilder<Executor: BlockExecutor>,
     <<S::Executor as BlockExecutor>::Evm as Evm>::DB: Database<Error: Into<EthApiError>>,
+    <<S::Executor as BlockExecutor>::Evm as Evm>::Tx: TransactionEnvMut,
     T: RpcConvert<Primitives = S::Primitives>,
 {
     builder.apply_pre_execution_changes()?;
@@ -580,19 +581,34 @@ where
             builder.evm_mut().db_mut(),
             converter,
         )?;
+        let tx_nonce = tx.nonce();
+        let execution_nonce = simulate_execution_nonce(tx_nonce, validate_nonces);
         // Create transaction with an empty envelope.
         // The effect for a layer-2 execution client is that it does not charge L1 cost.
         let tx = WithEncoded::new(Default::default(), tx);
 
         let mut tx_regular_gas_used = 0;
-        let gas_output = builder.execute_transaction_with_result_closure(tx, |result| {
-            tx_regular_gas_used = result.result().result.gas().block_regular_gas_used();
-            let mut result = result.result().result.clone();
-            if let Some(transfer_logs) = transfer_logs {
-                transfer_logs.append_new_logs(&mut result, &mut next_transfer);
-            }
-            results.push(result)
-        })?;
+        let gas_output = if execution_nonce != tx_nonce {
+            let (mut tx_env, tx) = ExecutorTx::<S::Executor>::into_parts(tx);
+            tx_env.set_nonce(execution_nonce);
+            builder.execute_transaction_with_result_closure((tx_env, tx), |result| {
+                tx_regular_gas_used = result.result().result.gas().block_regular_gas_used();
+                let mut result = result.result().result.clone();
+                if let Some(transfer_logs) = transfer_logs {
+                    transfer_logs.append_new_logs(&mut result, &mut next_transfer);
+                }
+                results.push(result)
+            })?
+        } else {
+            builder.execute_transaction_with_result_closure(tx, |result| {
+                tx_regular_gas_used = result.result().result.gas().block_regular_gas_used();
+                let mut result = result.result().result.clone();
+                if let Some(transfer_logs) = transfer_logs {
+                    transfer_logs.append_new_logs(&mut result, &mut next_transfer);
+                }
+                results.push(result)
+            })?
+        };
 
         let gas_used = gas_output.tx_gas_used();
         if let Some(remaining_call_gas_limit) = remaining_call_gas_limit.as_mut() {
@@ -635,6 +651,14 @@ fn next_simulate_tx_nonce(nonce: u64) -> Result<u64, EthApiError> {
     nonce.checked_add(1).ok_or_else(|| {
         EthApiError::other(internal_rpc_err(RpcInvalidTransactionError::NonceMaxValue.to_string()))
     })
+}
+
+const fn simulate_execution_nonce(nonce: u64, validate_nonces: bool) -> u64 {
+    if !validate_nonces && nonce == u64::MAX {
+        0
+    } else {
+        nonce
+    }
 }
 
 /// Goes over the list of [`TransactionRequest`]s and populates missing fields trying to resolve
@@ -809,7 +833,7 @@ where
 mod tests {
     use super::{
         apply_precompile_overrides, next_simulate_tx_nonce, sanitize_chain,
-        validate_simulate_tx_nonce, EthSimulateError,
+        simulate_execution_nonce, validate_simulate_tx_nonce, EthSimulateError,
     };
     use crate::{EthApiError, RpcInvalidTransactionError};
     use alloy_chains::Chain;
@@ -1010,5 +1034,12 @@ mod tests {
             panic!("expected RPC error");
         };
         assert_eq!(err.to_rpc_error().code(), jsonrpsee_types::error::INTERNAL_ERROR_CODE);
+    }
+
+    #[test]
+    fn simulate_execution_nonce_wraps_max_when_validation_is_disabled() {
+        assert_eq!(simulate_execution_nonce(1, true), 1);
+        assert_eq!(simulate_execution_nonce(u64::MAX, true), u64::MAX);
+        assert_eq!(simulate_execution_nonce(u64::MAX, false), 0);
     }
 }
