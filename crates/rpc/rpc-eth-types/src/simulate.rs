@@ -2,7 +2,7 @@
 
 use crate::{
     error::{api::FromEthApiError, FromEvmError, ToRpcError},
-    EthApiError,
+    EthApiError, RpcInvalidTransactionError,
 };
 use alloy_chains::Chain;
 use alloy_consensus::{transaction::TxHashRef, BlockHeader, Transaction as _};
@@ -23,7 +23,7 @@ use reth_primitives_traits::{
     BlockBody as _, BlockTy, NodePrimitives, Recovered, RecoveredBlock, SealedHeader,
 };
 use reth_rpc_convert::{RpcBlock, RpcConvert, RpcTxReq};
-use reth_rpc_server_types::result::rpc_err;
+use reth_rpc_server_types::result::{internal_rpc_err, rpc_err};
 use reth_storage_api::noop::NoopProvider;
 use revm::{
     context::Block,
@@ -31,6 +31,7 @@ use revm::{
     primitives::{Address, Bytes, TxKind, U256},
     Database,
 };
+use std::collections::HashMap;
 
 /// Fallback seconds added between simulated block timestamps when neither the user nor the chain
 /// hint provides a value.
@@ -315,6 +316,8 @@ where
     let block_gas_limit = builder.evm().block().gas_limit();
     let is_amsterdam = builder.evm().cfg_env().enable_amsterdam_eip8037;
     let tx_gas_limit_cap = builder.evm().cfg_env().tx_gas_limit_cap.unwrap_or(u64::MAX);
+    let validate_nonces = !builder.evm().cfg_env().disable_nonce_check;
+    let mut next_nonces = HashMap::new();
     for mut call in calls {
         let block_gas_remaining = if is_amsterdam {
             block_gas_limit
@@ -349,6 +352,29 @@ where
             } else {
                 default_gas_limit = default_gas_limit.min(remaining_call_gas_limit);
             }
+        }
+
+        if validate_nonces {
+            let from = call.as_ref().from().unwrap_or_default();
+            let expected_nonce = if let Some(nonce) = next_nonces.get(&from).copied() {
+                nonce
+            } else {
+                let nonce = builder
+                    .evm_mut()
+                    .db_mut()
+                    .basic(from)
+                    .map_err(Into::into)?
+                    .map(|acc| acc.nonce)
+                    .unwrap_or_default();
+                next_nonces.insert(from, nonce);
+                nonce
+            };
+
+            if let Some(tx_nonce) = call.as_ref().nonce() {
+                validate_simulate_tx_nonce(tx_nonce, expected_nonce)?;
+            }
+
+            next_nonces.insert(from, next_simulate_tx_nonce(expected_nonce)?);
         }
 
         // Resolve transaction, populate missing fields and enforce calls
@@ -388,6 +414,27 @@ where
     let result = builder.finish(NoopProvider::default(), None)?;
 
     Ok((result, results))
+}
+
+fn validate_simulate_tx_nonce(tx: u64, state: u64) -> Result<(), EthApiError> {
+    if tx < state {
+        return Err(EthApiError::InvalidTransaction(RpcInvalidTransactionError::NonceTooLow {
+            tx,
+            state,
+        }))
+    }
+
+    if tx > state {
+        return Err(EthApiError::InvalidTransaction(RpcInvalidTransactionError::NonceTooHigh))
+    }
+
+    Ok(())
+}
+
+fn next_simulate_tx_nonce(nonce: u64) -> Result<u64, EthApiError> {
+    nonce.checked_add(1).ok_or_else(|| {
+        EthApiError::other(internal_rpc_err(RpcInvalidTransactionError::NonceMaxValue.to_string()))
+    })
 }
 
 /// Goes over the list of [`TransactionRequest`]s and populates missing fields trying to resolve
@@ -553,8 +600,11 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_precompile_overrides, sanitize_chain, EthSimulateError};
-    use crate::EthApiError;
+    use super::{
+        apply_precompile_overrides, next_simulate_tx_nonce, sanitize_chain,
+        validate_simulate_tx_nonce, EthSimulateError,
+    };
+    use crate::{EthApiError, RpcInvalidTransactionError};
     use alloy_chains::Chain;
     use alloy_consensus::Header;
     use alloy_evm::precompiles::PrecompilesMap;
@@ -722,5 +772,36 @@ mod tests {
         let err = sanitize_chain(vec![block_with_number(257)], &parent, Chain::mainnet().id(), 256)
             .unwrap_err();
         assert!(matches!(err, EthApiError::Other(_)));
+    }
+
+    #[test]
+    fn validate_simulate_tx_nonce_rejects_out_of_sequence_nonce() {
+        let err = validate_simulate_tx_nonce(0, 2).unwrap_err();
+        assert!(matches!(
+            err,
+            EthApiError::InvalidTransaction(RpcInvalidTransactionError::NonceTooLow {
+                tx: 0,
+                state: 2
+            })
+        ));
+
+        let err = validate_simulate_tx_nonce(2, 0).unwrap_err();
+        assert!(matches!(
+            err,
+            EthApiError::InvalidTransaction(RpcInvalidTransactionError::NonceTooHigh)
+        ));
+
+        validate_simulate_tx_nonce(1, 1).unwrap();
+    }
+
+    #[test]
+    fn next_simulate_tx_nonce_rejects_max_nonce() {
+        assert_eq!(next_simulate_tx_nonce(0).unwrap(), 1);
+
+        let err = next_simulate_tx_nonce(u64::MAX).unwrap_err();
+        let EthApiError::Other(err) = err else {
+            panic!("expected RPC error");
+        };
+        assert_eq!(err.to_rpc_error().code(), jsonrpsee_types::error::INTERNAL_ERROR_CODE);
     }
 }
