@@ -25,7 +25,7 @@ use reth_primitives_traits::{
     BlockBody as _, BlockTy, NodePrimitives, Recovered, RecoveredBlock, SealedHeader,
 };
 use reth_rpc_convert::{RpcBlock, RpcConvert, RpcTxReq};
-use reth_rpc_server_types::result::rpc_err;
+use reth_rpc_server_types::result::{internal_rpc_err, rpc_err};
 use reth_storage_api::{noop::NoopProvider, StateProvider};
 use revm::{
     context::{Block, JournalTr},
@@ -567,7 +567,7 @@ where
                 validate_simulate_tx_nonce(tx_nonce, expected_nonce)?;
             }
 
-            next_nonces.insert(from, expected_nonce.wrapping_add(1));
+            next_nonces.insert(from, next_simulate_tx_nonce(expected_nonce)?);
         }
 
         // Resolve transaction, populate missing fields and enforce calls
@@ -629,6 +629,12 @@ fn validate_simulate_tx_nonce(tx: u64, state: u64) -> Result<(), EthApiError> {
     }
 
     Ok(())
+}
+
+fn next_simulate_tx_nonce(nonce: u64) -> Result<u64, EthApiError> {
+    nonce.checked_add(1).ok_or_else(|| {
+        EthApiError::other(internal_rpc_err(RpcInvalidTransactionError::NonceMaxValue.to_string()))
+    })
 }
 
 /// Goes over the list of [`TransactionRequest`]s and populates missing fields trying to resolve
@@ -802,7 +808,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_precompile_overrides, sanitize_chain, validate_simulate_tx_nonce, EthSimulateError,
+        apply_precompile_overrides, next_simulate_tx_nonce, sanitize_chain,
+        validate_simulate_tx_nonce, EthSimulateError,
     };
     use crate::{EthApiError, RpcInvalidTransactionError};
     use alloy_chains::Chain;
@@ -992,5 +999,16 @@ mod tests {
         ));
 
         validate_simulate_tx_nonce(1, 1).unwrap();
+    }
+
+    #[test]
+    fn next_simulate_tx_nonce_rejects_max_nonce() {
+        assert_eq!(next_simulate_tx_nonce(0).unwrap(), 1);
+
+        let err = next_simulate_tx_nonce(u64::MAX).unwrap_err();
+        let EthApiError::Other(err) = err else {
+            panic!("expected RPC error");
+        };
+        assert_eq!(err.to_rpc_error().code(), jsonrpsee_types::error::INTERNAL_ERROR_CODE);
     }
 }
