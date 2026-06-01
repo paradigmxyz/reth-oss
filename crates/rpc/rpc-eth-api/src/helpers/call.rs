@@ -17,7 +17,7 @@ use alloy_rpc_types_eth::{
 };
 use core::fmt;
 use futures::Future;
-use reth_chainspec::{ChainSpecProvider, EthChainSpec};
+use reth_chainspec::{ChainSpecProvider, EthChainSpec, EthereumHardforks};
 use reth_errors::{ProviderError, RethError};
 use reth_evm::{
     env::BlockEnvironment,
@@ -38,7 +38,7 @@ use reth_rpc_eth_types::{
     simulate::{self, EthSimulateError},
     EthApiError, StateCacheDb,
 };
-use reth_rpc_server_types::result::invalid_params_rpc_err;
+use reth_rpc_server_types::result::{block_id_to_str, invalid_params_rpc_err, rpc_error_with_code};
 use reth_storage_api::{BlockIdReader, ProviderTx, StateProviderBox};
 use revm::{
     context::Block,
@@ -94,8 +94,12 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
 
             let _permit = self.acquire_owned_blocking_io().await;
 
-            let base_block =
-                self.recovered_block(block).await?.ok_or(EthApiError::HeaderNotFound(block))?;
+            let base_block = self.recovered_block(block).await?.ok_or_else(|| {
+                EthApiError::other(rpc_error_with_code(
+                    -32000,
+                    format!("block not found: {}", block_id_to_str(block)),
+                ))
+            })?;
             let parent = base_block.sealed_header().clone();
             let max_simulate_blocks = self.max_simulate_blocks();
 
@@ -155,6 +159,13 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                     // matching spec behavior where MixDigest is zero-initialized.
                     // If user provides an override, it will be applied by apply_block_overrides.
                     evm_env.block_env.inner_mut().prevrandao = Some(B256::ZERO);
+                    if !this
+                        .provider()
+                        .chain_spec()
+                        .is_paris_active_at_block(evm_env.block_env.number().saturating_to())
+                    {
+                        evm_env.block_env.inner_mut().difficulty = parent.difficulty();
+                    }
 
                     if let Some(block_overrides) = block_overrides {
                         // ensure we don't allow uncapped gas limit per block
