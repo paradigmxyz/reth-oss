@@ -45,7 +45,7 @@ use revm::{
     context_interface::{result::ResultAndState, Transaction},
     Database, DatabaseCommit,
 };
-use revm_inspectors::{access_list::AccessListInspector, transfer::TransferInspector};
+use revm_inspectors::access_list::AccessListInspector;
 use std::collections::BTreeMap;
 use tracing::{trace, warn};
 
@@ -206,7 +206,8 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                     let (result, results) = if trace_transfers {
                         // prepare inspector to capture transfer inside the evm so they are recorded
                         // and included in logs
-                        let inspector = TransferInspector::new(false).with_logs(true);
+                        let (inspector, transfer_logs) =
+                            simulate::SimulateTransferInspector::new(false);
                         let evm = this
                             .evm_config()
                             .evm_with_env_and_inspector(&mut db, evm_env, inspector);
@@ -228,6 +229,7 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                             chain_id,
                             this.compute_state_root_for_eth_simulate(),
                             this.converter(),
+                            Some(&transfer_logs),
                         )
                         .map_err(map_err)?
                     } else {
@@ -250,6 +252,7 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                             chain_id,
                             this.compute_state_root_for_eth_simulate(),
                             this.converter(),
+                            None,
                         )
                         .map_err(map_err)?
                     };
@@ -265,6 +268,7 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                         result.block,
                         results,
                         return_full_transactions.into(),
+                        trace_transfers,
                         this.converter(),
                     )?;
 
