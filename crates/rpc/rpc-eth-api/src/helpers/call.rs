@@ -203,56 +203,30 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                         }
                     };
 
-                    let (result, results) = if trace_transfers {
-                        // prepare inspector to capture transfer inside the evm so they are recorded
-                        // and included in logs
-                        let inspector = TransferInspector::new(false).with_logs(true);
-                        let evm = this
-                            .evm_config()
-                            .evm_with_env_and_inspector(&mut db, evm_env, inspector);
-                        let mut builder = this.evm_config().create_block_builder(evm, &parent, ctx);
+                    let inspector = TransferInspector::new(false);
+                    let evm =
+                        this.evm_config().evm_with_env_and_inspector(&mut db, evm_env, inspector);
+                    let mut builder = this.evm_config().create_block_builder(evm, &parent, ctx);
 
-                        if let Some(ref state_overrides) = state_overrides {
-                            simulate::apply_precompile_overrides(
-                                state_overrides,
-                                builder.evm_mut().precompiles_mut(),
-                            )
-                            .map_err(|e| Self::Error::from_eth_err(EthApiError::other(e)))?;
-                        }
-
-                        simulate::execute_transactions(
-                            builder,
-                            &state_provider,
-                            calls,
-                            &mut remaining_call_gas_limit,
-                            chain_id,
-                            this.compute_state_root_for_eth_simulate(),
-                            this.converter(),
+                    if let Some(ref state_overrides) = state_overrides {
+                        simulate::apply_precompile_overrides(
+                            state_overrides,
+                            builder.evm_mut().precompiles_mut(),
                         )
-                        .map_err(map_err)?
-                    } else {
-                        let evm = this.evm_config().evm_with_env(&mut db, evm_env);
-                        let mut builder = this.evm_config().create_block_builder(evm, &parent, ctx);
+                        .map_err(|e| Self::Error::from_eth_err(EthApiError::other(e)))?;
+                    }
 
-                        if let Some(ref state_overrides) = state_overrides {
-                            simulate::apply_precompile_overrides(
-                                state_overrides,
-                                builder.evm_mut().precompiles_mut(),
-                            )
-                            .map_err(|e| Self::Error::from_eth_err(EthApiError::other(e)))?;
-                        }
-
-                        simulate::execute_transactions(
-                            builder,
-                            &state_provider,
-                            calls,
-                            &mut remaining_call_gas_limit,
-                            chain_id,
-                            this.compute_state_root_for_eth_simulate(),
-                            this.converter(),
-                        )
-                        .map_err(map_err)?
-                    };
+                    let (result, results) = simulate::execute_transactions(
+                        builder,
+                        &state_provider,
+                        calls,
+                        &mut remaining_call_gas_limit,
+                        chain_id,
+                        this.compute_state_root_for_eth_simulate(),
+                        this.converter(),
+                        trace_transfers,
+                    )
+                    .map_err(map_err)?;
 
                     let simulated_header = result.block.clone_sealed_header();
                     db.override_block_hashes(BTreeMap::from([(
