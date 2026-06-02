@@ -9,7 +9,7 @@ use alloy_consensus::{transaction::TxHashRef, BlockHeader, Transaction as _};
 use alloy_eips::eip2718::WithEncoded;
 use alloy_evm::{
     block::TxResult,
-    precompiles::{DynPrecompile, PrecompilesMap},
+    precompiles::{MovePrecompileError, PrecompilesMap},
     TransactionEnvMut,
 };
 use alloy_network::{NetworkTransactionBuilder, TransactionBuilder};
@@ -257,8 +257,7 @@ where
 /// Applies precompile move overrides from state overrides to the EVM's precompiles map.
 ///
 /// This function processes `movePrecompileToAddress` entries from the state overrides and
-/// moves precompiles from their original addresses to new addresses. The original address
-/// is cleared (precompile removed) and the precompile is installed at the destination address.
+/// moves precompiles from their original addresses to new addresses.
 pub fn apply_precompile_overrides(
     state_overrides: &StateOverride,
     precompiles: &mut PrecompilesMap,
@@ -279,26 +278,9 @@ pub fn apply_precompile_overrides(
         }
     }
 
-    let mut moved_precompiles = HashMap::with_capacity(moves.len());
-    for (source, dest) in moves {
-        let mut moved_precompile = None;
-        precompiles.apply_precompile(&source, |existing| {
-            moved_precompile = existing;
-            None
-        });
-
-        let Some(precompile) = moved_precompile else {
-            return Err(EthSimulateError::NotAPrecompile(source))
-        };
-        moved_precompiles.insert(dest, precompile);
-    }
-
-    if !moved_precompiles.is_empty() {
-        precompiles.set_precompile_lookup(move |address: &Address| -> Option<DynPrecompile> {
-            moved_precompiles.get(address).cloned()
-        });
-    }
-
+    precompiles.move_precompiles(moves).map_err(|err| match err {
+        MovePrecompileError::NotAPrecompile(address) => EthSimulateError::NotAPrecompile(address),
+    })?;
     Ok(())
 }
 
