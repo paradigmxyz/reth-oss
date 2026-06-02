@@ -598,6 +598,7 @@ where
             chain_id,
             builder.evm_mut().db_mut(),
             converter,
+            validate_nonces,
         )?;
         let tx_nonce = tx.nonce();
         let execution_nonce = simulate_execution_nonce(tx_nonce, validate_nonces);
@@ -692,6 +693,7 @@ pub fn resolve_transaction<DB: Database, Tx, T>(
     chain_id: u64,
     db: &mut DB,
     converter: &T,
+    validate_nonces: bool,
 ) -> Result<Recovered<Tx>, EthApiError>
 where
     DB::Error: Into<EthApiError>,
@@ -709,9 +711,10 @@ where
     };
 
     if tx.as_ref().nonce().is_none() {
-        tx.as_mut().set_nonce(
-            db.basic(from).map_err(Into::into)?.map(|acc| acc.nonce).unwrap_or_default(),
-        );
+        let nonce = db.basic(from).map_err(Into::into)?.map(|acc| acc.nonce).unwrap_or_default();
+        tx.as_mut().set_nonce(simulate_execution_nonce(nonce, validate_nonces));
+    } else if tx.as_ref().nonce() == Some(u64::MAX) {
+        tx.as_mut().set_nonce(simulate_execution_nonce(u64::MAX, validate_nonces));
     }
 
     if tx.as_ref().gas_limit().is_none() {
