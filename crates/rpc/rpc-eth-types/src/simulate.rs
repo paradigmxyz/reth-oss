@@ -35,8 +35,9 @@ use revm::{
     context::{Block, JournalTr},
     context_interface::{result::ExecutionResult, ContextTr},
     interpreter::{CallInputs, CallOutcome, CreateInputs, CreateOutcome, CreateScheme},
-    primitives::{Address, Bytes, TxKind, U256},
-    Database, Inspector,
+    primitives::{Address, AddressMap, Bytes, TxKind, U256},
+    state::Account,
+    Database, DatabaseCommit, Inspector,
 };
 use revm_inspectors::transfer::{
     TransferKind, TransferOperation, TRANSFER_EVENT_TOPIC, TRANSFER_LOG_EMITTER,
@@ -508,7 +509,8 @@ pub fn execute_transactions<S, T>(
 >
 where
     S: BlockBuilder<Executor: BlockExecutor>,
-    <<S::Executor as BlockExecutor>::Evm as Evm>::DB: Database<Error: Into<EthApiError>>,
+    <<S::Executor as BlockExecutor>::Evm as Evm>::DB:
+        Database<Error: Into<EthApiError>> + DatabaseCommit,
     <<S::Executor as BlockExecutor>::Evm as Evm>::Tx: TransactionEnvMut,
     T: RpcConvert<Primitives = S::Primitives>,
 {
@@ -566,28 +568,37 @@ where
             // }
         }
 
-        if validate_nonces {
-            let from = call.as_ref().from().unwrap_or_default();
-            let expected_nonce = if let Some(nonce) = next_nonces.get(&from).copied() {
-                nonce
-            } else {
-                let nonce = builder
-                    .evm_mut()
-                    .db_mut()
-                    .basic(from)
-                    .map_err(Into::into)?
-                    .map(|acc| acc.nonce)
-                    .unwrap_or_default();
-                next_nonces.insert(from, nonce);
-                nonce
-            };
+        let from = call.as_ref().from().unwrap_or_default();
+        let expected_nonce = if let Some(nonce) = next_nonces.get(&from).copied() {
+            nonce
+        } else {
+            let nonce = builder
+                .evm_mut()
+                .db_mut()
+                .basic(from)
+                .map_err(Into::into)?
+                .map(|acc| acc.nonce)
+                .unwrap_or_default();
+            next_nonces.insert(from, nonce);
+            nonce
+        };
 
-            if let Some(tx_nonce) = call.as_ref().nonce() {
+        let call_nonce = if let Some(tx_nonce) = call.as_ref().nonce() {
+            if validate_nonces {
                 validate_simulate_tx_nonce(tx_nonce, expected_nonce)?;
             }
+            tx_nonce
+        } else {
+            call.as_mut().set_nonce(expected_nonce);
+            expected_nonce
+        };
 
-            next_nonces.insert(from, next_simulate_tx_nonce(expected_nonce)?);
-        }
+        let next_nonce = if validate_nonces {
+            next_simulate_tx_nonce(call_nonce)?
+        } else {
+            next_simulate_tx_nonce_wrapping(call_nonce)
+        };
+        next_nonces.insert(from, next_nonce);
 
         // Resolve transaction, populate missing fields and enforce calls
         // correctness.
@@ -598,7 +609,6 @@ where
             chain_id,
             builder.evm_mut().db_mut(),
             converter,
-            validate_nonces,
         )?;
         let tx_nonce = tx.nonce();
         let execution_nonce = simulate_execution_nonce(tx_nonce, validate_nonces);
@@ -628,6 +638,10 @@ where
                 results.push(result)
             })?
         };
+
+        if execution_nonce != tx_nonce {
+            commit_simulate_account_nonce(builder.evm_mut().db_mut(), from, next_nonce)?;
+        }
 
         let gas_used = gas_output.tx_gas_used();
         if let Some(remaining_call_gas_limit) = remaining_call_gas_limit.as_mut() {
@@ -672,12 +686,34 @@ fn next_simulate_tx_nonce(nonce: u64) -> Result<u64, EthApiError> {
     })
 }
 
+const fn next_simulate_tx_nonce_wrapping(nonce: u64) -> u64 {
+    nonce.wrapping_add(1)
+}
+
 const fn simulate_execution_nonce(nonce: u64, validate_nonces: bool) -> u64 {
     if !validate_nonces && nonce == u64::MAX {
         0
     } else {
         nonce
     }
+}
+
+fn commit_simulate_account_nonce<DB>(
+    db: &mut DB,
+    from: Address,
+    nonce: u64,
+) -> Result<(), EthApiError>
+where
+    DB: Database<Error: Into<EthApiError>> + DatabaseCommit,
+{
+    let Some(mut info) = db.basic(from).map_err(Into::into)? else { return Ok(()) };
+    info.nonce = nonce;
+
+    let mut changes = AddressMap::default();
+    changes.insert(from, Account::from(info).with_touched_mark());
+    db.commit(changes);
+
+    Ok(())
 }
 
 /// Goes over the list of [`TransactionRequest`]s and populates missing fields trying to resolve
@@ -693,7 +729,6 @@ pub fn resolve_transaction<DB: Database, Tx, T>(
     chain_id: u64,
     db: &mut DB,
     converter: &T,
-    validate_nonces: bool,
 ) -> Result<Recovered<Tx>, EthApiError>
 where
     DB::Error: Into<EthApiError>,
@@ -712,9 +747,7 @@ where
 
     if tx.as_ref().nonce().is_none() {
         let nonce = db.basic(from).map_err(Into::into)?.map(|acc| acc.nonce).unwrap_or_default();
-        tx.as_mut().set_nonce(simulate_execution_nonce(nonce, validate_nonces));
-    } else if tx.as_ref().nonce() == Some(u64::MAX) {
-        tx.as_mut().set_nonce(simulate_execution_nonce(u64::MAX, validate_nonces));
+        tx.as_mut().set_nonce(nonce);
     }
 
     if tx.as_ref().gas_limit().is_none() {
@@ -853,8 +886,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_precompile_overrides, next_simulate_tx_nonce, sanitize_chain,
-        simulate_execution_nonce, validate_simulate_tx_nonce, EthSimulateError,
+        apply_precompile_overrides, next_simulate_tx_nonce, next_simulate_tx_nonce_wrapping,
+        sanitize_chain, simulate_execution_nonce, validate_simulate_tx_nonce, EthSimulateError,
     };
     use crate::{EthApiError, RpcInvalidTransactionError};
     use alloy_chains::Chain;
@@ -1063,5 +1096,11 @@ mod tests {
         assert_eq!(simulate_execution_nonce(1, true), 1);
         assert_eq!(simulate_execution_nonce(u64::MAX, true), u64::MAX);
         assert_eq!(simulate_execution_nonce(u64::MAX, false), 0);
+    }
+
+    #[test]
+    fn next_simulate_tx_nonce_wraps_when_validation_is_disabled() {
+        assert_eq!(next_simulate_tx_nonce_wrapping(0), 1);
+        assert_eq!(next_simulate_tx_nonce_wrapping(u64::MAX), 0);
     }
 }
