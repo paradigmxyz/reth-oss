@@ -13,13 +13,11 @@ use alloy_evm::{
     TransactionEnvMut,
 };
 use alloy_network::{NetworkTransactionBuilder, TransactionBuilder};
-use alloy_primitives::{Log, LogData, B256};
 use alloy_rpc_types_eth::{
     simulate::{SimBlock, SimCallResult, SimulateError, SimulatedBlock},
     state::StateOverride,
     BlockOverrides, BlockTransactionsKind,
 };
-use alloy_sol_types::SolValue;
 use jsonrpsee_types::ErrorObject;
 use reth_evm::{
     execute::{BlockBuilder, BlockBuilderOutcome, BlockExecutor, ExecutorTx},
@@ -32,20 +30,13 @@ use reth_rpc_convert::{RpcBlock, RpcConvert, RpcTxReq};
 use reth_rpc_server_types::result::{internal_rpc_err, rpc_err};
 use reth_storage_api::{noop::NoopProvider, StateProvider};
 use revm::{
-    context::{Block, JournalTr},
-    context_interface::{result::ExecutionResult, ContextTr},
-    interpreter::{CallInputs, CallOutcome, CreateInputs, CreateOutcome, CreateScheme},
+    context::Block,
+    context_interface::result::ExecutionResult,
     primitives::{Address, AddressMap, Bytes, TxKind, U256},
     state::Account,
-    Database, DatabaseCommit, Inspector,
+    Database, DatabaseCommit,
 };
-use revm_inspectors::transfer::{
-    TransferKind, TransferOperation, TRANSFER_EVENT_TOPIC, TRANSFER_LOG_EMITTER,
-};
-use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex},
-};
+use std::collections::HashMap;
 
 /// Fallback seconds added between simulated block timestamps when neither the user nor the chain
 /// hint provides a value.
@@ -154,179 +145,6 @@ impl EthSimulateError {
 impl ToRpcError for EthSimulateError {
     fn to_rpc_error(&self) -> ErrorObject<'static> {
         rpc_err(self.error_code(), self.to_string(), None)
-    }
-}
-
-/// Collects ETH transfers for `eth_simulateV1` without inserting them into the EVM journal.
-///
-/// `eth_simulateV1` represents ETH transfers as synthetic ERC-20-style logs when
-/// `traceTransfers` is enabled. These logs are part of the RPC response, not contract-emitted logs,
-/// so they should not be written into the journal where reverted frames could leak them into
-/// execution results. The inspector keeps transfer operations separately and exposes them through a
-/// collector so the RPC layer can append them only to successful simulated calls.
-#[derive(Clone, Debug, Default)]
-pub struct SimulateTransferInspector {
-    internal_only: bool,
-    transfers: Vec<TransferOperation>,
-    checkpoints: Vec<usize>,
-    collector: TransferLogCollector,
-}
-
-impl SimulateTransferInspector {
-    /// Creates a new transfer inspector and a collector for synthetic transfer logs.
-    pub fn new(internal_only: bool) -> (Self, TransferLogCollector) {
-        let collector = TransferLogCollector::default();
-        (
-            Self {
-                internal_only,
-                transfers: Vec::new(),
-                checkpoints: Vec::new(),
-                collector: collector.clone(),
-            },
-            collector,
-        )
-    }
-
-    fn sync_collector(&self) {
-        *self.collector.transfers.lock().expect("transfer collector lock poisoned") =
-            self.transfers.clone();
-    }
-
-    fn push_transfer<DB: Database, JOURNAL: JournalTr<Database = DB>>(
-        &mut self,
-        from: Address,
-        to: Address,
-        value: U256,
-        kind: TransferKind,
-        journaled_state: &JOURNAL,
-    ) {
-        if self.internal_only && journaled_state.depth() == 0 {
-            return
-        }
-
-        if value.is_zero() {
-            return
-        }
-
-        self.transfers.push(TransferOperation { kind, from, to, value });
-        self.sync_collector();
-    }
-}
-
-impl<CTX> Inspector<CTX> for SimulateTransferInspector
-where
-    CTX: ContextTr,
-{
-    fn call(&mut self, context: &mut CTX, inputs: &mut CallInputs) -> Option<CallOutcome> {
-        self.checkpoints.push(self.transfers.len());
-
-        if let Some(value) = inputs.transfer_value() {
-            self.push_transfer(
-                inputs.transfer_from(),
-                inputs.transfer_to(),
-                value,
-                TransferKind::Call,
-                context.journal(),
-            );
-        }
-
-        None
-    }
-
-    fn call_end(&mut self, _context: &mut CTX, _inputs: &CallInputs, outcome: &mut CallOutcome) {
-        let Some(checkpoint) = self.checkpoints.pop() else { return };
-
-        if !outcome.instruction_result().is_ok() {
-            self.transfers.truncate(checkpoint);
-            self.sync_collector();
-        }
-    }
-
-    fn create(&mut self, context: &mut CTX, inputs: &mut CreateInputs) -> Option<CreateOutcome> {
-        self.checkpoints.push(self.transfers.len());
-
-        let kind = match inputs.scheme() {
-            CreateScheme::Create => TransferKind::Create,
-            CreateScheme::Create2 { .. } => TransferKind::Create2,
-            CreateScheme::Custom { .. } => return None,
-        };
-
-        let nonce = match context.journal_mut().load_account(inputs.caller()) {
-            Ok(account) => account.data.info.nonce,
-            Err(_) => return None,
-        };
-        let address = inputs.created_address(nonce);
-
-        self.push_transfer(inputs.caller(), address, inputs.value(), kind, context.journal());
-
-        None
-    }
-
-    fn create_end(
-        &mut self,
-        _context: &mut CTX,
-        _inputs: &CreateInputs,
-        outcome: &mut CreateOutcome,
-    ) {
-        let Some(checkpoint) = self.checkpoints.pop() else { return };
-
-        if !outcome.instruction_result().is_ok() {
-            self.transfers.truncate(checkpoint);
-            self.sync_collector();
-        }
-    }
-
-    fn selfdestruct(&mut self, contract: Address, target: Address, value: U256) {
-        self.transfers.push(TransferOperation {
-            kind: TransferKind::SelfDestruct,
-            from: contract,
-            to: target,
-            value,
-        });
-        self.sync_collector();
-    }
-}
-
-/// Shared synthetic transfer log collector.
-///
-/// The inspector lives inside the EVM, while `execute_transactions` receives cloned execution
-/// results. This collector bridges those two layers: it snapshots collected transfers after each
-/// frame and appends newly collected transfers to the cloned result only when the transaction
-/// succeeds. Reverted and halted transactions advance the cursor but keep their call logs empty.
-#[derive(Clone, Debug, Default)]
-pub struct TransferLogCollector {
-    transfers: Arc<Mutex<Vec<TransferOperation>>>,
-}
-
-impl TransferLogCollector {
-    fn append_new_logs<HaltReasonTy>(
-        &self,
-        result: &mut ExecutionResult<HaltReasonTy>,
-        next_transfer: &mut usize,
-    ) {
-        let transfers = self.transfers.lock().expect("transfer collector lock poisoned");
-        if *next_transfer >= transfers.len() {
-            return
-        }
-
-        let ExecutionResult::Success { logs, .. } = result else {
-            *next_transfer = transfers.len();
-            return
-        };
-
-        logs.extend(transfers[*next_transfer..].iter().map(transfer_to_log));
-        *next_transfer = transfers.len();
-    }
-}
-
-fn transfer_to_log(transfer: &TransferOperation) -> Log {
-    let from = B256::from_slice(&transfer.from.abi_encode());
-    let to = B256::from_slice(&transfer.to.abi_encode());
-    let data = transfer.value.abi_encode();
-
-    Log {
-        address: TRANSFER_LOG_EMITTER,
-        data: LogData::new_unchecked(vec![TRANSFER_EVENT_TOPIC, from, to], data.into()),
     }
 }
 
@@ -499,7 +317,6 @@ pub fn execute_transactions<S, T>(
     chain_id: u64,
     compute_state_root: bool,
     converter: &T,
-    transfer_logs: Option<&TransferLogCollector>,
 ) -> Result<
     (
         BlockBuilderOutcome<S::Primitives>,
@@ -525,7 +342,6 @@ where
     let tx_gas_limit_cap = builder.evm().cfg_env().tx_gas_limit_cap.unwrap_or(u64::MAX);
     let validate_nonces = !builder.evm().cfg_env().disable_nonce_check;
     let mut next_nonces = HashMap::new();
-    let mut next_transfer = 0;
     for mut call in calls {
         let block_gas_remaining = if is_amsterdam {
             block_gas_limit
@@ -622,20 +438,12 @@ where
             tx_env.set_nonce(execution_nonce);
             builder.execute_transaction_with_result_closure((tx_env, tx), |result| {
                 tx_regular_gas_used = result.result().result.gas().block_regular_gas_used();
-                let mut result = result.result().result.clone();
-                if let Some(transfer_logs) = transfer_logs {
-                    transfer_logs.append_new_logs(&mut result, &mut next_transfer);
-                }
-                results.push(result)
+                results.push(result.result().result.clone())
             })?
         } else {
             builder.execute_transaction_with_result_closure(tx, |result| {
                 tx_regular_gas_used = result.result().result.gas().block_regular_gas_used();
-                let mut result = result.result().result.clone();
-                if let Some(transfer_logs) = transfer_logs {
-                    transfer_logs.append_new_logs(&mut result, &mut next_transfer);
-                }
-                results.push(result)
+                results.push(result.result().result.clone())
             })?
         };
 
