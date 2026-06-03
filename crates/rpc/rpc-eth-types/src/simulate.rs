@@ -34,6 +34,7 @@ use reth_storage_api::{noop::NoopProvider, StateProvider};
 use revm::{
     context::Block,
     context_interface::result::ExecutionResult,
+    inspector::NoOpInspector,
     primitives::{Address, AddressMap, Bytes, TxKind, U256},
     state::Account,
     Database, DatabaseCommit,
@@ -307,6 +308,35 @@ pub fn append_transfer_logs<HaltReasonTy>(
     *next_transfer = transfers.len();
 }
 
+/// Appends RPC-only simulated transfer logs when supported by the inspector.
+pub trait SimulateTransferLogs {
+    /// Appends newly observed transfer logs to the simulation result.
+    fn append_transfer_logs<HaltReasonTy>(
+        &self,
+        result: &mut ExecutionResult<HaltReasonTy>,
+        next_transfer: &mut usize,
+    );
+}
+
+impl SimulateTransferLogs for TransferInspector {
+    fn append_transfer_logs<HaltReasonTy>(
+        &self,
+        result: &mut ExecutionResult<HaltReasonTy>,
+        next_transfer: &mut usize,
+    ) {
+        append_transfer_logs(self, result, next_transfer);
+    }
+}
+
+impl SimulateTransferLogs for NoOpInspector {
+    fn append_transfer_logs<HaltReasonTy>(
+        &self,
+        _result: &mut ExecutionResult<HaltReasonTy>,
+        _next_transfer: &mut usize,
+    ) {
+    }
+}
+
 fn transfer_to_log(transfer: &TransferOperation) -> Log {
     let from = B256::from_slice(&transfer.from.abi_encode());
     let to = B256::from_slice(&transfer.to.abi_encode());
@@ -348,7 +378,8 @@ pub fn execute_transactions<S, T>(
 >
 where
     S: BlockBuilder<Executor: BlockExecutor>,
-    <S::Executor as BlockExecutor>::Evm: Evm<Inspector = TransferInspector>,
+    <S::Executor as BlockExecutor>::Evm: Evm,
+    <<S::Executor as BlockExecutor>::Evm as Evm>::Inspector: SimulateTransferLogs,
     <<S::Executor as BlockExecutor>::Evm as Evm>::DB:
         Database<Error: Into<EthApiError>> + DatabaseCommit,
     <<S::Executor as BlockExecutor>::Evm as Evm>::Tx: TransactionEnvMut,
@@ -476,7 +507,7 @@ where
         }
 
         if trace_transfers && let Some(result) = results.last_mut() {
-            append_transfer_logs(builder.evm().inspector(), result, &mut next_simulated_log);
+            builder.evm().inspector().append_transfer_logs(result, &mut next_simulated_log);
         }
 
         let gas_used = gas_output.tx_gas_used();
