@@ -701,7 +701,7 @@ vergen-git2 = "9.1.0"
 ipnet = "2.11"
 
 [patch.crates-io]
-alloy-eip7928 = { git = "https://github.com/Rimeeeeee/eips", branch = "eip-8268" }
+alloy-eip7928 = { git = "https://github.com/Rimeeeeee/eips", branch = "eip-8268-st-testing" }
 alloy-hardforks = { git = "https://github.com/Rimeeeeee/hardforks", branch = "eip-8268" }
 alloy-consensus = { git = "https://github.com/Rimeeeeee/alloy", branch = "eip-8268" }
 alloy-contract = { git = "https://github.com/Rimeeeeee/alloy", branch = "eip-8268" }
@@ -730,13 +730,13 @@ alloy-transport = { git = "https://github.com/Rimeeeeee/alloy", branch = "eip-82
 alloy-transport-http = { git = "https://github.com/Rimeeeeee/alloy", branch = "eip-8268" }
 alloy-transport-ipc = { git = "https://github.com/Rimeeeeee/alloy", branch = "eip-8268" }
 alloy-transport-ws = { git = "https://github.com/Rimeeeeee/alloy", branch = "eip-8268" }
-revm = { git = "https://github.com/Rimeeeeee/revm", branch = "compute-storage-root" }
+revm = { git = "https://github.com/Rimeeeeee/revm", branch = "eip-8268-st-testing" }
 alloy-evm = { git = "https://github.com/Rimeeeeee/evm", branch = "eip-8268" }
-revm-bytecode = { git = "https://github.com/Rimeeeeee/revm", branch = "compute-storage-root" }
-revm-database = { git = "https://github.com/Rimeeeeee/revm", branch = "compute-storage-root" }
-revm-state = { git = "https://github.com/Rimeeeeee/revm", branch = "compute-storage-root" }
-revm-primitives = { git = "https://github.com/Rimeeeeee/revm", branch = "compute-storage-root" }
-revm-interpreter = { git = "https://github.com/Rimeeeeee/revm", branch = "compute-storage-root" }
-revm-context = { git = "https://github.com/Rimeeeeee/revm", branch = "compute-storage-root" }
-revm-context-interface = { git = "https://github.com/Rimeeeeee/revm", branch = "compute-storage-root" }
-revm-database-interface = { git = "https://github.com/Rimeeeeee/revm", branch = "compute-storage-root" }
+revm-bytecode = { git = "https://github.com/Rimeeeeee/revm", branch = "eip-8268-st-testing" }
+revm-database = { git = "https://github.com/Rimeeeeee/revm", branch = "eip-8268-st-testing" }
+revm-state = { git = "https://github.com/Rimeeeeee/revm", branch = "eip-8268-st-testing" }
+revm-primitives = { git = "https://github.com/Rimeeeeee/revm", branch = "eip-8268-st-testing" }
+revm-interpreter = { git = "https://github.com/Rimeeeeee/revm", branch = "eip-8268-st-testing" }
+revm-context = { git = "https://github.com/Rimeeeeee/revm", branch = "eip-8268-st-testing" }
+revm-context-interface = { git = "https://github.com/Rimeeeeee/revm", branch = "eip-8268-st-testing" }
+revm-database-interface = { git = "https://github.com/Rimeeeeee/revm", branch = "eip-8268-st-testing" }
