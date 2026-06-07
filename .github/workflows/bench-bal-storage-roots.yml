@@ -5,6 +5,14 @@
 name: bench-bal-storage-roots
 
 on:
+  pull_request:
+    paths:
+      - ".github/workflows/bench-bal-storage-roots.yml"
+      - ".github/scripts/bench-*.sh"
+      - ".github/scripts/bench-*.py"
+      - "crates/engine/**"
+      - "crates/trie/**"
+      - "crates/ethereum/**"
   workflow_dispatch:
     inputs:
       ref:
@@ -53,15 +61,15 @@ jobs:
       SCHELK_MOUNT: /reth-bench
       RETH_SCOPE: reth-bench.scope
       BENCH_WORK_DIR: ${{ github.workspace }}/bench-work
-      BENCH_BLOCKS: ${{ inputs.blocks }}
-      BENCH_WARMUP_BLOCKS: ${{ inputs.warmup }}
-      BENCH_RUN_PAIRS: ${{ inputs.run_pairs }}
-      BENCH_BIG_BLOCKS: ${{ inputs.big_blocks && 'true' || 'false' }}
+      BENCH_BLOCKS: ${{ github.event_name == 'workflow_dispatch' && inputs.blocks || '100' }}
+      BENCH_WARMUP_BLOCKS: ${{ github.event_name == 'workflow_dispatch' && inputs.warmup || '20' }}
+      BENCH_RUN_PAIRS: ${{ github.event_name == 'workflow_dispatch' && inputs.run_pairs || '6' }}
+      BENCH_BIG_BLOCKS: ${{ (github.event_name != 'workflow_dispatch' || inputs.big_blocks) && 'true' || 'false' }}
       BENCH_BIG_BLOCKS_TARGET_GAS: "true"
       BENCH_BAL: "true"
-      BENCH_CORES: ${{ inputs.cores }}
-      BENCH_WAIT_TIME: ${{ inputs.wait_time }}
-      BENCH_NODE_BIN: ${{ inputs.big_blocks && 'reth-bb' || 'reth' }}
+      BENCH_CORES: ${{ github.event_name == 'workflow_dispatch' && inputs.cores || '0' }}
+      BENCH_WAIT_TIME: ${{ github.event_name == 'workflow_dispatch' && inputs.wait_time || '' }}
+      BENCH_NODE_BIN: ${{ (github.event_name != 'workflow_dispatch' || inputs.big_blocks) && 'reth-bb' || 'reth' }}
       BENCH_SNAPSHOT_MANIFEST_URL: ${{ secrets.BENCH_SNAPSHOT_MANIFEST_URL }}
       BENCH_METRICS_ADDR: "127.0.0.1:9001"
       BENCH_TARGET_METRICS_CONFIG: .github/config/bench-metrics-targets.json
@@ -76,7 +84,7 @@ jobs:
           persist-credentials: false
           submodules: true
           fetch-depth: 0
-          ref: ${{ inputs.ref || github.ref }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.ref }}
 
       - name: Resolve ref
         id: refs
@@ -267,6 +275,63 @@ jobs:
             taskset -c 0 .github/scripts/bench-txgen-run.sh "$run_type" "$binary" "$BENCH_WORK_DIR/${run_label}"
           done
 
+      - name: Print benchmark summary
+        if: always()
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+
+          enabled_csv=( "$BENCH_WORK_DIR"/enabled-*/combined_latency.csv )
+          disabled_csv=( "$BENCH_WORK_DIR"/disabled-*/combined_latency.csv )
+
+          if [ "${#enabled_csv[@]}" -eq 0 ] || [ "${#disabled_csv[@]}" -eq 0 ]; then
+            {
+              echo "## BAL Storage Root Benchmark"
+              echo
+              echo "Benchmark did not produce both enabled and disabled CSV outputs."
+              echo
+              echo "- enabled CSVs: ${#enabled_csv[@]}"
+              echo "- disabled CSVs: ${#disabled_csv[@]}"
+            } | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+          SUMMARY_JSON="$BENCH_WORK_DIR/bal-storage-roots-summary.json"
+          SUMMARY_MD="$BENCH_WORK_DIR/bal-storage-roots-summary.md"
+
+          summary_args=(
+            --baseline-csv "${enabled_csv[@]}"
+            --feature-csv "${disabled_csv[@]}"
+            --output-summary "$SUMMARY_JSON"
+            --output-markdown "$SUMMARY_MD"
+            --repo "${{ github.repository }}"
+            --baseline-ref "$BASELINE_REF"
+            --baseline-name "from BAL storage roots"
+            --feature-ref "$FEATURE_REF"
+            --feature-name "traditional storage root recompute"
+            --warmup-blocks "$BENCH_WARMUP_BLOCKS"
+            --bal-mode true
+            --run-pairs "$BENCH_RUN_PAIRS"
+          )
+
+          if [ "$BENCH_BIG_BLOCKS" = "true" ]; then
+            summary_args+=(--big-blocks)
+          fi
+          if [ -n "${BENCH_WAIT_TIME:-}" ]; then
+            summary_args+=(--wait-time "$BENCH_WAIT_TIME")
+          fi
+
+          python3 .github/scripts/bench-reth-summary.py "${summary_args[@]}"
+
+          {
+            echo "## BAL Storage Root Benchmark"
+            echo
+            echo "- **enabled**: sparse trie takes account storage roots from BAL"
+            echo "- **disabled**: sparse trie recomputes storage roots traditionally"
+            echo
+            cat "$SUMMARY_MD"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
       - name: Upload raw results
         if: always()
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
@@ -276,6 +341,7 @@ jobs:
             bench-work/**/*.csv
             bench-work/**/*.json
             bench-work/**/*.log
+            bench-work/**/*.md
             bench-work/run_order.txt
           if-no-files-found: warn
 
