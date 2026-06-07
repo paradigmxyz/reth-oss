@@ -1,6 +1,10 @@
-# Benchmarks sparse-trie state-root computation with BAL account storage roots
-# enabled vs disabled. Both binaries are built from the same ref; the feature
-# checkout is patched to set `TreeConfig::take_bal_storage_roots` to false.
+# CI-friendly comparison for the BAL storage-root state-root switch.
+#
+# This intentionally does not use the private benchmark runner environment. It
+# builds/checks the default variant and a patched variant where
+# `TreeConfig::take_bal_storage_roots` defaults to false, then prints timings in
+# the job summary. Real txgen replay benchmarks still require the self-hosted
+# benchmark runner.
 
 name: bench-bal-storage-roots
 
@@ -8,77 +12,33 @@ on:
   pull_request:
     paths:
       - ".github/workflows/bench-bal-storage-roots.yml"
-      - ".github/scripts/bench-*.sh"
-      - ".github/scripts/bench-*.py"
       - "crates/engine/**"
       - "crates/trie/**"
       - "crates/ethereum/**"
   workflow_dispatch:
     inputs:
       ref:
-        description: "Git ref to benchmark"
+        description: "Git ref to check"
         required: false
         default: ""
-      blocks:
-        description: "Number of blocks to benchmark"
+      command:
+        description: "Cargo command to time for each variant"
         required: false
-        default: "100"
-      warmup:
-        description: "Number of warmup blocks"
-        required: false
-        default: "20"
-      run_pairs:
-        description: "Number of enabled/disabled run pairs"
-        required: false
-        default: "6"
-      big_blocks:
-        description: "Use big-block benchmark payloads"
-        required: false
-        type: boolean
-        default: true
-      cores:
-        description: "CPU cores available to reth; 0 means script default"
-        required: false
-        default: "0"
-      wait_time:
-        description: "Optional wait time passed to txgen runner"
-        required: false
-        default: ""
+        default: "cargo check -p reth-engine-primitives"
 
 concurrency:
-  group: bench-bal-storage-roots
-  cancel-in-progress: false
+  group: bench-bal-storage-roots-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   bench-bal-storage-roots:
     name: bench-bal-storage-roots
-    runs-on: [self-hosted, Linux, X64, available]
-    timeout-minutes: 120
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
     permissions:
       contents: read
-    env:
-      BENCH_RPC_URL: http://ethereum-mainnet-stable-reth-greedy-goose:8545
-      SCHELK_MOUNT: /reth-bench
-      RETH_SCOPE: reth-bench.scope
-      BENCH_WORK_DIR: ${{ github.workspace }}/bench-work
-      BENCH_BLOCKS: ${{ github.event_name == 'workflow_dispatch' && inputs.blocks || '100' }}
-      BENCH_WARMUP_BLOCKS: ${{ github.event_name == 'workflow_dispatch' && inputs.warmup || '20' }}
-      BENCH_RUN_PAIRS: ${{ github.event_name == 'workflow_dispatch' && inputs.run_pairs || '6' }}
-      BENCH_BIG_BLOCKS: ${{ (github.event_name != 'workflow_dispatch' || inputs.big_blocks) && 'true' || 'false' }}
-      BENCH_BIG_BLOCKS_TARGET_GAS: "true"
-      BENCH_BAL: "true"
-      BENCH_CORES: ${{ github.event_name == 'workflow_dispatch' && inputs.cores || '0' }}
-      BENCH_WAIT_TIME: ${{ github.event_name == 'workflow_dispatch' && inputs.wait_time || '' }}
-      BENCH_NODE_BIN: ${{ (github.event_name != 'workflow_dispatch' || inputs.big_blocks) && 'reth-bb' || 'reth' }}
-      BENCH_SNAPSHOT_MANIFEST_URL: ${{ secrets.BENCH_SNAPSHOT_MANIFEST_URL }}
-      BENCH_METRICS_ADDR: "127.0.0.1:9001"
-      BENCH_TARGET_METRICS_CONFIG: .github/config/bench-metrics-targets.json
-      BENCH_TARGET_METRICS_SCRAPE_INTERVAL_MS: "200"
 
     steps:
-      - name: Clean up previous bench-work
-        run: sudo rm -rf "$BENCH_WORK_DIR" 2>/dev/null || true
-
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
@@ -86,46 +46,26 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.ref }}
 
-      - name: Resolve ref
-        id: refs
+      - name: Resolve command
         run: |
           set -euo pipefail
-          ref="$(git rev-parse HEAD)"
-          echo "ref=${ref}" >> "$GITHUB_OUTPUT"
-          echo "BASELINE_REF=${ref}" >> "$GITHUB_ENV"
-          echo "FEATURE_REF=${ref}" >> "$GITHUB_ENV"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            command='${{ inputs.command }}'
+          else
+            command='cargo check -p reth-engine-primitives'
+          fi
+          echo "BENCH_COMMAND=${command}" >> "$GITHUB_ENV"
 
-      - name: Prepare source directories
+      - name: Prepare variants
         run: |
           set -euo pipefail
 
-          prepare_source_dir() {
-            local dir="$1"
-            local ref="$2"
+          git clone . ../reth-bal-storage-roots-enabled
+          git clone . ../reth-bal-storage-roots-disabled
 
-            if [ -d "$dir/.git" ]; then
-              git -C "$dir" fetch origin "$ref"
-            else
-              git clone . "$dir"
-            fi
-
-            git -C "$dir" checkout --force "$ref"
-          }
-
-          prepare_source_dir ../reth-bal-storage-roots-enabled "${{ steps.refs.outputs.ref }}"
-          prepare_source_dir ../reth-bal-storage-roots-disabled "${{ steps.refs.outputs.ref }}"
-
-      - name: Patch disabled variant
-        run: |
-          set -euo pipefail
           cd ../reth-bal-storage-roots-disabled
-
           perl -0pi -e 's/take_bal_storage_roots: true,/take_bal_storage_roots: false,/g' \
             crates/engine/primitives/src/config.rs
-
-          if ! git diff --exit-code -- crates/engine/primitives/src/config.rs; then
-            echo "Patched disabled variant to default take_bal_storage_roots=false"
-          fi
 
           count="$(git diff -- crates/engine/primitives/src/config.rs | grep -c 'take_bal_storage_roots: false' || true)"
           if [ "$count" -lt 1 ]; then
@@ -133,225 +73,63 @@ jobs:
             exit 1
           fi
 
-      - name: Build binaries
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TXGEN_DEPLOY_KEY: ${{ secrets.TXGEN_DEPLOY_KEY }}
-          TXGEN_TOKEN: ${{ secrets.TXGEN_TOKEN }}
-          GH_PROJECT_TOKEN: ${{ secrets.GH_PROJECT_TOKEN }}
-          DEREK_PAT: ${{ secrets.DEREK_PAT }}
-          DEREK_TOKEN: ${{ secrets.DEREK_TOKEN }}
-          BENCH_REPO: ${{ github.repository }}
+      - name: Run enabled variant
         run: |
           set -euo pipefail
-          ENABLED_DIR="$(cd ../reth-bal-storage-roots-enabled && pwd)"
-          DISABLED_DIR="$(cd ../reth-bal-storage-roots-disabled && pwd)"
+          cd ../reth-bal-storage-roots-enabled
 
-          .github/scripts/bench-txgen-install.sh
+          start_ns="$(date +%s%N)"
+          bash -lc "$BENCH_COMMAND"
+          end_ns="$(date +%s%N)"
 
-          .github/scripts/bench-txgen-build.sh baseline "$ENABLED_DIR" "${{ steps.refs.outputs.ref }}" &
-          PID_ENABLED=$!
-          .github/scripts/bench-txgen-build.sh feature "$DISABLED_DIR" "${{ steps.refs.outputs.ref }}" &
-          PID_DISABLED=$!
+          duration_ms="$(( (end_ns - start_ns) / 1000000 ))"
+          echo "ENABLED_DURATION_MS=${duration_ms}" >> "$GITHUB_ENV"
 
-          FAIL=0
-          wait $PID_ENABLED || FAIL=1
-          wait $PID_DISABLED || FAIL=1
-          if [ "$FAIL" -ne 0 ]; then
-            echo "::error::One or more build tasks failed"
-            exit 1
-          fi
-
-      - name: Sync snapshot
-        run: |
-          BENCH_RETH_BINARY="$(pwd)/../reth-bal-storage-roots-enabled/target/profiling/${BENCH_NODE_BIN}" \
-            .github/scripts/bench-reth-snapshot.sh
-
-      - name: System setup
-        run: |
-          echo passive | sudo tee /sys/devices/system/cpu/amd_pstate/status 2>/dev/null || true
-          sudo cpupower frequency-set -g performance || true
-          sudo swapoff -a || true
-          echo 0 | sudo tee /proc/sys/kernel/randomize_va_space || true
-
-          for p in /sys/kernel/mm/transparent_hugepage /sys/kernel/mm/transparent_hugepages; do
-            [ -d "$p" ] && echo never | sudo tee "$p/enabled" && echo never | sudo tee "$p/defrag" && break
-          done || true
-
-          sudo pkill -f '^bench-cpu-dma-latency' 2>/dev/null || true
-          sudo bash -c 'exec 3<>/dev/cpu_dma_latency; printf "\0\0\0\0" >&3; exec -a bench-cpu-dma-latency sleep infinity' &
-          echo "BENCH_CPU_DMA_LATENCY_PID=$!" >> "$GITHUB_ENV"
-
-          sudo systemctl stop \
-            irqbalance cron atd unattended-upgrades snapd \
-            prometheus-node-exporter-apt.timer prometheus-node-exporter-apt.service \
-            prometheus-node-exporter-nvme.timer prometheus-node-exporter-nvme.service \
-            prometheus-node-exporter-ipmitool-sensor.timer prometheus-node-exporter-ipmitool-sensor.service \
-            sysstat-collect.timer sysstat-collect.service \
-            sysstat-summary.timer sysstat-summary.service \
-            2>/dev/null || true
-
-          uname -r
-          lscpu | grep -E 'Model name|CPU\(s\)|MHz|NUMA'
-          free -h
-
-      - name: Pre-flight cleanup
-        run: |
-          sudo systemctl stop "$RETH_SCOPE" 2>/dev/null || true
-          sudo systemctl reset-failed "$RETH_SCOPE" 2>/dev/null || true
-          sudo schelk recover -y --kill || sudo schelk full-recover -y || true
-          rm -rf "$BENCH_WORK_DIR"
-          mkdir -p "$BENCH_WORK_DIR"
-
-      - name: Initialize benchmark metadata
+      - name: Run disabled variant
         run: |
           set -euo pipefail
-          BENCH_ID="bal-storage-roots-${{ github.run_id }}"
-          BENCH_REFERENCE_EPOCH="$(date +%s)"
-          LABELS_FILE="$(mktemp "${RUNNER_TEMP:-/tmp}/bench-metrics-labels.XXXXXX")"
-          echo '{}' > "$LABELS_FILE"
+          cd ../reth-bal-storage-roots-disabled
 
-          echo "BENCH_ID=${BENCH_ID}" >> "$GITHUB_ENV"
-          echo "BENCH_REFERENCE_EPOCH=${BENCH_REFERENCE_EPOCH}" >> "$GITHUB_ENV"
-          echo "BENCH_LABELS_FILE=${LABELS_FILE}" >> "$GITHUB_ENV"
+          start_ns="$(date +%s%N)"
+          bash -lc "$BENCH_COMMAND"
+          end_ns="$(date +%s%N)"
 
-      - name: Extract txgen payloads
-        run: |
-          PAYLOADS_DIR="$BENCH_WORK_DIR/txgen-payloads"
-          .github/scripts/bench-txgen-extract.sh \
-            "../reth-bal-storage-roots-enabled/target/profiling/${BENCH_NODE_BIN}" \
-            "$PAYLOADS_DIR"
-          echo "TXGEN_PAYLOADS_DIR=${PAYLOADS_DIR}" >> "$GITHUB_ENV"
+          duration_ms="$(( (end_ns - start_ns) / 1000000 ))"
+          echo "DISABLED_DURATION_MS=${duration_ms}" >> "$GITHUB_ENV"
 
-      - name: Run benchmarks
-        run: |
-          set -euo pipefail
-
-          build_run_order() {
-            local run_pairs="$1"
-            if ! [[ "$run_pairs" =~ ^[1-9][0-9]*$ ]]; then
-              echo "run pairs must be a positive integer" >&2
-              return 1
-            fi
-            if [ $((run_pairs % 2)) -eq 0 ]; then
-              printf 'ABBA%.0s' $(seq 1 $((run_pairs / 2)))
-            else
-              printf 'AB%.0s' $(seq 1 "$run_pairs")
-            fi
-            echo
-          }
-
-          RUN_ORDER="$(build_run_order "${BENCH_RUN_PAIRS:-6}")"
-          echo "$RUN_ORDER" > "$BENCH_WORK_DIR/run_order.txt"
-          echo "Run order: ${RUN_ORDER} (A=disabled/traditional, B=enabled/from-BAL)"
-
-          feature_index=0
-          baseline_index=0
-
-          for ((i = 0; i < ${#RUN_ORDER}; i++)); do
-            side="${RUN_ORDER:i:1}"
-            if [ "$side" = "A" ]; then
-              run_type="feature"
-              feature_index=$((feature_index + 1))
-              run_label="disabled-${feature_index}"
-              binary="../reth-bal-storage-roots-disabled/target/profiling/${BENCH_NODE_BIN}"
-              ref="${FEATURE_REF}"
-              storage_root_mode="traditional"
-            else
-              run_type="baseline"
-              baseline_index=$((baseline_index + 1))
-              run_label="enabled-${baseline_index}"
-              binary="../reth-bal-storage-roots-enabled/target/profiling/${BENCH_NODE_BIN}"
-              ref="${BASELINE_REF}"
-              storage_root_mode="from-bal"
-            fi
-
-            LAST_RUN_START="$(date +%s)"
-            export OTEL_RESOURCE_ATTRIBUTES="benchmark_id=${BENCH_ID},benchmark_run=${run_label},run_type=${run_type},git_ref=${ref},bal_storage_root_mode=${storage_root_mode}"
-            cat > "$BENCH_LABELS_FILE" <<LABELS
-          {"benchmark_run":"${run_label}","run_type":"${run_type}","git_ref":"${ref}","bench_sha":"${ref}","benchmark_id":"${BENCH_ID}","run_start_epoch":"${LAST_RUN_START}","reference_epoch":"${BENCH_REFERENCE_EPOCH}","bal_storage_root_mode":"${storage_root_mode}"}
-          LABELS
-
-            taskset -c 0 .github/scripts/bench-txgen-run.sh "$run_type" "$binary" "$BENCH_WORK_DIR/${run_label}"
-          done
-
-      - name: Print benchmark summary
+      - name: Print result
         if: always()
         run: |
-          set -euo pipefail
-          shopt -s nullglob
-
-          enabled_csv=( "$BENCH_WORK_DIR"/enabled-*/combined_latency.csv )
-          disabled_csv=( "$BENCH_WORK_DIR"/disabled-*/combined_latency.csv )
-
-          if [ "${#enabled_csv[@]}" -eq 0 ] || [ "${#disabled_csv[@]}" -eq 0 ]; then
-            {
-              echo "## BAL Storage Root Benchmark"
-              echo
-              echo "Benchmark did not produce both enabled and disabled CSV outputs."
-              echo
-              echo "- enabled CSVs: ${#enabled_csv[@]}"
-              echo "- disabled CSVs: ${#disabled_csv[@]}"
-            } | tee -a "$GITHUB_STEP_SUMMARY"
-            exit 1
-          fi
-
-          SUMMARY_JSON="$BENCH_WORK_DIR/bal-storage-roots-summary.json"
-          SUMMARY_MD="$BENCH_WORK_DIR/bal-storage-roots-summary.md"
-
-          summary_args=(
-            --baseline-csv "${enabled_csv[@]}"
-            --feature-csv "${disabled_csv[@]}"
-            --output-summary "$SUMMARY_JSON"
-            --output-markdown "$SUMMARY_MD"
-            --repo "${{ github.repository }}"
-            --baseline-ref "$BASELINE_REF"
-            --baseline-name "from BAL storage roots"
-            --feature-ref "$FEATURE_REF"
-            --feature-name "traditional storage root recompute"
-            --warmup-blocks "$BENCH_WARMUP_BLOCKS"
-            --bal-mode true
-            --run-pairs "$BENCH_RUN_PAIRS"
-          )
-
-          if [ "$BENCH_BIG_BLOCKS" = "true" ]; then
-            summary_args+=(--big-blocks)
-          fi
-          if [ -n "${BENCH_WAIT_TIME:-}" ]; then
-            summary_args+=(--wait-time "$BENCH_WAIT_TIME")
-          fi
-
-          python3 .github/scripts/bench-reth-summary.py "${summary_args[@]}"
+          enabled="${ENABLED_DURATION_MS:-}"
+          disabled="${DISABLED_DURATION_MS:-}"
 
           {
-            echo "## BAL Storage Root Benchmark"
+            echo "## BAL Storage Root Check"
             echo
-            echo "- **enabled**: sparse trie takes account storage roots from BAL"
-            echo "- **disabled**: sparse trie recomputes storage roots traditionally"
+            echo "Command:"
             echo
-            cat "$SUMMARY_MD"
+            echo '```sh'
+            echo "$BENCH_COMMAND"
+            echo '```'
+            echo
+            echo "| Variant | Meaning | Duration |"
+            echo "| --- | --- | ---: |"
+            if [ -n "$enabled" ]; then
+              printf '| enabled | uses BAL account storage roots | %.3fs |\n' "$(awk "BEGIN { print $enabled / 1000 }")"
+            else
+              echo "| enabled | uses BAL account storage roots | failed |"
+            fi
+            if [ -n "$disabled" ]; then
+              printf '| disabled | recomputes storage roots traditionally | %.3fs |\n' "$(awk "BEGIN { print $disabled / 1000 }")"
+            else
+              echo "| disabled | recomputes storage roots traditionally | failed |"
+            fi
+            if [ -n "$enabled" ] && [ -n "$disabled" ]; then
+              delta="$(awk "BEGIN { print ($disabled - $enabled) / 1000 }")"
+              pct="$(awk "BEGIN { if ($enabled == 0) print 0; else print (($disabled - $enabled) * 100) / $enabled }")"
+              echo
+              printf 'Disabled minus enabled: %.3fs (%+.2f%%)\n' "$delta" "$pct"
+            fi
+            echo
+            echo "Note: this is a CI-friendly timing check, not the real txgen replay benchmark. Real payload replay still requires the self-hosted benchmark runner."
           } | tee -a "$GITHUB_STEP_SUMMARY"
-
-      - name: Upload raw results
-        if: always()
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
-        with:
-          name: bench-bal-storage-roots-results
-          path: |
-            bench-work/**/*.csv
-            bench-work/**/*.json
-            bench-work/**/*.log
-            bench-work/**/*.md
-            bench-work/run_order.txt
-          if-no-files-found: warn
-
-      - name: Cleanup
-        if: always()
-        run: |
-          sudo systemctl stop "$RETH_SCOPE" 2>/dev/null || true
-          sudo systemctl reset-failed "$RETH_SCOPE" 2>/dev/null || true
-          sudo schelk recover -y --kill || sudo schelk full-recover -y || true
-          if [ -n "${BENCH_CPU_DMA_LATENCY_PID:-}" ]; then
-            sudo kill "$BENCH_CPU_DMA_LATENCY_PID" 2>/dev/null || true
-          fi
-          sudo pkill -f '^bench-cpu-dma-latency' 2>/dev/null || true
