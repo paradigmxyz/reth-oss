@@ -266,7 +266,7 @@ where
 
     debug!(target: "engine::stream::reorg", number = reorg_target.header().number(), hash = %previous_hash, "Selected reorg target");
 
-    // Configure state
+    // Configure state.
     let has_bal = reorg_target.header().block_access_list_hash().is_some();
     let state_provider = provider.state_by_block_hash(reorg_target.header().parent_hash())?;
     let mut state = State::builder()
