@@ -68,6 +68,8 @@ pub(super) struct SparseTrieCacheTask<A = ConfigurableSparseTrie, S = Configurab
     storage_updates: B256Map<B256Map<LeafUpdate>>,
     /// Precomputed post-block storage roots from the Bogota BAL.
     precomputed_storage_roots: B256Map<B256>,
+    /// Whether precomputed BAL storage roots may be used for state root computation.
+    take_bal_storage_roots: bool,
 
     /// Account updates that are buffered but were not yet applied to the trie.
     new_account_updates: B256Map<LeafUpdate>,
@@ -137,6 +139,7 @@ where
         trie: SparseStateTrie<A, S>,
         parent_state_root: B256,
         chunk_size: usize,
+        take_bal_storage_roots: bool,
     ) -> Self {
         let (proof_result_tx, proof_result_rx) = crossbeam_channel::unbounded();
         let (hashed_state_tx, hashed_state_rx) = crossbeam_channel::unbounded();
@@ -161,6 +164,7 @@ where
             account_updates: Default::default(),
             storage_updates: Default::default(),
             precomputed_storage_roots: Default::default(),
+            take_bal_storage_roots,
             new_account_updates: Default::default(),
             new_storage_updates: Default::default(),
             pending_account_updates: Default::default(),
@@ -701,7 +705,8 @@ where
         let mut tries_to_compute_roots: Vec<(B256, SendStorageTriePtr<S>)> =
             Vec::with_capacity(addresses_to_compute_roots.len());
         for address in addresses_to_compute_roots {
-            if self.precomputed_storage_roots.contains_key(&address) {
+            if self.take_bal_storage_roots && self.precomputed_storage_roots.contains_key(&address)
+            {
                 continue;
             }
             if let Some(trie) = self.trie.storage_tries_mut().get_mut(&address) &&
@@ -767,12 +772,17 @@ where
             let account_updates = &mut self.account_updates;
             let storage_updates = &self.storage_updates;
             let precomputed_storage_roots = &self.precomputed_storage_roots;
+            let take_bal_storage_roots = self.take_bal_storage_roots;
             let trie = &mut self.trie;
             let storage_root = |trie: &mut SparseStateTrie<A, S>, address: &B256| {
-                precomputed_storage_roots
-                    .get(address)
-                    .copied()
-                    .or_else(|| trie.storage_root(address))
+                if take_bal_storage_roots {
+                    precomputed_storage_roots
+                        .get(address)
+                        .copied()
+                        .or_else(|| trie.storage_root(address))
+                } else {
+                    trie.storage_root(address)
+                }
             };
             let mut num_promoted = 0;
             self.pending_account_updates.retain(|addr, account| {
@@ -1058,6 +1068,7 @@ mod tests {
             trie,
             parent_state_root,
             1,
+            true,
         );
 
         updates_tx.send(StateRootMessage::FinishedStateUpdates).unwrap();

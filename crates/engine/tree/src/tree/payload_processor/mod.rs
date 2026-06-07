@@ -153,6 +153,8 @@ where
     disable_bal_parallel_state_root: bool,
     /// Whether BAL state prefetching during prewarm is disabled.
     disable_bal_batch_io: bool,
+    /// Whether sparse-trie state root computation may use storage roots carried by the BAL.
+    take_bal_storage_roots: bool,
 }
 
 impl<N, Evm> PayloadProcessor<Evm>
@@ -192,6 +194,7 @@ where
                 .then(CachedStateCacheMetrics::default),
             disable_bal_parallel_state_root: config.disable_bal_parallel_state_root(),
             disable_bal_batch_io: config.disable_bal_batch_io(),
+            take_bal_storage_roots: config.take_bal_storage_roots(),
         }
     }
 }
@@ -395,6 +398,7 @@ where
             from_multi_proof,
             parent_state_root,
             config.multiproof_chunk_size(),
+            self.take_bal_storage_roots,
         );
 
         StateRootHandle::new(parent_state_root, updates_tx, state_root_rx, hashed_state_rx)
@@ -591,6 +595,7 @@ where
         from_multi_proof: CrossbeamReceiver<StateRootMessage>,
         parent_state_root: B256,
         chunk_size: usize,
+        take_bal_storage_roots: bool,
     ) {
         let preserved_sparse_trie = self.sparse_state_trie.clone();
         let trie_metrics = self.trie_metrics.clone();
@@ -642,6 +647,7 @@ where
                 sparse_state_trie,
                 parent_state_root,
                 chunk_size,
+                take_bal_storage_roots,
             );
 
             let result = task.run();
