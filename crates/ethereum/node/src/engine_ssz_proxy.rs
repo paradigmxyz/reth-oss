@@ -99,6 +99,11 @@ impl<ChainSpec> EngineSszProxyHandle<ChainSpec> {
         *self.blob_store.write().await = Some(Arc::new(blob_store));
     }
 
+    /// Sets the blob store used by the proxy for handling blob requests.
+    pub async fn set_blob_store_box(&self, blob_store: Box<dyn BlobStore>) {
+        *self.blob_store.write().await = Some(Arc::from(blob_store));
+    }
+
     async fn blob_store(&self) -> Option<Arc<dyn BlobStore>> {
         self.blob_store.read().await.clone()
     }

@@ -1,7 +1,7 @@
 //! Ethereum Node types config.
 
+use crate::{engine_ssz_proxy::EngineSszProxyLayer, EthEngineTypes, EthEvmConfig};
 pub use crate::{payload::EthereumPayloadBuilder, EthereumEngineValidator};
-use crate::{EthEngineTypes, EthEvmConfig};
 use alloy_eips::{eip7840::BlobParams, merge::EPOCH_SLOTS};
 use alloy_network::Ethereum;
 use alloy_rpc_types_engine::ExecutionData;
@@ -322,6 +322,15 @@ where
         self,
         ctx: reth_node_api::AddOnsContext<'_, N>,
     ) -> eyre::Result<Self::Handle> {
+        let ssz_proxy_layer = if ctx.config.engine.enable_ssz_proxy {
+            let (layer, handle) = EngineSszProxyLayer::new(ctx.config.chain.clone());
+            handle.set_engine(ctx.beacon_engine_handle.clone()).await;
+            handle.set_blob_store_box(ctx.node.pool().blob_store()).await;
+            Some(layer)
+        } else {
+            None
+        };
+
         let validation_api = ValidationApi::<_, _, <N::Types as NodeTypes>::Payload>::new(
             ctx.node.provider().clone(),
             Arc::new(ctx.node.consensus().clone()),
@@ -338,7 +347,9 @@ where
         let testing_gas_limit_override = ctx.config.rpc.testing_gas_limit;
         let testing_desired_gas_limit = ctx.config.builder.gas_limit_for(ctx.config.chain.chain());
 
-        self.inner
+        let Self { inner } = self.option_layer_auth_http_middleware(ssz_proxy_layer);
+
+        inner
             .launch_add_ons_with(ctx, move |container| {
                 container.modules.merge_if_module_configured(
                     RethRpcModule::Flashbots,
