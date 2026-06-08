@@ -301,7 +301,7 @@ impl<N, EthB, PVB, EB, EVB, RpcMiddleware, AuthHttpMiddleware> NodeAddOns<N>
 where
     N: FullNodeComponents<
         Types: NodeTypes<
-            ChainSpec: EthChainSpec + Hardforks + EthereumHardforks,
+            ChainSpec: EthChainSpec + Hardforks + EthereumHardforks + Send + Sync + 'static,
             Primitives = EthPrimitives,
             Payload = EthEngineTypes,
         >,
@@ -315,6 +315,10 @@ where
     EvmFactoryFor<N::Evm>: EvmFactory<Tx = TxEnv>,
     RpcMiddleware: RethRpcMiddleware,
     AuthHttpMiddleware: RethAuthHttpMiddleware<Identity>,
+    Stack<
+        AuthHttpMiddleware,
+        Either<EngineSszProxyLayer<<N::Types as NodeTypes>::ChainSpec>, Identity>,
+    >: RethAuthHttpMiddleware<Identity>,
 {
     type Handle = RpcHandle<N, EthB::EthApi>;
 
@@ -388,9 +392,9 @@ impl<N, EthB, PVB, EB, EVB, RpcMiddleware, AuthHttpMiddleware> RethRpcAddOns<N>
 where
     N: FullNodeComponents<
         Types: NodeTypes<
-            ChainSpec: Hardforks + EthereumHardforks,
+            ChainSpec: Hardforks + EthereumHardforks + Send + Sync + 'static,
             Primitives = EthPrimitives,
-            Payload: EngineTypes<ExecutionData = ExecutionData>,
+            Payload = EthEngineTypes,
         >,
         Evm: ConfigureEvm<NextBlockEnvCtx = NextBlockEnvAttributes>,
     >,
