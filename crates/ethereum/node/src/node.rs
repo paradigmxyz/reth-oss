@@ -303,7 +303,7 @@ where
         Types: NodeTypes<
             ChainSpec: EthChainSpec + Hardforks + EthereumHardforks,
             Primitives = EthPrimitives,
-            Payload: EngineTypes<ExecutionData = ExecutionData>,
+            Payload = EthEngineTypes,
         >,
         Evm: ConfigureEvm<NextBlockEnvCtx = NextBlockEnvAttributes>,
     >,
@@ -347,7 +347,7 @@ where
         let testing_gas_limit_override = ctx.config.rpc.testing_gas_limit;
         let testing_desired_gas_limit = ctx.config.builder.gas_limit_for(ctx.config.chain.chain());
 
-        let Self { inner } = self.option_layer_auth_http_middleware(ssz_proxy_layer);
+        let EthereumAddOns { inner } = self.option_layer_auth_http_middleware(ssz_proxy_layer);
 
         inner
             .launch_add_ons_with(ctx, move |container| {
