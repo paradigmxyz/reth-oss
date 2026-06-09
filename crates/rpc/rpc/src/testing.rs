@@ -17,9 +17,9 @@
 use alloy_consensus::{Header, Transaction};
 use alloy_eips::{eip1559::calculate_block_gas_limit, eip2718::Decodable2718};
 use alloy_evm::{Evm, RecoveredTx};
-use alloy_primitives::{map::HashSet, Address, U256};
+use alloy_primitives::{map::HashSet, Address, Bytes, B256, U256};
 use alloy_rlp::Encodable;
-use alloy_rpc_types_engine::ExecutionPayloadEnvelopeV5;
+use alloy_rpc_types_engine::{ExecutionPayloadEnvelopeV5, PayloadAttributes};
 use async_trait::async_trait;
 use jsonrpsee::core::RpcResult;
 use reth_chainspec::{ChainSpecProvider, EthereumHardforks};
@@ -265,8 +265,17 @@ where
     /// work to the blocking pool to avoid stalling the async runtime.
     async fn build_block_v1(
         &self,
-        request: TestingBuildBlockRequestV1,
+        parent_block_hash: B256,
+        payload_attributes: PayloadAttributes,
+        transactions: Option<Vec<Bytes>>,
+        extra_data: Option<Bytes>,
     ) -> RpcResult<ExecutionPayloadEnvelopeV5> {
+        let request = TestingBuildBlockRequestV1 {
+            parent_block_hash,
+            payload_attributes,
+            transactions: transactions.unwrap_or_default(),
+            extra_data,
+        };
         self.build_block_v1(request).await.map_err(Into::into)
     }
 }
