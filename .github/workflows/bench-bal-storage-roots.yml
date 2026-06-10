@@ -1,0 +1,135 @@
+# CI-friendly comparison for the BAL storage-root state-root switch.
+#
+# This intentionally does not use the private benchmark runner environment. It
+# builds/checks the default variant and a patched variant where
+# `TreeConfig::take_bal_storage_roots` defaults to false, then prints timings in
+# the job summary. Real txgen replay benchmarks still require the self-hosted
+# benchmark runner.
+
+name: bench-bal-storage-roots
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/bench-bal-storage-roots.yml"
+      - "crates/engine/**"
+      - "crates/trie/**"
+      - "crates/ethereum/**"
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Git ref to check"
+        required: false
+        default: ""
+      command:
+        description: "Cargo command to time for each variant"
+        required: false
+        default: "cargo check -p reth-engine-primitives"
+
+concurrency:
+  group: bench-bal-storage-roots-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  bench-bal-storage-roots:
+    name: bench-bal-storage-roots
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+          submodules: true
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.ref || github.ref }}
+
+      - name: Resolve command
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            command='${{ inputs.command }}'
+          else
+            command='cargo check -p reth-engine-primitives'
+          fi
+          echo "BENCH_COMMAND=${command}" >> "$GITHUB_ENV"
+
+      - name: Prepare variants
+        run: |
+          set -euo pipefail
+
+          git clone . ../reth-bal-storage-roots-enabled
+          git clone . ../reth-bal-storage-roots-disabled
+
+          cd ../reth-bal-storage-roots-disabled
+          perl -0pi -e 's/take_bal_storage_roots: true,/take_bal_storage_roots: false,/g' \
+            crates/engine/primitives/src/config.rs
+
+          count="$(git diff -- crates/engine/primitives/src/config.rs | grep -c 'take_bal_storage_roots: false' || true)"
+          if [ "$count" -lt 1 ]; then
+            echo "::error::Failed to patch take_bal_storage_roots default"
+            exit 1
+          fi
+
+      - name: Run enabled variant
+        run: |
+          set -euo pipefail
+          cd ../reth-bal-storage-roots-enabled
+
+          start_ns="$(date +%s%N)"
+          bash -lc "$BENCH_COMMAND"
+          end_ns="$(date +%s%N)"
+
+          duration_ms="$(( (end_ns - start_ns) / 1000000 ))"
+          echo "ENABLED_DURATION_MS=${duration_ms}" >> "$GITHUB_ENV"
+
+      - name: Run disabled variant
+        run: |
+          set -euo pipefail
+          cd ../reth-bal-storage-roots-disabled
+
+          start_ns="$(date +%s%N)"
+          bash -lc "$BENCH_COMMAND"
+          end_ns="$(date +%s%N)"
+
+          duration_ms="$(( (end_ns - start_ns) / 1000000 ))"
+          echo "DISABLED_DURATION_MS=${duration_ms}" >> "$GITHUB_ENV"
+
+      - name: Print result
+        if: always()
+        run: |
+          enabled="${ENABLED_DURATION_MS:-}"
+          disabled="${DISABLED_DURATION_MS:-}"
+
+          {
+            echo "## BAL Storage Root Check"
+            echo
+            echo "Command:"
+            echo
+            echo '```sh'
+            echo "$BENCH_COMMAND"
+            echo '```'
+            echo
+            echo "| Variant | Meaning | Duration |"
+            echo "| --- | --- | ---: |"
+            if [ -n "$enabled" ]; then
+              printf '| enabled | uses BAL account storage roots | %.3fs |\n' "$(awk "BEGIN { print $enabled / 1000 }")"
+            else
+              echo "| enabled | uses BAL account storage roots | failed |"
+            fi
+            if [ -n "$disabled" ]; then
+              printf '| disabled | recomputes storage roots traditionally | %.3fs |\n' "$(awk "BEGIN { print $disabled / 1000 }")"
+            else
+              echo "| disabled | recomputes storage roots traditionally | failed |"
+            fi
+            if [ -n "$enabled" ] && [ -n "$disabled" ]; then
+              delta="$(awk "BEGIN { print ($disabled - $enabled) / 1000 }")"
+              pct="$(awk "BEGIN { if ($enabled == 0) print 0; else print (($disabled - $enabled) * 100) / $enabled }")"
+              echo
+              printf 'Disabled minus enabled: %.3fs (%+.2f%%)\n' "$delta" "$pct"
+            fi
+            echo
+            echo "Note: this is a CI-friendly timing check, not the real txgen replay benchmark. Real payload replay still requires the self-hosted benchmark runner."
+          } | tee -a "$GITHUB_STEP_SUMMARY"
