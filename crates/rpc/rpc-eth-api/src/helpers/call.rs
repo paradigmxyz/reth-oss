@@ -214,7 +214,7 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                             .map_err(|e| Self::Error::from_eth_err(EthApiError::other(e)))?;
                         }
 
-                        simulate::execute_transactions(
+                        simulate::execute_transactions_with_transfer_logs(
                             builder,
                             &state_provider,
                             calls,
@@ -222,7 +222,6 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                             chain_id,
                             this.compute_state_root_for_eth_simulate(),
                             this.converter(),
-                            true,
                         )
                         .map_err(map_err)?
                     } else {
@@ -245,7 +244,6 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                             chain_id,
                             this.compute_state_root_for_eth_simulate(),
                             this.converter(),
-                            false,
                         )
                         .map_err(map_err)?
                     };
