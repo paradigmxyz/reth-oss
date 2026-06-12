@@ -473,7 +473,8 @@ where
                 default_gas_limit = default_gas_limit.min(remaining_call_gas_limit);
             }
         }
-
+        let disable_nonce_check = builder.evm().cfg_env().disable_nonce_check;
+        let wrap_nonce = disable_nonce_check && tx_nonce == u64::MAX;
         // Resolve transaction, populate missing fields and enforce calls
         // correctness.
         let tx = resolve_transaction(
@@ -481,7 +482,7 @@ where
             default_gas_limit,
             builder.evm().block().basefee(),
             chain_id,
-            builder.evm().cfg_env().disable_nonce_check,
+            disable_nonce_check,
             builder.evm_mut().db_mut(),
             converter,
         )?;
@@ -497,6 +498,16 @@ where
 
         if let Some(result) = results.last_mut() {
             on_result(builder.evm(), result);
+        }
+
+        let from = call.as_ref().from().unwrap_or_default();
+        if wrap_nonce &&
+            let Some(mut info) = builder.evm_mut().db_mut().basic(from).map_err(Into::into)?
+        {
+            info.nonce = 0;
+            let mut changes = AddressMap::default();
+            changes.insert(from, Account::from(info).with_touched_mark());
+            builder.evm_mut().db_mut().commit(changes);
         }
 
         let gas_used = gas_output.tx_gas_used();
