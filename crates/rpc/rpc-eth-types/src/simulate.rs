@@ -7,7 +7,7 @@ use crate::{
 use alloy_chains::Chain;
 use alloy_consensus::{transaction::TxHashRef, BlockHeader, Transaction as _};
 use alloy_eips::eip2718::WithEncoded;
-use alloy_evm::{block::TxResult, precompiles::PrecompilesMap};
+use alloy_evm::{block::TxResult, precompiles::PrecompilesMap, TransactionEnvMut};
 use alloy_network::{NetworkTransactionBuilder, TransactionBuilder};
 use alloy_primitives::{Log, LogData, B256};
 use alloy_rpc_types_eth::{
@@ -18,7 +18,7 @@ use alloy_rpc_types_eth::{
 use alloy_sol_types::SolValue;
 use jsonrpsee_types::{error::INTERNAL_ERROR_CODE, ErrorObject};
 use reth_evm::{
-    execute::{BlockBuilder, BlockBuilderOutcome, BlockExecutor},
+    execute::{BlockBuilder, BlockBuilderOutcome, BlockExecutor, ExecutorTx},
     Evm, HaltReasonFor,
 };
 use reth_primitives_traits::{
@@ -358,6 +358,7 @@ where
     S: BlockBuilder<Executor: BlockExecutor>,
     <<S::Executor as BlockExecutor>::Evm as Evm>::DB:
         Database<Error: Into<EthApiError>> + DatabaseCommit,
+    <<S::Executor as BlockExecutor>::Evm as Evm>::Tx: TransactionEnvMut,
     T: RpcConvert<Primitives = S::Primitives>,
 {
     execute_transactions_with_result_hook(
@@ -393,6 +394,7 @@ where
     S: BlockBuilder<Executor: BlockExecutor>,
     <<S::Executor as BlockExecutor>::Evm as Evm>::DB:
         Database<Error: Into<EthApiError>> + DatabaseCommit,
+    <<S::Executor as BlockExecutor>::Evm as Evm>::Tx: TransactionEnvMut,
     <S::Executor as BlockExecutor>::Evm: Evm<Inspector = TransferInspector>,
     T: RpcConvert<Primitives = S::Primitives>,
 {
@@ -430,6 +432,7 @@ where
     S: BlockBuilder<Executor: BlockExecutor>,
     <<S::Executor as BlockExecutor>::Evm as Evm>::DB:
         Database<Error: Into<EthApiError>> + DatabaseCommit,
+    <<S::Executor as BlockExecutor>::Evm as Evm>::Tx: TransactionEnvMut,
     T: RpcConvert<Primitives = S::Primitives>,
     F: FnMut(
         &<S::Executor as BlockExecutor>::Evm,
@@ -499,10 +502,19 @@ where
         let tx = WithEncoded::new(Default::default(), tx);
 
         let mut tx_regular_gas_used = 0;
-        let gas_output = builder.execute_transaction_with_result_closure(tx, |result| {
-            tx_regular_gas_used = result.result().result.gas().block_regular_gas_used();
-            results.push(result.result().result.clone())
-        })?;
+        let gas_output = if wrap_nonce {
+            let (mut tx_env, tx) = ExecutorTx::<S::Executor>::into_parts(tx);
+            tx_env.set_nonce(0);
+            builder.execute_transaction_with_result_closure((tx_env, tx), |result| {
+                tx_regular_gas_used = result.result().result.gas().block_regular_gas_used();
+                results.push(result.result().result.clone())
+            })?
+        } else {
+            builder.execute_transaction_with_result_closure(tx, |result| {
+                tx_regular_gas_used = result.result().result.gas().block_regular_gas_used();
+                results.push(result.result().result.clone())
+            })?
+        };
 
         if let Some(result) = results.last_mut() {
             on_result(builder.evm(), result);
@@ -550,7 +562,7 @@ pub fn resolve_transaction<DB: Database, Tx, T>(
     default_gas_limit: u64,
     block_base_fee_per_gas: u64,
     chain_id: u64,
-    disable_nonce_check: bool,
+    _disable_nonce_check: bool,
     db: &mut DB,
     converter: &T,
 ) -> Result<Recovered<Tx>, EthApiError>
@@ -574,11 +586,6 @@ where
             db.basic(from).map_err(Into::into)?.map(|acc| acc.nonce).unwrap_or_default(),
         );
     }
-    // eth_simulateV1 validation-off mode behaves like eth_call; avoid revm's max-nonce guard.
-    if disable_nonce_check && tx.as_ref().nonce() == Some(u64::MAX) {
-        tx.as_mut().set_nonce(0);
-    }
-
     if tx.as_ref().gas_limit().is_none() {
         tx.as_mut().set_gas_limit(default_gas_limit);
     }
