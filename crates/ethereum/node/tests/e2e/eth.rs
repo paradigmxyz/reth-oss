@@ -18,11 +18,15 @@ use reth_node_core::{
     node_config::NodeConfig,
     version::{version_metadata, CLIENT_CODE},
 };
-use reth_node_ethereum::{engine_ssz_proxy::EngineSszProxyLayer, EthereumAddOns, EthereumNode};
+use reth_node_ethereum::{
+    engine_ssz_proxy::{EngineSszProxyHandle, EngineSszProxyLayer},
+    EthereumAddOns, EthereumNode,
+};
 use reth_provider::BlockNumReader;
 use reth_rpc_api::TestingBuildBlockRequestV1;
 use reth_rpc_layer::secret_to_bearer_header;
 use reth_tasks::Runtime;
+use reth_transaction_pool::BlobStore;
 use ssz::{Decode, Encode};
 use std::sync::Arc;
 
@@ -31,6 +35,35 @@ const ENGINE_PRAGUE_FORKCHOICE_ROUTE: &str = "/engine/v2/prague/forkchoice";
 const ENGINE_V1_BLOBS_ROUTE: &str = "/engine/v2/blobs/v1";
 const ENGINE_CAPABILITIES_ROUTE: &str = "/engine/v2/capabilities";
 const ENGINE_IDENTITY_ROUTE: &str = "/engine/v2/identity";
+
+fn engine_ssz_test_setup() -> (
+    Runtime,
+    Arc<reth_chainspec::ChainSpec>,
+    NodeConfig<reth_chainspec::ChainSpec>,
+    EngineSszProxyLayer<reth_chainspec::ChainSpec>,
+    EngineSszProxyHandle<reth_chainspec::ChainSpec>,
+) {
+    reth_tracing::init_test_tracing();
+    let runtime = Runtime::test();
+    let genesis: Genesis = serde_json::from_str(include_str!("../assets/genesis.json")).unwrap();
+    let chain_spec = Arc::new(
+        ChainSpecBuilder::default()
+            .chain(MAINNET.chain)
+            .genesis(genesis)
+            .prague_activated()
+            .build(),
+    );
+    let node_config =
+        NodeConfig::test().with_chain(chain_spec.clone()).with_unused_ports().with_rpc(
+            RpcServerArgs::default()
+                .with_unused_ports()
+                .with_http()
+                .with_http_api(reth_rpc_server_types::RpcModuleSelection::All),
+        );
+    let (ssz_layer, ssz_handle) = EngineSszProxyLayer::new(chain_spec.clone());
+
+    (runtime, chain_spec, node_config, ssz_layer, ssz_handle)
+}
 
 #[tokio::test]
 async fn can_run_eth_node() -> eyre::Result<()> {
@@ -272,28 +305,8 @@ async fn test_testing_build_block_v1_osaka() -> eyre::Result<()> {
 }
 
 #[tokio::test]
-async fn test_engine_ssz_proxy_can_mine_block() -> eyre::Result<()> {
-    reth_tracing::init_test_tracing();
-    let runtime = Runtime::test();
-
-    let genesis: Genesis = serde_json::from_str(include_str!("../assets/genesis.json")).unwrap();
-    let chain_spec = Arc::new(
-        ChainSpecBuilder::default()
-            .chain(MAINNET.chain)
-            .genesis(genesis)
-            .prague_activated()
-            .build(),
-    );
-    let genesis_hash = chain_spec.genesis_hash();
-    let node_config =
-        NodeConfig::test().with_chain(chain_spec.clone()).with_unused_ports().with_rpc(
-            RpcServerArgs::default()
-                .with_unused_ports()
-                .with_http()
-                .with_http_api(reth_rpc_server_types::RpcModuleSelection::All),
-        );
-
-    let (ssz_layer, ssz_handle) = EngineSszProxyLayer::new(chain_spec.clone());
+async fn test_engine_ssz_proxy_metadata() -> eyre::Result<()> {
+    let (runtime, _chain_spec, node_config, ssz_layer, _ssz_handle) = engine_ssz_test_setup();
     let NodeHandle { node, node_exit_future: _ } = NodeBuilder::new(node_config)
         .testing_node(runtime)
         .with_types::<EthereumNode>()
@@ -301,34 +314,7 @@ async fn test_engine_ssz_proxy_can_mine_block() -> eyre::Result<()> {
         .with_add_ons(EthereumAddOns::default().with_auth_http_middleware(ssz_layer))
         .launch()
         .await?;
-
-    ssz_handle.set_engine(node.add_ons_handle.beacon_engine_handle.clone()).await;
-    ssz_handle.set_blob_store(node.pool.blob_store().clone()).await;
     let node = NodeTestContext::new(node, eth_payload_attributes).await?;
-
-    let wallets = Wallet::new(2).wallet_gen();
-    let raw_tx = TransactionTestContext::transfer_tx_bytes(1, wallets[0].clone()).await;
-
-    let payload_attributes = PayloadAttributes {
-        timestamp: chain_spec.genesis().timestamp + 1,
-        prev_randao: B256::ZERO,
-        suggested_fee_recipient: Address::ZERO,
-        withdrawals: Some(vec![]),
-        parent_beacon_block_root: Some(B256::ZERO),
-        slot_number: None,
-    };
-
-    let envelope = node
-        .testing_build_block_v1(TestingBuildBlockRequestV1 {
-            parent_block_hash: genesis_hash,
-            payload_attributes,
-            transactions: vec![raw_tx],
-            extra_data: None,
-        })
-        .await?;
-
-    let payload = envelope.execution_payload;
-    let block_hash = payload.payload_inner.payload_inner.block_hash;
     let client = reqwest::Client::new();
     let auth_server = node.auth_server_handle();
     let auth_url = auth_server.http_url();
@@ -348,7 +334,6 @@ async fn test_engine_ssz_proxy_can_mine_block() -> eyre::Result<()> {
             .and_then(|value| value.to_str().ok()),
         Some("application/json")
     );
-
     let capabilities: serde_json::Value = capabilities_response.json().await?;
     assert_eq!(
         capabilities,
@@ -381,7 +366,6 @@ async fn test_engine_ssz_proxy_can_mine_block() -> eyre::Result<()> {
             .and_then(|value| value.to_str().ok()),
         Some("application/json")
     );
-
     let identity: Vec<ClientVersionV1> = identity_response.json().await?;
     assert_eq!(
         identity,
@@ -392,6 +376,98 @@ async fn test_engine_ssz_proxy_can_mine_block() -> eyre::Result<()> {
             commit: version_metadata().vergen_git_sha.to_string(),
         }]
     );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_engine_ssz_proxy_get_blobs() -> eyre::Result<()> {
+    let (runtime, _chain_spec, node_config, ssz_layer, ssz_handle) = engine_ssz_test_setup();
+    let NodeHandle { node, node_exit_future: _ } = NodeBuilder::new(node_config)
+        .testing_node(runtime)
+        .with_types::<EthereumNode>()
+        .with_components(EthereumNode::components())
+        .with_add_ons(EthereumAddOns::default().with_auth_http_middleware(ssz_layer))
+        .launch()
+        .await?;
+    ssz_handle.set_blob_store(node.pool.blob_store().clone()).await;
+    let node = NodeTestContext::new(node, eth_payload_attributes).await?;
+    let wallet = Wallet::default();
+    let blob_tx = TransactionTestContext::tx_with_blobs_bytes(1, wallet.inner).await?;
+    let blob_tx_hash = node.rpc.inject_tx(blob_tx).await?;
+    let envelope = node.rpc.envelope_by_hash(blob_tx_hash).await?;
+    let versioned_hashes = TransactionTestContext::validate_sidecar(envelope);
+    let mut requested_hashes = versioned_hashes.clone();
+    requested_hashes.push(B256::ZERO);
+    let expected_blobs =
+        node.inner.pool.blob_store().get_by_versioned_hashes_v1(&requested_hashes)?;
+    let client = reqwest::Client::new();
+    let auth_server = node.auth_server_handle();
+    let auth_url = auth_server.http_url();
+    let auth_header = secret_to_bearer_header(auth_server.jwt_secret());
+
+    let blobs_response = client
+        .post(format!("{auth_url}{ENGINE_V1_BLOBS_ROUTE}"))
+        .header(reqwest::header::AUTHORIZATION, auth_header.to_str()?)
+        .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+        .header(reqwest::header::ACCEPT, "application/octet-stream")
+        .body(requested_hashes.as_ssz_bytes())
+        .send()
+        .await?;
+    assert_eq!(blobs_response.status(), reqwest::StatusCode::OK);
+    let blobs =
+        Vec::<Option<BlobAndProofV1>>::from_ssz_bytes(&blobs_response.bytes().await?).unwrap();
+    assert_eq!(blobs, expected_blobs);
+    assert_eq!(blobs.len(), requested_hashes.len());
+    assert!(blobs[..versioned_hashes.len()].iter().all(Option::is_some));
+    assert!(blobs.last().unwrap().is_none());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_engine_ssz_proxy_can_mine_block() -> eyre::Result<()> {
+    let (runtime, chain_spec, node_config, ssz_layer, ssz_handle) = engine_ssz_test_setup();
+    let genesis_hash = chain_spec.genesis_hash();
+    let NodeHandle { node, node_exit_future: _ } = NodeBuilder::new(node_config)
+        .testing_node(runtime)
+        .with_types::<EthereumNode>()
+        .with_components(EthereumNode::components())
+        .with_add_ons(EthereumAddOns::default().with_auth_http_middleware(ssz_layer))
+        .launch()
+        .await?;
+
+    ssz_handle.set_engine(node.add_ons_handle.beacon_engine_handle.clone()).await;
+    ssz_handle.set_blob_store(node.pool.blob_store().clone()).await;
+    let node = NodeTestContext::new(node, eth_payload_attributes).await?;
+
+    let wallet = Wallet::default();
+    let raw_tx = TransactionTestContext::transfer_tx_bytes(1, wallet.inner).await;
+
+    let payload_attributes = PayloadAttributes {
+        timestamp: chain_spec.genesis().timestamp + 1,
+        prev_randao: B256::ZERO,
+        suggested_fee_recipient: Address::ZERO,
+        withdrawals: Some(vec![]),
+        parent_beacon_block_root: Some(B256::ZERO),
+        slot_number: None,
+    };
+
+    let envelope = node
+        .testing_build_block_v1(TestingBuildBlockRequestV1 {
+            parent_block_hash: genesis_hash,
+            payload_attributes,
+            transactions: vec![raw_tx],
+            extra_data: None,
+        })
+        .await?;
+
+    let payload = envelope.execution_payload;
+    let block_hash = payload.payload_inner.payload_inner.block_hash;
+    let client = reqwest::Client::new();
+    let auth_server = node.auth_server_handle();
+    let auth_url = auth_server.http_url();
+    let auth_header = secret_to_bearer_header(auth_server.jwt_secret());
 
     let new_payload_response = client
         .post(format!("{auth_url}{ENGINE_PRAGUE_PAYLOADS_ROUTE}"))
@@ -425,26 +501,6 @@ async fn test_engine_ssz_proxy_can_mine_block() -> eyre::Result<()> {
         .send()
         .await?;
     assert_eq!(fcu_response.status(), reqwest::StatusCode::OK);
-
-    let blob_tx = TransactionTestContext::tx_with_blobs_bytes(1, wallets[1].clone()).await?;
-    let blob_tx_hash = node.rpc.inject_tx(blob_tx).await?;
-    let envelope = node.rpc.envelope_by_hash(blob_tx_hash).await?;
-    let versioned_hashes = TransactionTestContext::validate_sidecar(envelope);
-
-    let blobs_response = client
-        .post(format!("{auth_url}{ENGINE_V1_BLOBS_ROUTE}"))
-        .header(reqwest::header::AUTHORIZATION, auth_header.to_str()?)
-        .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
-        .header(reqwest::header::ACCEPT, "application/octet-stream")
-        .body(versioned_hashes.as_ssz_bytes())
-        .send()
-        .await?;
-    assert_eq!(blobs_response.status(), reqwest::StatusCode::OK);
-
-    let blobs =
-        Vec::<Option<BlobAndProofV1>>::from_ssz_bytes(&blobs_response.bytes().await?).unwrap();
-    assert_eq!(blobs.len(), versioned_hashes.len());
-    assert!(blobs.iter().all(Option::is_some));
 
     let fcu = ForkchoiceUpdated::from_ssz_bytes(&fcu_response.bytes().await?).unwrap();
     assert_eq!(fcu.payload_status.status, PayloadStatusEnum::Valid);
