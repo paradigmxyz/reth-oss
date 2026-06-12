@@ -520,14 +520,14 @@ where
             on_result(builder.evm(), result);
         }
 
-        if wrap_nonce &&
-            let Some(mut info) = builder.evm_mut().db_mut().basic(from).map_err(Into::into)?
-        {
-            info.nonce = 0;
-            let mut changes = AddressMap::default();
-            changes.insert(from, Account::from(info).with_touched_mark());
-            builder.evm_mut().db_mut().commit(changes);
-        }
+        // if wrap_nonce &&
+        //     let Some(mut info) = builder.evm_mut().db_mut().basic(from).map_err(Into::into)?
+        // {
+        //     info.nonce = 0;
+        //     let mut changes = AddressMap::default();
+        //     changes.insert(from, Account::from(info).with_touched_mark());
+        //     builder.evm_mut().db_mut().commit(changes);
+        // }
 
         let gas_used = gas_output.tx_gas_used();
         if let Some(remaining_call_gas_limit) = remaining_call_gas_limit.as_mut() {
