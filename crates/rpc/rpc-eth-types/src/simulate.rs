@@ -30,8 +30,9 @@ use reth_storage_api::{noop::NoopProvider, StateProvider};
 use revm::{
     context::Block,
     context_interface::result::ExecutionResult,
-    primitives::{Address, Bytes, TxKind, U256},
-    Database,
+    primitives::{Address, AddressMap, Bytes, TxKind, U256},
+    state::Account,
+    Database, DatabaseCommit,
 };
 use revm_inspectors::transfer::{
     TransferInspector, TransferOperation, TRANSFER_EVENT_TOPIC, TRANSFER_LOG_EMITTER,
@@ -354,7 +355,9 @@ pub fn execute_transactions<S, T>(
     EthApiError,
 >
 where
-    S: BlockBuilder<Executor: BlockExecutor<Evm: Evm<DB: Database<Error: Into<EthApiError>>>>>,
+    S: BlockBuilder<Executor: BlockExecutor>,
+    <<S::Executor as BlockExecutor>::Evm as Evm>::DB:
+        Database<Error: Into<EthApiError>> + DatabaseCommit,
     T: RpcConvert<Primitives = S::Primitives>,
 {
     execute_transactions_with_result_hook(
@@ -387,7 +390,9 @@ pub fn execute_transactions_with_transfer_logs<S, T>(
     EthApiError,
 >
 where
-    S: BlockBuilder<Executor: BlockExecutor<Evm: Evm<DB: Database<Error: Into<EthApiError>>>>>,
+    S: BlockBuilder<Executor: BlockExecutor>,
+    <<S::Executor as BlockExecutor>::Evm as Evm>::DB:
+        Database<Error: Into<EthApiError>> + DatabaseCommit,
     <S::Executor as BlockExecutor>::Evm: Evm<Inspector = TransferInspector>,
     T: RpcConvert<Primitives = S::Primitives>,
 {
@@ -422,7 +427,9 @@ fn execute_transactions_with_result_hook<S, T, F>(
     EthApiError,
 >
 where
-    S: BlockBuilder<Executor: BlockExecutor<Evm: Evm<DB: Database<Error: Into<EthApiError>>>>>,
+    S: BlockBuilder<Executor: BlockExecutor>,
+    <<S::Executor as BlockExecutor>::Evm as Evm>::DB:
+        Database<Error: Into<EthApiError>> + DatabaseCommit,
     T: RpcConvert<Primitives = S::Primitives>,
     F: FnMut(
         &<S::Executor as BlockExecutor>::Evm,
@@ -474,7 +481,7 @@ where
             }
         }
         let disable_nonce_check = builder.evm().cfg_env().disable_nonce_check;
-        let wrap_nonce = disable_nonce_check && tx_nonce == u64::MAX;
+        let from = call.as_ref().from().unwrap_or_default();
         // Resolve transaction, populate missing fields and enforce calls
         // correctness.
         let tx = resolve_transaction(
@@ -486,6 +493,7 @@ where
             builder.evm_mut().db_mut(),
             converter,
         )?;
+        let wrap_nonce = disable_nonce_check && tx.nonce() == u64::MAX;
         // Create transaction with an empty envelope.
         // The effect for a layer-2 execution client is that it does not charge L1 cost.
         let tx = WithEncoded::new(Default::default(), tx);
@@ -500,7 +508,6 @@ where
             on_result(builder.evm(), result);
         }
 
-        let from = call.as_ref().from().unwrap_or_default();
         if wrap_nonce &&
             let Some(mut info) = builder.evm_mut().db_mut().basic(from).map_err(Into::into)?
         {
