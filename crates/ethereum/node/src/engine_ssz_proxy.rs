@@ -821,7 +821,7 @@ async fn read_ssz_body(request: HttpRequest, max_bytes: u64) -> Result<Bytes, Ht
     }
 
     if let Some(content_length) = request.headers().get(CONTENT_LENGTH) {
-        let Ok(content_length) = content_length.to_str().ok().and_then(|value| value.parse().ok())
+        let Some(content_length) = content_length.to_str().ok().and_then(|value| value.parse().ok())
         else {
             return Err(problem_response(
                 STATUS_BAD_REQUEST,
@@ -838,7 +838,7 @@ async fn read_ssz_body(request: HttpRequest, max_bytes: u64) -> Result<Bytes, Ht
         return Err(problem_response(STATUS_INTERNAL_SERVER_ERROR, ERROR_INTERNAL, None))
     };
     match Limited::new(request.into_body(), limit).collect().await {
-        Ok(body) => Ok(body.to_bytes()),
+        Ok(body) => Ok(body.to_bytes().into()),
         Err(err) if err.downcast_ref::<LengthLimitError>().is_some() => {
             Err(problem_response(STATUS_PAYLOAD_TOO_LARGE, ERROR_REQUEST_TOO_LARGE, None))
         }
