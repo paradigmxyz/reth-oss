@@ -821,7 +821,8 @@ async fn read_ssz_body(request: HttpRequest, max_bytes: u64) -> Result<Bytes, Ht
     }
 
     if let Some(content_length) = request.headers().get(CONTENT_LENGTH) {
-        let Some(content_length) = content_length.to_str().ok().and_then(|value| value.parse().ok())
+        let Some(content_length) =
+            content_length.to_str().ok().and_then(|value| value.parse::<u64>().ok())
         else {
             return Err(problem_response(
                 STATUS_BAD_REQUEST,
