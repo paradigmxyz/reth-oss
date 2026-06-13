@@ -17,7 +17,7 @@ use alloy_rpc_types_engine::{
 };
 use http_body_util::{BodyExt, LengthLimitError, Limited};
 use jsonrpsee::server::{HttpBody, HttpRequest, HttpResponse};
-use reth_chainspec::EthereumHardforks;
+use reth_chainspec::{EthereumHardfork, EthereumHardforks, Hardforks};
 use reth_engine_primitives::{BeaconForkChoiceUpdateError, ConsensusEngineHandle};
 use reth_ethereum_engine_primitives::EthEngineTypes;
 use reth_node_core::version::{version_metadata, CLIENT_CODE};
@@ -165,7 +165,7 @@ impl<S, ChainSpec> Service<HttpRequest> for EngineSszProxyService<S, ChainSpec>
 where
     S: Service<HttpRequest, Response = HttpResponse, Error = BoxError> + Send + Clone,
     S::Future: Send + 'static,
-    ChainSpec: EthereumHardforks + Send + Sync + 'static,
+    ChainSpec: EthereumHardforks + Hardforks + Send + Sync + 'static,
 {
     type Response = HttpResponse;
     type Error = BoxError;
@@ -191,7 +191,7 @@ async fn handle_engine_ssz_request<ChainSpec>(
     request: HttpRequest,
 ) -> HttpResponse
 where
-    ChainSpec: EthereumHardforks + Send + Sync + 'static,
+    ChainSpec: EthereumHardforks + Hardforks + Send + Sync + 'static,
 {
     let method = request.method().as_str().to_owned();
     let path = request.uri().path().to_owned();
@@ -332,26 +332,32 @@ impl EngineSszFork {
         }
     }
 
-    fn is_active_at_timestamp<ChainSpec: EthereumHardforks>(
-        self,
-        chain_spec: &ChainSpec,
-        timestamp: u64,
-    ) -> bool {
-        let active_fork = if chain_spec.is_amsterdam_active_at_timestamp(timestamp) {
-            Self::Amsterdam
-        } else if chain_spec.is_osaka_active_at_timestamp(timestamp) {
-            Self::Osaka
-        } else if chain_spec.is_prague_active_at_timestamp(timestamp) {
-            Self::Prague
-        } else if chain_spec.is_cancun_active_at_timestamp(timestamp) {
-            Self::Cancun
-        } else if chain_spec.is_shanghai_active_at_timestamp(timestamp) {
-            Self::Shanghai
-        } else {
-            Self::Paris
-        };
+    const fn hardfork(self) -> Option<EthereumHardfork> {
+        match self {
+            Self::Paris => None,
+            Self::Shanghai => Some(EthereumHardfork::Shanghai),
+            Self::Cancun => Some(EthereumHardfork::Cancun),
+            Self::Prague => Some(EthereumHardfork::Prague),
+            Self::Osaka => Some(EthereumHardfork::Osaka),
+            Self::Amsterdam => Some(EthereumHardfork::Amsterdam),
+        }
+    }
 
-        self == active_fork
+    const fn next_hardfork(self) -> Option<EthereumHardfork> {
+        match self {
+            Self::Paris => Some(EthereumHardfork::Shanghai),
+            Self::Shanghai => Some(EthereumHardfork::Cancun),
+            Self::Cancun => Some(EthereumHardfork::Prague),
+            Self::Prague => Some(EthereumHardfork::Osaka),
+            Self::Osaka => Some(EthereumHardfork::Amsterdam),
+            Self::Amsterdam => None,
+        }
+    }
+
+    fn matches_timestamp(self, chain_spec: &impl Hardforks, timestamp: u64) -> bool {
+        self.hardfork().is_none_or(|fork| chain_spec.is_fork_active_at_timestamp(fork, timestamp)) &&
+            self.next_hardfork()
+                .is_none_or(|fork| !chain_spec.is_fork_active_at_timestamp(fork, timestamp))
     }
 }
 
@@ -406,7 +412,7 @@ fn handle_identity(client_version: Option<ClientVersionV1>) -> HttpResponse {
 
 async fn handle_new_payload(
     engine: ConsensusEngineHandle<EthEngineTypes>,
-    chain_spec: Arc<impl EthereumHardforks>,
+    chain_spec: Arc<impl Hardforks>,
     fork: EngineSszFork,
     body: &[u8],
 ) -> HttpResponse {
@@ -423,7 +429,7 @@ async fn handle_new_payload(
             )
         }
     };
-    if !fork.is_active_at_timestamp(chain_spec.as_ref(), payload.payload.timestamp()) {
+    if !fork.matches_timestamp(chain_spec.as_ref(), payload.payload.timestamp()) {
         return problem_response(STATUS_BAD_REQUEST, ERROR_UNSUPPORTED_FORK, None)
     }
 
@@ -437,7 +443,7 @@ async fn handle_new_payload(
 
 async fn handle_forkchoice_updated(
     engine: ConsensusEngineHandle<EthEngineTypes>,
-    chain_spec: Arc<impl EthereumHardforks>,
+    chain_spec: Arc<impl Hardforks>,
     fork: EngineSszFork,
     body: &[u8],
 ) -> HttpResponse {
@@ -456,7 +462,7 @@ async fn handle_forkchoice_updated(
     };
     if attrs
         .as_ref()
-        .is_some_and(|attrs| !fork.is_active_at_timestamp(chain_spec.as_ref(), attrs.timestamp))
+        .is_some_and(|attrs| !fork.matches_timestamp(chain_spec.as_ref(), attrs.timestamp))
     {
         return problem_response(STATUS_BAD_REQUEST, ERROR_UNSUPPORTED_FORK, None)
     }
@@ -474,7 +480,7 @@ async fn handle_get_blobs<ChainSpec>(
     body: &[u8],
 ) -> HttpResponse
 where
-    ChainSpec: EthereumHardforks + Send + Sync + 'static,
+    ChainSpec: EthereumHardforks + Hardforks + Send + Sync + 'static,
 {
     let Some(blob_store) = handler.blob_store().await else {
         return problem_response(
