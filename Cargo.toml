@@ -701,3 +701,6 @@ vergen-git2 = "9.1.0"
 
 # networking
 ipnet = "2.11"
+
+[patch.crates-io]
+alloy-rpc-types-txpool = { git = "https://github.com/Rimeeeeee/alloy", branch = "fix/txpool-checksum-keys" }
