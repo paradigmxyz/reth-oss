@@ -703,4 +703,30 @@ vergen-git2 = "9.1.0"
 ipnet = "2.11"
 
 [patch.crates-io]
+alloy-consensus = { git = "https://github.com/Rimeeeeee/alloy", branch = "fix/txpool-checksum-keys" }
+alloy-contract = { git = "https://github.com/Rimeeeeee/alloy", branch = "fix/txpool-checksum-keys" }
+alloy-eips = { git = "https://github.com/Rimeeeeee/alloy", branch = "fix/txpool-checksum-keys" }
+alloy-genesis = { git = "https://github.com/Rimeeeeee/alloy", branch = "fix/txpool-checksum-keys" }
+alloy-json-rpc = { git = "https://github.com/Rimeeeeee/alloy", branch = "fix/txpool-checksum-keys" }
+alloy-network = { git = "https://github.com/Rimeeeeee/alloy", branch = "fix/txpool-checksum-keys" }
+alloy-network-primitives = { git = "https://github.com/Rimeeeeee/alloy", branch = "fix/txpool-checksum-keys" }
+alloy-provider = { git = "https://github.com/Rimeeeeee/alloy", branch = "fix/txpool-checksum-keys" }
+alloy-pubsub = { git = "https://github.com/Rimeeeeee/alloy", branch = "fix/txpool-checksum-keys" }
+alloy-rpc-client = { git = "https://github.com/Rimeeeeee/alloy", branch = "fix/txpool-checksum-keys" }
+alloy-rpc-types = { git = "https://github.com/Rimeeeeee/alloy", branch = "fix/txpool-checksum-keys" }
+alloy-rpc-types-admin = { git = "https://github.com/Rimeeeeee/alloy", branch = "fix/txpool-checksum-keys" }
+alloy-rpc-types-anvil = { git = "https://github.com/Rimeeeeee/alloy", branch = "fix/txpool-checksum-keys" }
+alloy-rpc-types-beacon = { git = "https://github.com/Rimeeeeee/alloy", branch = "fix/txpool-checksum-keys" }
+alloy-rpc-types-debug = { git = "https://github.com/Rimeeeeee/alloy", branch = "fix/txpool-checksum-keys" }
+alloy-rpc-types-engine = { git = "https://github.com/Rimeeeeee/alloy", branch = "fix/txpool-checksum-keys" }
+alloy-rpc-types-eth = { git = "https://github.com/Rimeeeeee/alloy", branch = "fix/txpool-checksum-keys" }
+alloy-rpc-types-mev = { git = "https://github.com/Rimeeeeee/alloy", branch = "fix/txpool-checksum-keys" }
+alloy-rpc-types-trace = { git = "https://github.com/Rimeeeeee/alloy", branch = "fix/txpool-checksum-keys" }
 alloy-rpc-types-txpool = { git = "https://github.com/Rimeeeeee/alloy", branch = "fix/txpool-checksum-keys" }
+alloy-serde = { git = "https://github.com/Rimeeeeee/alloy", branch = "fix/txpool-checksum-keys" }
+alloy-signer = { git = "https://github.com/Rimeeeeee/alloy", branch = "fix/txpool-checksum-keys" }
+alloy-signer-local = { git = "https://github.com/Rimeeeeee/alloy", branch = "fix/txpool-checksum-keys" }
+alloy-transport = { git = "https://github.com/Rimeeeeee/alloy", branch = "fix/txpool-checksum-keys" }
+alloy-transport-http = { git = "https://github.com/Rimeeeeee/alloy", branch = "fix/txpool-checksum-keys" }
+alloy-transport-ipc = { git = "https://github.com/Rimeeeeee/alloy", branch = "fix/txpool-checksum-keys" }
+alloy-transport-ws = { git = "https://github.com/Rimeeeeee/alloy", branch = "fix/txpool-checksum-keys" }

@@ -123,7 +123,7 @@ impl PayloadAttributes for EthPayloadAttributes {
     }
 
     fn target_gas_limit(&self) -> Option<u64> {
-        None
+        self.target_gas_limit
     }
 }
 
@@ -227,6 +227,16 @@ mod tests {
     }
 
     #[test]
+    fn target_gas_limit() {
+        let attributes: EthPayloadAttributes = serde_json::from_str(
+            r#"{"timestamp":"0x1235","prevRandao":"0xf343b00e02dc34ec0124241f74f32191be28fb370bb48060f5fa4df99bda774c","suggestedFeeRecipient":"0x0000000000000000000000000000000000000000","targetGasLimit":"0x1c9c380"}"#,
+        )
+        .unwrap();
+
+        assert_eq!(PayloadAttributes::target_gas_limit(&attributes), Some(30_000_000));
+    }
+
+    #[test]
     fn test_payload_id_basic() {
         // Create a parent block and payload attributes
         let parent =
@@ -245,6 +255,7 @@ mod tests {
             withdrawals: None,
             parent_beacon_block_root: None,
             slot_number: None,
+            target_gas_limit: None,
         };
 
         // Verify that the generated payload ID matches the expected value
@@ -283,6 +294,7 @@ mod tests {
             ]),
             parent_beacon_block_root: None,
             slot_number: None,
+            target_gas_limit: None,
         };
 
         // Verify that the generated payload ID matches the expected value
@@ -316,6 +328,7 @@ mod tests {
                 .unwrap(),
             ),
             slot_number: None,
+            target_gas_limit: None,
         };
 
         // Verify that the generated payload ID matches the expected value
