@@ -67,8 +67,9 @@ use reth_engine_primitives::{
 };
 use reth_errors::{BlockExecutionError, ProviderResult};
 use reth_evm::{
-    block::BlockExecutor, execute::ExecutableTxFor, ConfigureEvm, EvmEnvFor, ExecutionCtxFor,
-    OnStateHook, SpecFor,
+    block::BlockExecutor,
+    execute::{fill_block_access_list_storage_roots, ExecutableTxFor},
+    ConfigureEvm, EvmEnvFor, ExecutionCtxFor, OnStateHook, SpecFor,
 };
 use reth_execution_cache::{CacheFillMode, CacheStats, SavedCache};
 use reth_payload_primitives::{
@@ -84,13 +85,13 @@ use reth_provider::{
     BlockExecutionOutput, BlockNumReader, BlockReader, ChangeSetReader, DatabaseProviderFactory,
     DatabaseProviderROFactory, HashedPostStateProvider, ProviderError, PruneCheckpointReader,
     StageCheckpointReader, StateProvider, StateProviderBox, StateProviderFactory, StateReader,
-    StorageChangeSetReader, StorageSettingsCache,
+    StorageChangeSetReader, StorageRootProvider, StorageSettingsCache,
 };
 use reth_revm::db::{states::bundle_state::BundleRetention, BundleAccount, State};
 use reth_trie::{trie_cursor::TrieCursorFactory, updates::TrieUpdates, HashedPostState};
 use reth_trie_db::ChangesetCache;
 use reth_trie_parallel::root::{ParallelStateRoot, ParallelStateRootError};
-use revm_primitives::{Address, KECCAK_EMPTY};
+use revm_primitives::{hardfork::SpecId, Address, KECCAK_EMPTY};
 use std::{
     collections::HashMap,
     panic::{self, AssertUnwindSafe},
@@ -1060,6 +1061,8 @@ where
         debug!(target: "engine::tree::payload_validator", "Executing block");
 
         let has_bal = env.decoded_bal.is_some();
+        let is_bogota_active =
+            Into::<SpecId>::into(*env.evm_env.spec_id()).is_enabled_in(SpecId::BOGOTA);
         let mut db = debug_span!(target: "engine::tree", "build_state_db").in_scope(|| {
             State::builder()
                 .with_database(StateProviderDatabase::new(state_provider))
@@ -1130,7 +1133,11 @@ where
         debug_span!(target: "engine::tree", "merge_transitions")
             .in_scope(|| db.merge_transitions(BundleRetention::Reverts));
 
-        let built_bal = if has_bal { db.take_built_alloy_bal() } else { None };
+        let mut built_bal = if has_bal { db.take_built_alloy_bal() } else { None };
+        if is_bogota_active && let Some(built_bal) = &mut built_bal {
+            fill_block_access_list_storage_roots(built_bal, &db, &*db.database)
+                .map_err(BlockExecutionError::other)?;
+        }
         let output = BlockExecutionOutput { result, state: db.take_bundle() };
 
         let execution_duration = execution_start.elapsed();
@@ -1197,6 +1204,7 @@ where
         V: PayloadValidator<T, Block = N::Block>,
     {
         debug!(target: "engine::tree::payload_validator", "Executing block via BAL path");
+        tracing::info!("input BAL: {:#?}", env.decoded_bal);
 
         let (receipt_tx, result_rx) = self.spawn_receipt_root_task(env.transaction_count);
         let input_bal = env.decoded_bal.ok_or_else(|| {
@@ -1207,6 +1215,16 @@ where
             let provider = make_state_provider(fill_on_miss)
                 .map_err(crate::tree::payload_processor::bal::BalExecutionError::Provider)?;
             Ok(StateProviderDatabase::new(provider))
+        };
+        let is_bogota_active =
+            Into::<SpecId>::into(*env.evm_env.spec_id()).is_enabled_in(SpecId::BOGOTA);
+        let storage_root_provider = if is_bogota_active {
+            Some(
+                make_state_provider(false)
+                    .map_err(crate::tree::payload_processor::bal::BalExecutionError::Provider)?,
+            )
+        } else {
+            None
         };
         let execution_start = Instant::now();
         let ctx =
@@ -1221,6 +1239,7 @@ where
             env.transaction_count,
             handle.clone_transaction_receiver(),
             receipt_tx,
+            storage_root_provider.as_deref().map(|provider| provider as &dyn StorageRootProvider),
         )?;
         let execution_duration = execution_start.elapsed();
 
@@ -1231,7 +1250,7 @@ where
             elapsed = ?execution_duration,
             "Executed block via BAL path",
         );
-
+        tracing::info!("output BAL: {:#?}", built_bal);
         Ok((output, senders, result_rx, Some(built_bal)))
     }
 
