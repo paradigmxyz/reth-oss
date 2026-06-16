@@ -136,6 +136,7 @@ jobs:
             include:
               - eth_blockNumber
               - eth_call
+              - eth_capabilities
               - eth_chainId
               - eth_createAccessList
               - eth_estimateGas
@@ -321,6 +322,7 @@ jobs:
             include:
               - eth_blockNumber
               - eth_call
+              - eth_capabilities
               - eth_chainId
               - eth_createAccessList
               - eth_estimateGas
