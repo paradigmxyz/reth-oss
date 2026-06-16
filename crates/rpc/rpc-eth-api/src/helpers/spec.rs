@@ -54,20 +54,26 @@ pub trait EthApiSpec: RpcNodeCore + EthApiTypes {
     {
         let chain_info = self.chain_info()?;
         let provider = self.provider();
+        tracing::info!(?chain_info, "Calculating effective capabilities for node");
 
         let state = effective_resource(
             provider,
             &[PruneSegment::AccountHistory, PruneSegment::StorageHistory],
         )?;
+        tracing::info!(?state, "Calculated effective state resource for node");
         let tx =
             effective_resource(provider, &[PruneSegment::TransactionLookup, PruneSegment::Bodies])?;
+        tracing::info!(?tx, "Calculated effective transaction resource for node");
         let logs =
             effective_resource(provider, &[PruneSegment::Receipts, PruneSegment::ContractLogs])?;
+        tracing::info!(?logs, "Calculated effective logs resource for node");
         let receipts = effective_resource(
             provider,
             &[PruneSegment::Receipts, PruneSegment::TransactionLookup, PruneSegment::Bodies],
         )?;
+        tracing::info!(?receipts, "Calculated effective receipts resource for node");
         let blocks = effective_resource(provider, &[PruneSegment::Bodies])?;
+        tracing::info!(?blocks, "Calculated effective blocks resource for node");
 
         let proof_window = self.max_proof_window();
         let proof_oldest = chain_info
@@ -75,7 +81,7 @@ pub trait EthApiSpec: RpcNodeCore + EthApiTypes {
             .saturating_sub(proof_window)
             .max(state.oldest_block.map(|number| number.to::<u64>()).unwrap_or_default());
         let state_proofs = EthCapabilitiesResource::window(proof_oldest, proof_window);
-
+        tracing::info!(?state_proofs, "Calculated effective state proofs resource for node");
         Ok(EthCapabilities {
             head: EthCapabilitiesHead {
                 number: chain_info.best_number,
