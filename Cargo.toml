@@ -314,6 +314,13 @@ panic = "abort"
 codegen-units = 1
 incremental = false
 
+[patch.crates-io]
+alloy-consensus = { git = "https://github.com/Rimeeeeee/alloy", branch = "feat/engine-api-v2-ssz-types" }
+alloy-eips = { git = "https://github.com/Rimeeeeee/alloy", branch = "feat/engine-api-v2-ssz-types" }
+alloy-rpc-types-engine = { git = "https://github.com/Rimeeeeee/alloy", branch = "feat/engine-api-v2-ssz-types" }
+alloy-serde = { git = "https://github.com/Rimeeeeee/alloy", branch = "feat/engine-api-v2-ssz-types" }
+alloy-tx-macros = { git = "https://github.com/Rimeeeeee/alloy", branch = "feat/engine-api-v2-ssz-types" }
+
 [workspace.dependencies]
 # reth
 reth = { path = "bin/reth" }
