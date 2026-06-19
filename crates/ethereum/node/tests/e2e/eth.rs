@@ -414,7 +414,7 @@ async fn test_engine_ssz_proxy_can_mine_block() -> eyre::Result<()> {
     let new_payload_request = ExecutionPayloadEnvelopePrague {
         payload,
         parent_beacon_block_root: B256::ZERO,
-        execution_requests: envelope.execution_requests.take(),
+        execution_requests: envelope.execution_requests,
     };
     let new_payload_response = client
         .post(format!("{auth_url}{ENGINE_PRAGUE_PAYLOADS_ROUTE}"))
