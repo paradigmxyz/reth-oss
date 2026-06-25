@@ -1,8 +1,12 @@
 use crate::utils::{advance_with_random_transactions, eth_payload_attributes};
-use alloy_eips::{eip4844::BlobAndProofV1, eip7685::RequestsOrHash};
+use alloy_eips::eip7685::RequestsOrHash;
 use alloy_genesis::Genesis;
 use alloy_primitives::{Address, B256};
 use alloy_rpc_types_engine::{
+    ssz_engine_types::{
+        BlobsV1Request, BlobsV1Response, ExecutionPayloadEnvelopePrague, ForkchoiceUpdatePrague,
+        ForkchoiceUpdateResponse, PayloadStatus as SszPayloadStatus,
+    },
     ClientVersionV1, ForkchoiceState, ForkchoiceUpdated, PayloadAttributes, PayloadStatus,
     PayloadStatusEnum,
 };
@@ -407,35 +411,38 @@ async fn test_engine_ssz_proxy_can_mine_block() -> eyre::Result<()> {
         }]
     );
 
+    let new_payload_request = ExecutionPayloadEnvelopePrague {
+        payload,
+        parent_beacon_block_root: B256::ZERO,
+        execution_requests: envelope.execution_requests,
+    };
     let new_payload_response = client
         .post(format!("{auth_url}{ENGINE_PRAGUE_PAYLOADS_ROUTE}"))
         .header(reqwest::header::AUTHORIZATION, auth_header.to_str()?)
         .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
         .header(reqwest::header::ACCEPT, "application/octet-stream")
-        .body((payload, B256::ZERO, envelope.execution_requests.take()).as_ssz_bytes())
+        .body(new_payload_request.as_ssz_bytes())
         .send()
         .await?;
     assert_eq!(new_payload_response.status(), reqwest::StatusCode::OK);
 
-    let status = PayloadStatus::from_ssz_bytes(&new_payload_response.bytes().await?).unwrap();
+    let status = SszPayloadStatus::from_ssz_bytes(&new_payload_response.bytes().await?).unwrap();
     assert_eq!(status.status, PayloadStatusEnum::Valid);
 
+    let forkchoice_request = ForkchoiceUpdatePrague {
+        forkchoice_state: ForkchoiceState {
+            head_block_hash: block_hash,
+            safe_block_hash: genesis_hash,
+            finalized_block_hash: genesis_hash,
+        },
+        payload_attributes: None.into(),
+    };
     let fcu_response = client
         .post(format!("{auth_url}{ENGINE_PRAGUE_FORKCHOICE_ROUTE}"))
         .header(reqwest::header::AUTHORIZATION, auth_header.to_str()?)
         .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
         .header(reqwest::header::ACCEPT, "application/octet-stream")
-        .body(
-            (
-                ForkchoiceState {
-                    head_block_hash: block_hash,
-                    safe_block_hash: genesis_hash,
-                    finalized_block_hash: genesis_hash,
-                },
-                Vec::<PayloadAttributes>::new(),
-            )
-                .as_ssz_bytes(),
-        )
+        .body(forkchoice_request.as_ssz_bytes())
         .send()
         .await?;
     assert_eq!(fcu_response.status(), reqwest::StatusCode::OK);
@@ -445,22 +452,22 @@ async fn test_engine_ssz_proxy_can_mine_block() -> eyre::Result<()> {
     let envelope = node.rpc.envelope_by_hash(blob_tx_hash).await?;
     let versioned_hashes = TransactionTestContext::validate_sidecar(envelope);
 
+    let blobs_request = BlobsV1Request { versioned_hashes: versioned_hashes.clone().try_into()? };
     let blobs_response = client
         .post(format!("{auth_url}{ENGINE_V1_BLOBS_ROUTE}"))
         .header(reqwest::header::AUTHORIZATION, auth_header.to_str()?)
         .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
         .header(reqwest::header::ACCEPT, "application/octet-stream")
-        .body(versioned_hashes.as_ssz_bytes())
+        .body(blobs_request.as_ssz_bytes())
         .send()
         .await?;
     assert_eq!(blobs_response.status(), reqwest::StatusCode::OK);
 
-    let blobs =
-        Vec::<Option<BlobAndProofV1>>::from_ssz_bytes(&blobs_response.bytes().await?).unwrap();
-    assert_eq!(blobs.len(), versioned_hashes.len());
+    let blobs = BlobsV1Response::from_ssz_bytes(&blobs_response.bytes().await?).unwrap();
+    assert_eq!(blobs.entries.len(), versioned_hashes.len());
     assert!(blobs.iter().all(Option::is_some));
 
-    let fcu = ForkchoiceUpdated::from_ssz_bytes(&fcu_response.bytes().await?).unwrap();
+    let fcu = ForkchoiceUpdateResponse::from_ssz_bytes(&fcu_response.bytes().await?).unwrap();
     assert_eq!(fcu.payload_status.status, PayloadStatusEnum::Valid);
 
     node.wait_block(1, block_hash, false).await?;

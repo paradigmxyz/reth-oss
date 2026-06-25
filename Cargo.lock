@@ -122,8 +122,7 @@ dependencies = [
 [[package]]
 name = "alloy-consensus"
 version = "2.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b44937ce84d2cbf1ee4010667bd9214bb7db134a91dd9ffa6b1b8b1d6b030449"
+source = "git+https://github.com/Rimeeeeee/alloy?branch=feat%2Fengine-api-v2-ssz-types#724e69a34652fabc9fec94bd72aa9c4a338f8b65"
 dependencies = [
  "alloy-eips",
  "alloy-primitives",
@@ -266,8 +265,7 @@ dependencies = [
 [[package]]
 name = "alloy-eips"
 version = "2.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "154b0f566ebbfc256b63c8d643c6a299f40a6fcd50a9d756c1d191487dd06483"
+source = "git+https://github.com/Rimeeeeee/alloy?branch=feat%2Fengine-api-v2-ssz-types#724e69a34652fabc9fec94bd72aa9c4a338f8b65"
 dependencies = [
  "alloy-eip2124",
  "alloy-eip2930",
@@ -673,8 +671,7 @@ dependencies = [
 [[package]]
 name = "alloy-rpc-types-engine"
 version = "2.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "851167851209fac75c31833b3a4ec5d9c3efa2b14563605dc6a1d58f576e390c"
+source = "git+https://github.com/Rimeeeeee/alloy?branch=feat%2Fengine-api-v2-ssz-types#724e69a34652fabc9fec94bd72aa9c4a338f8b65"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -688,6 +685,7 @@ dependencies = [
  "jsonwebtoken",
  "rand 0.8.6",
  "serde",
+ "ssz_types",
  "strum 0.27.2",
 ]
 
@@ -757,8 +755,7 @@ dependencies = [
 [[package]]
 name = "alloy-serde"
 version = "2.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bcf028ac8bcb161ad7c104243e710cece8e1a794f65ee6c35c4c4d693c8e80ee"
+source = "git+https://github.com/Rimeeeeee/alloy?branch=feat%2Fengine-api-v2-ssz-types#724e69a34652fabc9fec94bd72aa9c4a338f8b65"
 dependencies = [
  "alloy-primitives",
  "arbitrary",
@@ -971,8 +968,7 @@ dependencies = [
 [[package]]
 name = "alloy-tx-macros"
 version = "2.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dc2cd27809c88c413e5542dbd5a8eff8c12f0086af920e881ae586d3a787d5e5"
+source = "git+https://github.com/Rimeeeeee/alloy?branch=feat%2Fengine-api-v2-ssz-types#724e69a34652fabc9fec94bd72aa9c4a338f8b65"
 dependencies = [
  "darling 0.23.0",
  "proc-macro2",
@@ -1031,7 +1027,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -1042,7 +1038,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -3435,7 +3431,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4233,8 +4229,8 @@ dependencies = [
  "libc",
  "log",
  "rustversion",
- "windows-link 0.2.1",
- "windows-result 0.4.1",
+ "windows-link 0.1.3",
+ "windows-result 0.3.4",
 ]
 
 [[package]]
@@ -4802,7 +4798,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.62.2",
+ "windows-core 0.61.2",
 ]
 
 [[package]]
@@ -5183,7 +5179,7 @@ checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
 dependencies = [
  "hermit-abi",
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -6260,7 +6256,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -11312,7 +11308,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -11392,7 +11388,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs 1.0.7",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -12014,7 +12010,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "52d1cfed4120b4d927bf7c0f86d2087a4a7d6027c906d9f9d525a80573b9be51"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -12050,6 +12046,23 @@ checksum = "d91ed6c858b01f942cd56b37a94b3e0a1798290327d1236e4d9cf4eaca44d29d"
 dependencies = [
  "base64ct",
  "der",
+]
+
+[[package]]
+name = "ssz_types"
+version = "0.14.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d625e4de8e0057eefe7e0b1510ba1dd7adf10cd375fad6cc7fcceac7c39623c9"
+dependencies = [
+ "arbitrary",
+ "ethereum_serde_utils",
+ "ethereum_ssz",
+ "itertools 0.14.0",
+ "serde",
+ "serde_derive",
+ "smallvec",
+ "tree_hash",
+ "typenum",
 ]
 
 [[package]]
@@ -12262,7 +12275,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -13544,7 +13557,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
