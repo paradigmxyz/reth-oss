@@ -54,6 +54,7 @@ const MAX_PAYLOAD_BYTES: u64 = 64 * 1024 * 1024;
 
 type EthEngineApi<Provider, Pool, Validator, ChainSpec> =
     EngineApi<Provider, EthEngineTypes, Pool, Validator, ChainSpec>;
+
 type SharedEthEngineApi<Provider, Pool, Validator, ChainSpec> =
     Arc<RwLock<Option<EthEngineApi<Provider, Pool, Validator, ChainSpec>>>>;
 
@@ -218,7 +219,7 @@ where
             };
             handle_identity(engine_api)
         }
-        EngineSszEndpoint::Payloads(fork) => {
+        EngineSszEndpoint::NewPayload(fork) => {
             if method != "POST" {
                 return text_response(STATUS_METHOD_NOT_ALLOWED, "method not allowed")
             }
@@ -230,7 +231,7 @@ where
             };
             handle_new_payload(engine_api, fork.payloads_version(), &body).await
         }
-        EngineSszEndpoint::Payload(fork, payload_id) => {
+        EngineSszEndpoint::GetPayload(fork, payload_id) => {
             if method != "GET" {
                 return text_response(STATUS_METHOD_NOT_ALLOWED, "method not allowed")
             }
@@ -283,10 +284,10 @@ fn parse_engine_path(path: &str) -> Option<EngineSszEndpoint> {
             Some(EngineSszEndpoint::Identity)
         }
         (Some("engine"), Some("v2"), Some(fork), Some("payloads"), None, None) => {
-            Some(EngineSszEndpoint::Payloads(fork.parse().ok()?))
+            Some(EngineSszEndpoint::NewPayload(fork.parse().ok()?))
         }
         (Some("engine"), Some("v2"), Some(fork), Some("payloads"), Some(payload_id), None) => {
-            Some(EngineSszEndpoint::Payload(
+            Some(EngineSszEndpoint::GetPayload(
                 fork.parse().ok()?,
                 PayloadId::from(payload_id.parse::<B64>().ok()?),
             ))
@@ -305,8 +306,8 @@ fn parse_engine_path(path: &str) -> Option<EngineSszEndpoint> {
 enum EngineSszEndpoint {
     Capabilities,
     Identity,
-    Payloads(EngineSszFork),
-    Payload(EngineSszFork, PayloadId),
+    NewPayload(EngineSszFork),
+    GetPayload(EngineSszFork, PayloadId),
     Forkchoice(EngineSszFork),
     Blobs(u8),
 }
@@ -784,7 +785,7 @@ mod tests {
     #[test]
     fn parses_fork_scoped_payload_endpoint() {
         let endpoint = parse_engine_path("/engine/v2/prague/payloads").unwrap();
-        assert_eq!(endpoint, EngineSszEndpoint::Payloads(EngineSszFork::Prague));
+        assert_eq!(endpoint, EngineSszEndpoint::NewPayload(EngineSszFork::Prague));
     }
 
     #[test]
@@ -792,7 +793,7 @@ mod tests {
         let payload_id = PayloadId::new([1, 2, 3, 4, 5, 6, 7, 8]);
         let endpoint =
             parse_engine_path(&format!("/engine/v2/osaka/payloads/{payload_id}")).unwrap();
-        assert_eq!(endpoint, EngineSszEndpoint::Payload(EngineSszFork::Osaka, payload_id));
+        assert_eq!(endpoint, EngineSszEndpoint::GetPayload(EngineSszFork::Osaka, payload_id));
     }
 
     #[test]
