@@ -16,8 +16,8 @@ use alloy_rpc_types_engine::{
         PayloadStatus as EngineSszPayloadStatus, PayloadStatusWithWitness,
     },
     CancunPayloadFields, ExecutionData, ExecutionPayload, ExecutionPayloadSidecar,
-    ExecutionPayloadV1, ExecutionPayloadV2, ExecutionPayloadV3, ExecutionPayloadV4,
-    ForkchoiceState, PayloadAttributes, PayloadStatus, PayloadStatusEnum, PraguePayloadFields,
+    ExecutionPayloadV1, ExecutionPayloadV2, ExecutionPayloadV3, ForkchoiceState, PayloadAttributes,
+    PayloadStatus, PayloadStatusEnum, PraguePayloadFields,
 };
 use http_body_util::BodyExt;
 use jsonrpsee::server::{HttpBody, HttpRequest, HttpResponse};
@@ -203,7 +203,7 @@ where
                         .with_bundle_update()
                         .build();
 
-                    let mut block_executor = evm_config.executor(&mut db);
+                    let block_executor = evm_config.executor(&mut db);
                     let mode = ExecutionWitnessMode::Legacy;
                     let mut witness_record = ExecutionWitnessRecord::default();
                     block_executor
@@ -463,7 +463,7 @@ impl EngineSszFork {
     }
 
     const fn supports_witness(self) -> bool {
-        matches!(self, Self::Amsterdam)
+        matches!(self, Self::Osaka | Self::Amsterdam)
     }
 }
 
