@@ -12,7 +12,8 @@ use alloy_eips::{
 use alloy_primitives::{Bytes, B128, B256};
 use alloy_rpc_types_engine::{
     ssz_engine_types::{
-        ExecutionWitnessV1, PayloadStatus as EngineSszPayloadStatus, PayloadStatusWithWitness,
+        ExecutionPayloadEnvelopeAmsterdam, ExecutionWitnessV1,
+        PayloadStatus as EngineSszPayloadStatus, PayloadStatusWithWitness,
     },
     CancunPayloadFields, ExecutionData, ExecutionPayload, ExecutionPayloadSidecar,
     ExecutionPayloadV1, ExecutionPayloadV2, ExecutionPayloadV3, ExecutionPayloadV4,
@@ -737,17 +738,18 @@ fn decode_new_payload_request(version: u8, body: &[u8]) -> Result<ExecutionData,
             Ok(ExecutionData::new(execution_payload.into(), sidecar))
         }
         5 => {
-            let (execution_payload, parent_beacon_block_root, execution_requests) =
-                <(ExecutionPayloadV4, B256, Vec<Bytes>)>::from_ssz_bytes(body)
-                    .map_err(|_| "invalid ssz")?;
+            let ExecutionPayloadEnvelopeAmsterdam {
+                payload: execution_payload,
+                parent_beacon_block_root,
+                execution_requests,
+            } = ExecutionPayloadEnvelopeAmsterdam::from_ssz_bytes(body)
+                .map_err(|_| "invalid ssz")?;
             let versioned_hashes = calculate_versioned_hashes(
                 &execution_payload.payload_inner.payload_inner.payload_inner.transactions,
             )?;
             let sidecar = ExecutionPayloadSidecar::v4(
                 CancunPayloadFields { parent_beacon_block_root, versioned_hashes },
-                PraguePayloadFields::new(RequestsOrHash::Requests(Requests::new(
-                    execution_requests,
-                ))),
+                PraguePayloadFields::new(RequestsOrHash::Requests(execution_requests)),
             );
             Ok(ExecutionData::new(ExecutionPayload::V4(execution_payload), sidecar))
         }
