@@ -1,13 +1,10 @@
-use crate::utils::{
-    advance_with_random_transactions, eth_payload_attributes, eth_payload_attributes_amsterdam,
-};
+use crate::utils::{advance_with_random_transactions, eth_payload_attributes};
 use alloy_eips::{eip4844::BlobAndProofV1, eip7685::RequestsOrHash};
 use alloy_genesis::Genesis;
 use alloy_primitives::{Address, B256};
 use alloy_rpc_types_engine::{
-    ssz_engine_types::{ExecutionPayloadEnvelopeAmsterdam, PayloadStatusWithWitness},
-    ClientVersionV1, ForkchoiceState, ForkchoiceUpdated, PayloadAttributes, PayloadStatus,
-    PayloadStatusEnum,
+    ssz_engine_types::PayloadStatusWithWitness, ClientVersionV1, ForkchoiceState,
+    ForkchoiceUpdated, PayloadAttributes, PayloadStatus, PayloadStatusEnum,
 };
 use jsonrpsee_core::client::ClientT;
 use reth_chainspec::{ChainSpecBuilder, EthChainSpec, MAINNET};
@@ -34,7 +31,7 @@ use std::sync::Arc;
 
 const ENGINE_PRAGUE_PAYLOADS_ROUTE: &str = "/engine/v2/prague/payloads";
 const ENGINE_PRAGUE_FORKCHOICE_ROUTE: &str = "/engine/v2/prague/forkchoice";
-const ENGINE_AMSTERDAM_PAYLOADS_WITNESS_ROUTE: &str = "/engine/v2/amsterdam/payloads/witness";
+const ENGINE_OSAKA_PAYLOADS_WITNESS_ROUTE: &str = "/engine/v2/osaka/payloads/witness";
 const ENGINE_V1_BLOBS_ROUTE: &str = "/engine/v2/blobs/v1";
 const ENGINE_CAPABILITIES_ROUTE: &str = "/engine/v2/capabilities";
 const ENGINE_IDENTITY_ROUTE: &str = "/engine/v2/identity";
@@ -479,11 +476,7 @@ async fn test_engine_ssz_proxy_payloads_witness_returns_execution_witness() -> e
 
     let genesis: Genesis = serde_json::from_str(include_str!("../assets/genesis.json")).unwrap();
     let chain_spec = Arc::new(
-        ChainSpecBuilder::default()
-            .chain(MAINNET.chain)
-            .genesis(genesis)
-            .amsterdam_activated()
-            .build(),
+        ChainSpecBuilder::default().chain(MAINNET.chain).genesis(genesis).osaka_activated().build(),
     );
     let genesis_hash = chain_spec.genesis_hash();
     let node_config =
@@ -520,7 +513,7 @@ async fn test_engine_ssz_proxy_payloads_witness_returns_execution_witness() -> e
         node.task_executor.clone(),
     )));
 
-    let node = NodeTestContext::new(node, eth_payload_attributes_amsterdam).await?;
+    let node = NodeTestContext::new(node, eth_payload_attributes).await?;
     let wallets = Wallet::new(1).wallet_gen();
     let raw_tx = TransactionTestContext::transfer_tx_bytes(1, wallets[0].clone()).await;
 
@@ -530,7 +523,7 @@ async fn test_engine_ssz_proxy_payloads_witness_returns_execution_witness() -> e
         suggested_fee_recipient: Address::ZERO,
         withdrawals: Some(vec![]),
         parent_beacon_block_root: Some(B256::ZERO),
-        slot_number: Some(chain_spec.genesis().timestamp + 1),
+        slot_number: None,
         target_gas_limit: None,
     };
 
@@ -544,20 +537,18 @@ async fn test_engine_ssz_proxy_payloads_witness_returns_execution_witness() -> e
         .await?;
 
     let payload = envelope.execution_payload;
-    let block_hash = payload.payload_inner.payload_inner.payload_inner.block_hash;
-    let request =
-        ExecutionPayloadEnvelopeAmsterdam::from((payload, B256::ZERO, envelope.execution_requests));
+    let block_hash = payload.payload_inner.payload_inner.block_hash;
     let client = reqwest::Client::new();
     let auth_server = node.auth_server_handle();
     let auth_url = auth_server.http_url();
     let auth_header = secret_to_bearer_header(auth_server.jwt_secret());
 
     let response = client
-        .post(format!("{auth_url}{ENGINE_AMSTERDAM_PAYLOADS_WITNESS_ROUTE}"))
+        .post(format!("{auth_url}{ENGINE_OSAKA_PAYLOADS_WITNESS_ROUTE}"))
         .header(reqwest::header::AUTHORIZATION, auth_header.to_str()?)
         .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
         .header(reqwest::header::ACCEPT, "application/octet-stream")
-        .body(request.as_ssz_bytes())
+        .body((payload, B256::ZERO, envelope.execution_requests.take()).as_ssz_bytes())
         .send()
         .await?;
     assert_eq!(response.status(), reqwest::StatusCode::OK);
