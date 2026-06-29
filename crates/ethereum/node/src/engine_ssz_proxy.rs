@@ -11,21 +11,31 @@ use alloy_eips::{
 };
 use alloy_primitives::{Bytes, B128, B256};
 use alloy_rpc_types_engine::{
+    ssz_engine_types::{
+        ExecutionWitnessV1, PayloadStatus as EngineSszPayloadStatus, PayloadStatusWithWitness,
+    },
     CancunPayloadFields, ExecutionData, ExecutionPayload, ExecutionPayloadSidecar,
     ExecutionPayloadV1, ExecutionPayloadV2, ExecutionPayloadV3, ExecutionPayloadV4,
-    ForkchoiceState, PayloadAttributes, PraguePayloadFields,
+    ForkchoiceState, PayloadAttributes, PayloadStatus, PayloadStatusEnum, PraguePayloadFields,
 };
 use http_body_util::BodyExt;
 use jsonrpsee::server::{HttpBody, HttpRequest, HttpResponse};
 use reth_chainspec::EthereumHardforks;
 use reth_engine_primitives::EngineApiValidator;
 use reth_ethereum_engine_primitives::EthEngineTypes;
+use reth_evm::{execute::Executor, ConfigureEvm};
+use reth_primitives_traits::{AlloyBlockHeader, Block, NodePrimitives};
 use reth_provider::{BalProvider, BlockReader, HeaderProvider, StateProviderFactory};
+use reth_revm::{database::StateProviderDatabase, witness::ExecutionWitnessRecord};
 use reth_rpc::EngineApi;
+use reth_storage_api::TransactionVariant;
+use reth_tasks::Runtime;
 use reth_transaction_pool::TransactionPool;
+use reth_trie_common::ExecutionWitnessMode;
 use ssz::Decode;
 use std::{
     future::Future,
+    io,
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
@@ -52,15 +62,17 @@ type EthEngineApi<Provider, Pool, Validator, ChainSpec> =
     EngineApi<Provider, EthEngineTypes, Pool, Validator, ChainSpec>;
 type SharedEthEngineApi<Provider, Pool, Validator, ChainSpec> =
     Arc<RwLock<Option<EthEngineApi<Provider, Pool, Validator, ChainSpec>>>>;
+type SharedWitnessHandler = Arc<RwLock<Option<Arc<dyn EngineSszWitness>>>>;
 
 /// Shared handle used by [`EngineSszProxyLayer`].
 pub struct EngineSszProxyHandle<ChainSpec, Provider = (), Pool = (), Validator = ()> {
     engine_api: SharedEthEngineApi<Provider, Pool, Validator, ChainSpec>,
+    witness_handler: SharedWitnessHandler,
 }
 
 impl<C, Provider, Pool, Validator> Clone for EngineSszProxyHandle<C, Provider, Pool, Validator> {
     fn clone(&self) -> Self {
-        Self { engine_api: self.engine_api.clone() }
+        Self { engine_api: self.engine_api.clone(), witness_handler: self.witness_handler.clone() }
     }
 }
 
@@ -76,11 +88,14 @@ impl<ChainSpec, Provider, Pool, Validator>
     EngineSszProxyHandle<ChainSpec, Provider, Pool, Validator>
 {
     fn new() -> Self {
-        Self { engine_api: Default::default() }
+        Self { engine_api: Default::default(), witness_handler: Default::default() }
     }
 
     fn with_engine_api(engine_api: EthEngineApi<Provider, Pool, Validator, ChainSpec>) -> Self {
-        Self { engine_api: Arc::new(RwLock::new(Some(engine_api))) }
+        Self {
+            engine_api: Arc::new(RwLock::new(Some(engine_api))),
+            witness_handler: Default::default(),
+        }
     }
 
     /// Sets the Engine API implementation used by the proxy.
@@ -101,6 +116,19 @@ impl<ChainSpec, Provider, Pool, Validator>
             .try_write()
             .expect("engine api handle should not be locked during launch") = Some(engine_api);
     }
+
+    /// Sets the witness generator used by `/payloads/witness`.
+    pub async fn set_witness_handler(&self, witness_handler: Arc<dyn EngineSszWitness>) {
+        *self.witness_handler.write().await = Some(witness_handler);
+    }
+
+    /// Sets the witness generator during synchronous launch wiring.
+    pub fn set_witness_handler_sync(&self, witness_handler: Arc<dyn EngineSszWitness>) {
+        *self
+            .witness_handler
+            .try_write()
+            .expect("witness handler should not be locked during launch") = Some(witness_handler);
+    }
 }
 
 impl<ChainSpec, Provider, Pool, Validator>
@@ -109,6 +137,94 @@ impl<ChainSpec, Provider, Pool, Validator>
     /// Returns the Engine API implementation used by the proxy.
     pub async fn engine_api(&self) -> Option<EthEngineApi<Provider, Pool, Validator, ChainSpec>> {
         self.engine_api.read().await.clone()
+    }
+
+    /// Returns the witness generator used by `/payloads/witness`.
+    pub async fn witness_handler(&self) -> Option<Arc<dyn EngineSszWitness>> {
+        self.witness_handler.read().await.clone()
+    }
+}
+
+/// Generates an execution witness for a valid payload.
+pub trait EngineSszWitness: Send + Sync + 'static {
+    /// Generates a REST-SSZ execution witness for the block hash.
+    fn generate_witness(
+        &self,
+        block_hash: B256,
+    ) -> Pin<Box<dyn Future<Output = Result<ExecutionWitnessV1, String>> + Send + '_>>;
+}
+
+/// Re-executes imported blocks to produce `/payloads/witness` responses.
+#[derive(Clone, Debug)]
+pub struct EngineSszWitnessGenerator<Provider, Evm> {
+    provider: Provider,
+    evm_config: Evm,
+    task_spawner: Runtime,
+}
+
+impl<Provider, Evm> EngineSszWitnessGenerator<Provider, Evm> {
+    /// Creates a new witness generator.
+    pub const fn new(provider: Provider, evm_config: Evm, task_spawner: Runtime) -> Self {
+        Self { provider, evm_config, task_spawner }
+    }
+}
+
+impl<Provider, Evm> EngineSszWitness for EngineSszWitnessGenerator<Provider, Evm>
+where
+    Provider: BlockReader + HeaderProvider + StateProviderFactory + Clone + Send + Sync + 'static,
+    Provider::Block: Block<Header: alloy_rlp::Encodable>,
+    Evm: ConfigureEvm<Primitives: NodePrimitives<Block = Provider::Block>> + 'static,
+{
+    fn generate_witness(
+        &self,
+        block_hash: B256,
+    ) -> Pin<Box<dyn Future<Output = Result<ExecutionWitnessV1, String>> + Send + '_>> {
+        let provider = self.provider.clone();
+        let evm_config = self.evm_config.clone();
+        let task_spawner = self.task_spawner.clone();
+
+        Box::pin(async move {
+            task_spawner
+                .spawn_blocking(move || {
+                    let block = provider
+                        .recovered_block(block_hash.into(), TransactionVariant::WithHash)
+                        .map_err(|err| err.to_string())?
+                        .ok_or_else(|| format!("block {block_hash} not found for witness"))?;
+
+                    let block_number = block.header().number();
+                    let parent_hash = block.header().parent_hash();
+                    let state_provider =
+                        provider.state_by_block_hash(parent_hash).map_err(|err| err.to_string())?;
+                    let state = StateProviderDatabase::new(state_provider);
+                    let mut db = reth_revm::State::builder()
+                        .with_database(state)
+                        .with_bundle_update()
+                        .build();
+
+                    let mut block_executor = evm_config.executor(&mut db);
+                    let mode = ExecutionWitnessMode::Legacy;
+                    let mut witness_record = ExecutionWitnessRecord::default();
+                    block_executor
+                        .execute_with_state_closure(&block, |statedb: &reth_revm::State<_>| {
+                            witness_record.record_executed_state(statedb, mode);
+                        })
+                        .map_err(|err| err.to_string())?;
+
+                    let witness = witness_record
+                        .into_execution_witness(&*db.database, &provider, block_number, mode)
+                        .map_err(|err| err.to_string())?;
+
+                    ExecutionWitnessV1::try_from(witness).map_err(|err| err.to_string())
+                })
+                .await
+                .map_err(|err| {
+                    io::Error::new(
+                        io::ErrorKind::BrokenPipe,
+                        format!("witness generation task failed: {err}"),
+                    )
+                    .to_string()
+                })?
+        })
     }
 }
 
@@ -226,6 +342,19 @@ where
             };
             handle_new_payload(engine_api, fork.payloads_version(), &body).await
         }
+        EngineSszEndpoint::PayloadsWithWitness(fork) => {
+            if method != "POST" {
+                return text_response(STATUS_METHOD_NOT_ALLOWED, "method not allowed")
+            }
+            let Ok(body) = request.into_body().collect().await.map(|body| body.to_bytes()) else {
+                return text_response(STATUS_BAD_REQUEST, "failed to read request body")
+            };
+            let Some(engine_api) = handle.engine_api().await else {
+                return text_response(STATUS_SERVICE_UNAVAILABLE, "engine api unavailable")
+            };
+            handle_new_payload_with_witness(engine_api, handle.witness_handler().await, fork, &body)
+                .await
+        }
         EngineSszEndpoint::Forkchoice(fork) => {
             if method != "POST" {
                 return text_response(STATUS_METHOD_NOT_ALLOWED, "method not allowed")
@@ -255,20 +384,30 @@ where
 
 fn parse_engine_path(path: &str) -> Option<EngineSszEndpoint> {
     let mut segments = path.trim_start_matches('/').split('/');
-    match (segments.next(), segments.next(), segments.next(), segments.next(), segments.next()) {
-        (Some("engine"), Some("v2"), Some("capabilities"), None, None) => {
+    match (
+        segments.next(),
+        segments.next(),
+        segments.next(),
+        segments.next(),
+        segments.next(),
+        segments.next(),
+    ) {
+        (Some("engine"), Some("v2"), Some("capabilities"), None, None, None) => {
             Some(EngineSszEndpoint::Capabilities)
         }
-        (Some("engine"), Some("v2"), Some("identity"), None, None) => {
+        (Some("engine"), Some("v2"), Some("identity"), None, None, None) => {
             Some(EngineSszEndpoint::Identity)
         }
-        (Some("engine"), Some("v2"), Some(fork), Some("payloads"), None) => {
+        (Some("engine"), Some("v2"), Some(fork), Some("payloads"), None, None) => {
             Some(EngineSszEndpoint::Payloads(fork.parse().ok()?))
         }
-        (Some("engine"), Some("v2"), Some(fork), Some("forkchoice"), None) => {
+        (Some("engine"), Some("v2"), Some(fork), Some("payloads"), Some("witness"), None) => {
+            Some(EngineSszEndpoint::PayloadsWithWitness(fork.parse().ok()?))
+        }
+        (Some("engine"), Some("v2"), Some(fork), Some("forkchoice"), None, None) => {
             Some(EngineSszEndpoint::Forkchoice(fork.parse().ok()?))
         }
-        (Some("engine"), Some("v2"), Some("blobs"), version, None) => {
+        (Some("engine"), Some("v2"), Some("blobs"), version, None, None) => {
             Some(EngineSszEndpoint::Blobs(parse_method_version(version?)?))
         }
         _ => None,
@@ -280,6 +419,7 @@ enum EngineSszEndpoint {
     Capabilities,
     Identity,
     Payloads(EngineSszFork),
+    PayloadsWithWitness(EngineSszFork),
     Forkchoice(EngineSszFork),
     Blobs(u8),
 }
@@ -313,6 +453,10 @@ impl EngineSszFork {
             Self::Amsterdam => 4,
         }
     }
+
+    const fn supports_witness(self) -> bool {
+        matches!(self, Self::Amsterdam)
+    }
 }
 
 impl std::str::FromStr for EngineSszFork {
@@ -338,7 +482,7 @@ fn parse_method_version(version: &str) -> Option<u8> {
 fn handle_capabilities() -> HttpResponse {
     json_response(serde_json::json!({
         "supported_forks": ["paris", "shanghai", "cancun", "prague", "osaka", "amsterdam"],
-        "fork_scoped_endpoints": ["payloads", "forkchoice", "bodies"],
+        "fork_scoped_endpoints": ["payloads", "payloads/witness", "forkchoice", "bodies"],
         "independently_versioned": {
             "blobs": ["v1", "v2", "v3", "v4"],
         },
@@ -374,24 +518,83 @@ where
     Validator: EngineApiValidator<EthEngineTypes>,
     ChainSpec: EthereumHardforks + Send + Sync + 'static,
 {
-    let payload = match decode_new_payload_request(version, body) {
-        Ok(payload) => payload,
+    match new_payload_status(engine_api, version, body).await {
+        Ok(Ok(status)) => ssz_response(status),
+        Ok(Err(err)) => text_response(STATUS_INTERNAL_SERVER_ERROR, err),
+        Err(err) => text_response(STATUS_BAD_REQUEST, err),
+    }
+}
+
+async fn handle_new_payload_with_witness<Provider, Pool, Validator, ChainSpec>(
+    engine_api: EthEngineApi<Provider, Pool, Validator, ChainSpec>,
+    witness_handler: Option<Arc<dyn EngineSszWitness>>,
+    fork: EngineSszFork,
+    body: &[u8],
+) -> HttpResponse
+where
+    Provider: HeaderProvider + BlockReader + StateProviderFactory + BalProvider + 'static,
+    Pool: TransactionPool + 'static,
+    Validator: EngineApiValidator<EthEngineTypes>,
+    ChainSpec: EthereumHardforks + Send + Sync + 'static,
+{
+    if !fork.supports_witness() {
+        return text_response(STATUS_BAD_REQUEST, "unsupported fork")
+    }
+
+    let status = match new_payload_status(engine_api, fork.payloads_version(), body).await {
+        Ok(Ok(status)) => status,
+        Ok(Err(err)) => return text_response(STATUS_INTERNAL_SERVER_ERROR, err),
         Err(err) => return text_response(STATUS_BAD_REQUEST, err),
     };
 
+    let witness = if matches!(status.status, PayloadStatusEnum::Valid) {
+        let Some(block_hash) = status.latest_valid_hash else {
+            return text_response(
+                STATUS_INTERNAL_SERVER_ERROR,
+                "valid payload status missing latest_valid_hash",
+            )
+        };
+        let Some(witness_handler) = witness_handler else {
+            return text_response(STATUS_SERVICE_UNAVAILABLE, "witness generator unavailable")
+        };
+        match witness_handler.generate_witness(block_hash).await {
+            Ok(witness) => Some(witness),
+            Err(err) => return text_response(STATUS_INTERNAL_SERVER_ERROR, err),
+        }
+    } else {
+        None
+    };
+
+    let payload_status = match EngineSszPayloadStatus::try_from(status) {
+        Ok(status) => status,
+        Err(err) => return text_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string()),
+    };
+
+    ssz_response(PayloadStatusWithWitness::new(payload_status, witness))
+}
+
+async fn new_payload_status<Provider, Pool, Validator, ChainSpec>(
+    engine_api: EthEngineApi<Provider, Pool, Validator, ChainSpec>,
+    version: u8,
+    body: &[u8],
+) -> Result<Result<PayloadStatus, String>, &'static str>
+where
+    Provider: HeaderProvider + BlockReader + StateProviderFactory + BalProvider + 'static,
+    Pool: TransactionPool + 'static,
+    Validator: EngineApiValidator<EthEngineTypes>,
+    ChainSpec: EthereumHardforks + Send + Sync + 'static,
+{
+    let payload = decode_new_payload_request(version, body)?;
     let response = match version {
         1 => engine_api.new_payload_v1(payload).await,
         2 => engine_api.new_payload_v2(payload).await,
         3 => engine_api.new_payload_v3(payload).await,
         4 => engine_api.new_payload_v4(payload).await,
         5 => engine_api.new_payload_v5(payload).await,
-        _ => return text_response(STATUS_BAD_REQUEST, "unsupported payload endpoint version"),
+        _ => return Err("unsupported payload endpoint version"),
     };
 
-    match response {
-        Ok(status) => ssz_response(status),
-        Err(err) => text_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string()),
-    }
+    Ok(response.map_err(|err| err.to_string()))
 }
 
 async fn handle_forkchoice_updated<Provider, Pool, Validator, ChainSpec>(
@@ -704,6 +907,12 @@ mod tests {
     fn parses_fork_scoped_payload_endpoint() {
         let endpoint = parse_engine_path("/engine/v2/prague/payloads").unwrap();
         assert_eq!(endpoint, EngineSszEndpoint::Payloads(EngineSszFork::Prague));
+    }
+
+    #[test]
+    fn parses_fork_scoped_payload_witness_endpoint() {
+        let endpoint = parse_engine_path("/engine/v2/amsterdam/payloads/witness").unwrap();
+        assert_eq!(endpoint, EngineSszEndpoint::PayloadsWithWitness(EngineSszFork::Amsterdam));
     }
 
     #[test]
