@@ -1,7 +1,7 @@
 //! Ethereum Node types config.
 
 use crate::{
-    engine_ssz_proxy::{EngineSszApi, EngineSszProxyLayer},
+    engine_ssz_proxy::{EngineSszApi, EngineSszProxyLayer, EngineSszWitnessGenerator},
     EthEngineTypes, EthEvmConfig,
 };
 use alloy_eips::{eip7840::BlobParams, merge::EPOCH_SLOTS};
@@ -394,10 +394,16 @@ where
 
         if ssz_proxy_enabled {
             let (ssz_proxy_layer, ssz_proxy_handle) = EngineSszProxyLayer::new();
+            ssz_proxy_handle.set_witness_handler_sync(Arc::new(EngineSszWitnessGenerator::new(
+                ctx.node.provider().clone(),
+                ctx.node.evm_config().clone(),
+                ctx.node.task_executor().clone(),
+            )));
+            let engine_api_handle = ssz_proxy_handle.clone();
             self.inner
                 .map_engine_api(|engine_api_builder| {
                     EngineApiExt::new(engine_api_builder, move |engine_api| {
-                        ssz_proxy_handle.set_engine_api_sync(engine_api);
+                        engine_api_handle.set_engine_api_sync(engine_api);
                     })
                 })
                 .layer_auth_http_middleware(ssz_proxy_layer)
