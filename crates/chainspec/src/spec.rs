@@ -977,8 +977,7 @@ impl<H: BlockHeader> EthereumHardforks for ChainSpec<H> {
     }
 
     fn is_bogota_active_at_timestamp(&self, timestamp: u64) -> bool {
-        self.is_amsterdam_active_at_timestamp(timestamp) ||
-            self.is_ethereum_fork_active_at_timestamp(EthereumHardfork::Bogota, timestamp)
+        self.is_ethereum_fork_active_at_timestamp(EthereumHardfork::Bogota, timestamp)
     }
 }
 
