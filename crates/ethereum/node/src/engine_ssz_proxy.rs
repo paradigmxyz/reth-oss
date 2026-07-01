@@ -19,9 +19,8 @@ use alloy_rpc_types_engine::{
         ExecutionWitnessV1, PayloadStatus as EngineSszPayloadStatus, PayloadStatusWithWitness,
     },
     CancunPayloadFields, ExecutionData, ExecutionPayload, ExecutionPayloadSidecar,
-    ExecutionPayloadV1, ExecutionPayloadV2, ExecutionPayloadV3, ExecutionPayloadV4,
-    ForkchoiceState, PayloadAttributes, PayloadId, PayloadStatus, PayloadStatusEnum,
-    PraguePayloadFields,
+    ExecutionPayloadV1, ExecutionPayloadV2, ExecutionPayloadV3, ForkchoiceState, PayloadAttributes,
+    PayloadId, PayloadStatus, PayloadStatusEnum, PraguePayloadFields,
 };
 use http_body_util::BodyExt;
 use jsonrpsee::server::{HttpBody, HttpRequest, HttpResponse};
@@ -831,7 +830,10 @@ where
         Err(response) => return response,
     };
 
-    let payload_status = EngineSszPayloadStatus::from(status.clone());
+    let payload_status = match EngineSszPayloadStatus::try_from(status.clone()) {
+        Ok(status) => status,
+        Err(err) => return text_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string()),
+    };
     let witness = match status.status {
         PayloadStatusEnum::Valid => {
             let Some(block_hash) = status.latest_valid_hash else {
