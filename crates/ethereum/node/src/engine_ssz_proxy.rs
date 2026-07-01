@@ -1,6 +1,6 @@
 //! HTTP SSZ transport proxy for the authenticated Engine API server.
 //!
-//! Implements the [EIP-8178] SSZ Engine API routes under `/engine/v2`.
+//! Implements the [EIP-8178] SSZ Engine API routes under `/engine/v1`.
 //!
 //! [EIP-8178]: https://eips.ethereum.org/EIPS/eip-8178
 
@@ -118,7 +118,7 @@ impl<ChainSpec, Provider, Pool, Validator>
     }
 }
 
-/// A tower layer that intercepts SSZ Engine API routes under `/engine/v2`.
+/// A tower layer that intercepts SSZ Engine API routes under `/engine/v1`.
 #[derive(Clone, Debug)]
 pub struct EngineSszProxyLayer<ChainSpec, Provider = (), Pool = (), Validator = ()> {
     handle: EngineSszProxyHandle<ChainSpec, Provider, Pool, Validator>,
@@ -220,10 +220,13 @@ where
             };
             handle_identity(engine_api)
         }
-        EngineSszEndpoint::NewPayload(fork) => {
+        EngineSszEndpoint::NewPayload => {
             if method != "POST" {
                 return text_response(STATUS_METHOD_NOT_ALLOWED, "method not allowed")
             }
+            let Some(fork) = request_fork(&request) else {
+                return text_response(STATUS_BAD_REQUEST, "unsupported fork")
+            };
             let Ok(body) = request.into_body().collect().await.map(|body| body.to_bytes()) else {
                 return text_response(STATUS_BAD_REQUEST, "failed to read request body")
             };
@@ -244,10 +247,13 @@ where
             };
             handle_get_payload(engine_api, fork, payload_id).await
         }
-        EngineSszEndpoint::Forkchoice(fork) => {
+        EngineSszEndpoint::Forkchoice => {
             if method != "POST" {
                 return text_response(STATUS_METHOD_NOT_ALLOWED, "method not allowed")
             }
+            let Some(fork) = request_fork(&request) else {
+                return text_response(STATUS_BAD_REQUEST, "unsupported fork")
+            };
             let Ok(body) = request.into_body().collect().await.map(|body| body.to_bytes()) else {
                 return text_response(STATUS_BAD_REQUEST, "failed to read request body")
             };
@@ -277,30 +283,23 @@ fn request_fork(request: &HttpRequest) -> Option<EngineSszFork> {
 
 fn parse_engine_path(path: &str) -> Option<EngineSszEndpoint> {
     let mut segments = path.trim_start_matches('/').split('/');
-    match (
-        segments.next(),
-        segments.next(),
-        segments.next(),
-        segments.next(),
-        segments.next(),
-        segments.next(),
-    ) {
-        (Some("engine"), Some("v2"), Some("capabilities"), None, None, None) => {
+    match (segments.next(), segments.next(), segments.next(), segments.next(), segments.next()) {
+        (Some("engine"), Some("v1"), Some("capabilities"), None, None) => {
             Some(EngineSszEndpoint::Capabilities)
         }
-        (Some("engine"), Some("v2"), Some("identity"), None, None, None) => {
+        (Some("engine"), Some("v1"), Some("identity"), None, None) => {
             Some(EngineSszEndpoint::Identity)
         }
-        (Some("engine"), Some("v2"), Some(fork), Some("payloads"), None, None) => {
-            Some(EngineSszEndpoint::NewPayload(fork.parse().ok()?))
+        (Some("engine"), Some("v1"), Some("payloads"), None, None) => {
+            Some(EngineSszEndpoint::NewPayload)
         }
-        (Some("engine"), Some("v1"), Some("payloads"), Some(payload_id), None, None) => {
+       (Some("engine"), Some("v1"), Some("payloads"), Some(payload_id), None, None) => {
             Some(EngineSszEndpoint::GetPayload(PayloadId::from(payload_id.parse::<B64>().ok()?)))
         }
-        (Some("engine"), Some("v2"), Some(fork), Some("forkchoice"), None, None) => {
-            Some(EngineSszEndpoint::Forkchoice(fork.parse().ok()?))
+        (Some("engine"), Some("v1"), Some("forkchoice"), None, None) => {
+            Some(EngineSszEndpoint::Forkchoice)
         }
-        (Some("engine"), Some("v2"), Some("blobs"), version, None, None) => {
+        (Some("engine"), Some("v1"), Some("blobs"), version, None) => {
             Some(EngineSszEndpoint::Blobs(parse_method_version(version?)?))
         }
         _ => None,
@@ -311,9 +310,10 @@ fn parse_engine_path(path: &str) -> Option<EngineSszEndpoint> {
 enum EngineSszEndpoint {
     Capabilities,
     Identity,
-    NewPayload(EngineSszFork),
     GetPayload(PayloadId),
     Forkchoice(EngineSszFork),
+    NewPayload,
+    Forkchoice,
     Blobs(u8),
 }
 
@@ -777,22 +777,15 @@ mod tests {
 
     #[test]
     fn parses_capabilities_endpoint() {
-        let endpoint = parse_engine_path("/engine/v2/capabilities").unwrap();
+        let endpoint = parse_engine_path("/engine/v1/capabilities").unwrap();
         assert_eq!(endpoint, EngineSszEndpoint::Capabilities);
     }
 
     #[test]
     fn parses_identity_endpoint() {
-        let endpoint = parse_engine_path("/engine/v2/identity").unwrap();
+        let endpoint = parse_engine_path("/engine/v1/identity").unwrap();
         assert_eq!(endpoint, EngineSszEndpoint::Identity);
     }
-
-    #[test]
-    fn parses_fork_scoped_payload_endpoint() {
-        let endpoint = parse_engine_path("/engine/v2/prague/payloads").unwrap();
-        assert_eq!(endpoint, EngineSszEndpoint::NewPayload(EngineSszFork::Prague));
-    }
-
     #[test]
     fn parses_get_payload_endpoint() {
         let payload_id = PayloadId::new([1, 2, 3, 4, 5, 6, 7, 8]);
@@ -813,12 +806,14 @@ mod tests {
         assert_eq!(EngineSszFork::Prague.get_payload_version(), 4);
         assert_eq!(EngineSszFork::Osaka.get_payload_version(), 5);
         assert_eq!(EngineSszFork::Amsterdam.get_payload_version(), 6);
+        let endpoint = parse_engine_path("/engine/v1/payloads").unwrap();
+        assert_eq!(endpoint, EngineSszEndpoint::NewPayload);
     }
 
     #[test]
     fn parses_fork_scoped_forkchoice_endpoint() {
-        let endpoint = parse_engine_path("/engine/v2/amsterdam/forkchoice").unwrap();
-        assert_eq!(endpoint, EngineSszEndpoint::Forkchoice(EngineSszFork::Amsterdam));
+        let endpoint = parse_engine_path("/engine/v1/forkchoice").unwrap();
+        assert_eq!(endpoint, EngineSszEndpoint::Forkchoice);
     }
 
     #[test]
