@@ -41,6 +41,7 @@ const OCTET_STREAM: &str = "application/octet-stream";
 const APPLICATION_JSON: &str = "application/json";
 const TEXT_PLAIN: &str = "text/plain";
 const CONTENT_TYPE: &str = "content-type";
+const ETH_EXECUTION_VERSION: &str = "eth-execution-version";
 
 const STATUS_OK: u16 = 200;
 const STATUS_BAD_REQUEST: u16 = 400;
@@ -231,10 +232,13 @@ where
             };
             handle_new_payload(engine_api, fork.payloads_version(), &body).await
         }
-        EngineSszEndpoint::GetPayload(fork, payload_id) => {
+        EngineSszEndpoint::GetPayload(payload_id) => {
             if method != "GET" {
                 return text_response(STATUS_METHOD_NOT_ALLOWED, "method not allowed")
             }
+            let Some(fork) = request_fork(&request) else {
+                return text_response(STATUS_BAD_REQUEST, "unsupported fork")
+            };
             let Some(engine_api) = handle.engine_api().await else {
                 return text_response(STATUS_SERVICE_UNAVAILABLE, "engine api unavailable")
             };
@@ -267,6 +271,10 @@ where
     }
 }
 
+fn request_fork(request: &HttpRequest) -> Option<EngineSszFork> {
+    request.headers().get(ETH_EXECUTION_VERSION)?.to_str().ok()?.parse().ok()
+}
+
 fn parse_engine_path(path: &str) -> Option<EngineSszEndpoint> {
     let mut segments = path.trim_start_matches('/').split('/');
     match (
@@ -286,11 +294,8 @@ fn parse_engine_path(path: &str) -> Option<EngineSszEndpoint> {
         (Some("engine"), Some("v2"), Some(fork), Some("payloads"), None, None) => {
             Some(EngineSszEndpoint::NewPayload(fork.parse().ok()?))
         }
-        (Some("engine"), Some("v2"), Some(fork), Some("payloads"), Some(payload_id), None) => {
-            Some(EngineSszEndpoint::GetPayload(
-                fork.parse().ok()?,
-                PayloadId::from(payload_id.parse::<B64>().ok()?),
-            ))
+        (Some("engine"), Some("v1"), Some("payloads"), Some(payload_id), None, None) => {
+            Some(EngineSszEndpoint::GetPayload(PayloadId::from(payload_id.parse::<B64>().ok()?)))
         }
         (Some("engine"), Some("v2"), Some(fork), Some("forkchoice"), None, None) => {
             Some(EngineSszEndpoint::Forkchoice(fork.parse().ok()?))
@@ -307,7 +312,7 @@ enum EngineSszEndpoint {
     Capabilities,
     Identity,
     NewPayload(EngineSszFork),
-    GetPayload(EngineSszFork, PayloadId),
+    GetPayload(PayloadId),
     Forkchoice(EngineSszFork),
     Blobs(u8),
 }
@@ -789,16 +794,15 @@ mod tests {
     }
 
     #[test]
-    fn parses_fork_scoped_get_payload_endpoint() {
+    fn parses_get_payload_endpoint() {
         let payload_id = PayloadId::new([1, 2, 3, 4, 5, 6, 7, 8]);
-        let endpoint =
-            parse_engine_path(&format!("/engine/v2/osaka/payloads/{payload_id}")).unwrap();
-        assert_eq!(endpoint, EngineSszEndpoint::GetPayload(EngineSszFork::Osaka, payload_id));
+        let endpoint = parse_engine_path(&format!("/engine/v1/payloads/{payload_id}")).unwrap();
+        assert_eq!(endpoint, EngineSszEndpoint::GetPayload(payload_id));
     }
 
     #[test]
     fn rejects_get_payload_endpoint_with_trailing_segment() {
-        assert!(parse_engine_path("/engine/v2/paris/payloads/0x0102030405060708/extra").is_none());
+        assert!(parse_engine_path("/engine/v1/payloads/0x0102030405060708/extra").is_none());
     }
 
     #[test]
