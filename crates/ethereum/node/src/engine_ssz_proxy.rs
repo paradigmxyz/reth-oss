@@ -397,7 +397,7 @@ where
                 )
                 .await
         }
-        EngineSszEndpoint::Payload(payload_id) => {
+        EngineSszEndpoint::GetPayload(payload_id) => {
             if method != "GET" {
                 return text_response(STATUS_METHOD_NOT_ALLOWED, "method not allowed")
             }
@@ -533,7 +533,7 @@ fn parse_engine_path(path: &str) -> Option<EngineSszEndpoint> {
             Some(EngineSszEndpoint::PayloadsWithWitness)
         }
         (Some("engine"), Some("v1"), Some("payloads"), Some(payload_id), None) => {
-            Some(EngineSszEndpoint::Payload(PayloadId::from(payload_id.parse::<B64>().ok()?)))
+            Some(EngineSszEndpoint::GetPayload(PayloadId::from(payload_id.parse::<B64>().ok()?)))
         }
         (Some("engine"), Some("v1"), Some("forkchoice"), None, None) => {
             Some(EngineSszEndpoint::Forkchoice)
@@ -557,7 +557,7 @@ enum EngineSszEndpoint {
     Identity,
     NewPayload,
     PayloadsWithWitness,
-    Payload(PayloadId),
+    GetPayload(PayloadId),
     Forkchoice,
     Blobs(u8),
     PayloadBodiesByHash,
@@ -1379,7 +1379,7 @@ mod tests {
     fn parses_get_payload_endpoint() {
         let payload_id = PayloadId::new([1, 2, 3, 4, 5, 6, 7, 8]);
         let endpoint = parse_engine_path(&format!("/engine/v1/payloads/{payload_id}")).unwrap();
-        assert_eq!(endpoint, EngineSszEndpoint::Payload(payload_id));
+        assert_eq!(endpoint, EngineSszEndpoint::GetPayload(payload_id));
     }
 
     #[test]
