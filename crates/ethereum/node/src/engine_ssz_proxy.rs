@@ -293,7 +293,7 @@ fn parse_engine_path(path: &str) -> Option<EngineSszEndpoint> {
         (Some("engine"), Some("v1"), Some("payloads"), None, None) => {
             Some(EngineSszEndpoint::NewPayload)
         }
-       (Some("engine"), Some("v1"), Some("payloads"), Some(payload_id), None, None) => {
+        (Some("engine"), Some("v1"), Some("payloads"), Some(payload_id), None) => {
             Some(EngineSszEndpoint::GetPayload(PayloadId::from(payload_id.parse::<B64>().ok()?)))
         }
         (Some("engine"), Some("v1"), Some("forkchoice"), None, None) => {
@@ -311,7 +311,6 @@ enum EngineSszEndpoint {
     Capabilities,
     Identity,
     GetPayload(PayloadId),
-    Forkchoice(EngineSszFork),
     NewPayload,
     Forkchoice,
     Blobs(u8),
