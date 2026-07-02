@@ -1350,7 +1350,6 @@ mod tests {
         let endpoint = parse_engine_path("/engine/v1/identity").unwrap();
         assert_eq!(endpoint, EngineSszEndpoint::Identity);
     }
-
     #[test]
     fn parses_fork_scoped_payload_endpoint() {
         let endpoint = parse_engine_path("/engine/v1/payloads").unwrap();
