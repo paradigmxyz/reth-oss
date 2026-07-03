@@ -29,7 +29,8 @@ use reth_chainspec::EthereumHardforks;
 use reth_engine_primitives::EngineApiValidator;
 use reth_ethereum_engine_primitives::EthEngineTypes;
 use reth_evm::{execute::Executor, ConfigureEvm};
-use reth_primitives_traits::{AlloyBlockHeader, Block, NodePrimitives};
+use reth_payload_primitives::ExecutionPayload as _;
+use reth_primitives_traits::{AlloyBlockHeader, Block, BlockBody, NodePrimitives};
 use reth_provider::{BalProvider, BlockReader, HeaderProvider, StateProviderFactory};
 use reth_revm::{database::StateProviderDatabase, witness::ExecutionWitnessRecord};
 use reth_rpc::EngineApi;
@@ -662,7 +663,12 @@ where
                 tracing::info!(target: "engine_ssz_proxy", endpoint = endpoint.name(), "engine ssz missing or unsupported fork header");
                 return text_response(STATUS_BAD_REQUEST, "unsupported fork")
             };
-            let hashes = match request.into_body().collect().await.map(|body| body.to_bytes()) {
+            let hashes: Vec<B256> = match request
+                .into_body()
+                .collect()
+                .await
+                .map(|body| body.to_bytes())
+            {
                 Ok(body) => match BodiesByHashRequest::from_ssz_bytes(&body) {
                     Ok(request) => {
                         tracing::info!(
