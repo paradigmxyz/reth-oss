@@ -7,8 +7,14 @@ LABEL org.opencontainers.image.source=https://github.com/paradigmxyz/reth
 LABEL org.opencontainers.image.licenses="MIT OR Apache-2.0"
 
 # Install system dependencies
+ARG INSTALL_LLVM="true"
 COPY .github/scripts/install_llvm_ubuntu.sh /tmp/install_llvm.sh
-RUN /tmp/install_llvm.sh && rm /tmp/install_llvm.sh && \
+RUN if [ "$INSTALL_LLVM" = "true" ]; then \
+        /tmp/install_llvm.sh; \
+    else \
+        apt-get update; \
+    fi && \
+    rm /tmp/install_llvm.sh && \
     apt-get install -y --no-install-recommends libclang-dev m4 pkg-config
 
 # Builds a cargo-chef plan
@@ -20,7 +26,7 @@ FROM chef AS builder
 COPY --from=planner /app/recipe.json recipe.json
 
 # Build profile, release by default
-ARG BUILD_PROFILE=maxperf
+ARG BUILD_PROFILE=release
 ENV BUILD_PROFILE=$BUILD_PROFILE
 
 # Extra Cargo flags
@@ -31,8 +37,16 @@ ENV RUSTFLAGS="$RUSTFLAGS"
 ARG FEATURES=""
 ENV FEATURES=$FEATURES
 
+# Cargo feature selection mode
+ARG DEFAULT_FEATURES="true"
+ENV DEFAULT_FEATURES=$DEFAULT_FEATURES
+
 # Builds dependencies
-RUN cargo chef cook --profile $BUILD_PROFILE --features "$FEATURES" --recipe-path recipe.json
+RUN if [ "$DEFAULT_FEATURES" = "false" ]; then \
+        cargo chef cook --profile $BUILD_PROFILE --no-default-features --features "$FEATURES" --recipe-path recipe.json; \
+    else \
+        cargo chef cook --profile $BUILD_PROFILE --features "$FEATURES" --recipe-path recipe.json; \
+    fi
 
 # Build application
 # Platform-specific RUSTFLAGS: amd64 uses x86-64-v3 (Haswell+) with pclmulqdq for rocksdb
@@ -45,7 +59,11 @@ RUN if [ -n "$RUSTFLAGS" ]; then \
     elif [ "$TARGETPLATFORM" = "linux/amd64" ]; then \
         export RUSTFLAGS="-C target-cpu=x86-64-v3 -C target-feature=+pclmulqdq"; \
     fi && \
-    cargo build --profile $BUILD_PROFILE --features "$FEATURES" --locked --bin reth
+    if [ "$DEFAULT_FEATURES" = "false" ]; then \
+        cargo build --profile $BUILD_PROFILE --no-default-features --features "$FEATURES" --locked --bin reth; \
+    else \
+        cargo build --profile $BUILD_PROFILE --features "$FEATURES" --locked --bin reth; \
+    fi
 
 # ARG is not resolved in COPY so we have to hack around it by copying the
 # binary to a temporary location
