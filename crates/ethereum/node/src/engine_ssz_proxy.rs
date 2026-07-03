@@ -1263,6 +1263,25 @@ where
                 latest_valid_hash = ?status.latest_valid_hash,
                 "engine ssz new_payload engine api success"
             );
+            let status = match EngineSszPayloadStatus::try_from(status) {
+                Ok(status) => {
+                    tracing::info!(
+                        target: "engine_ssz_proxy",
+                        version,
+                        "engine ssz new_payload response converted to ssz wire type"
+                    );
+                    status
+                }
+                Err(err) => {
+                    tracing::info!(
+                        target: "engine_ssz_proxy",
+                        version,
+                        %err,
+                        "engine ssz new_payload response conversion failed"
+                    );
+                    return text_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string())
+                }
+            };
             ssz_response(status)
         }
         Err(err) => {

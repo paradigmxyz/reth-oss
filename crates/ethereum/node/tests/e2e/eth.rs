@@ -3,8 +3,10 @@ use alloy_eips::{eip4844::BlobAndProofV1, eip7685::RequestsOrHash};
 use alloy_genesis::Genesis;
 use alloy_primitives::{Address, B256};
 use alloy_rpc_types_engine::{
-    ssz_engine_types::PayloadStatusWithWitness, ClientVersionV1, ForkchoiceState,
-    ForkchoiceUpdated, PayloadAttributes, PayloadStatus, PayloadStatusEnum,
+    ssz_engine_types::{
+        ForkchoiceUpdateResponse, PayloadStatus as EngineSszPayloadStatus, PayloadStatusWithWitness,
+    },
+    ClientVersionV1, ForkchoiceState, PayloadAttributes, PayloadStatusEnum,
 };
 use jsonrpsee_core::client::ClientT;
 use reth_chainspec::{ChainSpecBuilder, EthChainSpec, MAINNET};
@@ -406,7 +408,8 @@ async fn test_engine_ssz_proxy_can_mine_block() -> eyre::Result<()> {
         .await?;
     assert_eq!(new_payload_response.status(), reqwest::StatusCode::OK);
 
-    let status = PayloadStatus::from_ssz_bytes(&new_payload_response.bytes().await?).unwrap();
+    let status =
+        EngineSszPayloadStatus::from_ssz_bytes(&new_payload_response.bytes().await?).unwrap();
     assert_eq!(status.status, PayloadStatusEnum::Valid);
 
     let fcu_response = client
@@ -450,7 +453,7 @@ async fn test_engine_ssz_proxy_can_mine_block() -> eyre::Result<()> {
     assert_eq!(blobs.len(), versioned_hashes.len());
     assert!(blobs.iter().all(Option::is_some));
 
-    let fcu = ForkchoiceUpdated::from_ssz_bytes(&fcu_response.bytes().await?).unwrap();
+    let fcu = ForkchoiceUpdateResponse::from_ssz_bytes(&fcu_response.bytes().await?).unwrap();
     assert_eq!(fcu.payload_status.status, PayloadStatusEnum::Valid);
 
     node.wait_block(1, block_hash, false).await?;
@@ -525,7 +528,8 @@ async fn test_engine_ssz_proxy_payloads_witness_returns_execution_witness() -> e
         .await?;
     assert_eq!(new_payload_response.status(), reqwest::StatusCode::OK);
 
-    let status = PayloadStatus::from_ssz_bytes(&new_payload_response.bytes().await?).unwrap();
+    let status =
+        EngineSszPayloadStatus::from_ssz_bytes(&new_payload_response.bytes().await?).unwrap();
     assert_eq!(status.status, PayloadStatusEnum::Valid);
 
     let fcu_response = client
