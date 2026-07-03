@@ -16,7 +16,8 @@ use alloy_rpc_types_engine::{
         BodiesResponsePrague, BuiltPayloadAmsterdam, BuiltPayloadOsaka, BuiltPayloadParis,
         BuiltPayloadPrague, BuiltPayloadShanghai, ExecutionPayloadBodyAmsterdam,
         ExecutionPayloadBodyParis, ExecutionPayloadBodyShanghai, ExecutionPayloadEnvelopeAmsterdam,
-        ExecutionWitnessV1, PayloadStatus as EngineSszPayloadStatus, PayloadStatusWithWitness,
+        ExecutionWitnessV1, ForkchoiceUpdateResponse, PayloadStatus as EngineSszPayloadStatus,
+        PayloadStatusWithWitness,
     },
     CancunPayloadFields, ExecutionData, ExecutionPayload, ExecutionPayloadBodiesV1,
     ExecutionPayloadBodiesV2, ExecutionPayloadSidecar, ExecutionPayloadV1, ExecutionPayloadV2,
@@ -1481,6 +1482,25 @@ where
                 payload_id = ?updated.payload_id,
                 "engine ssz forkchoice engine api success"
             );
+            let updated = match ForkchoiceUpdateResponse::try_from(updated) {
+                Ok(updated) => {
+                    tracing::info!(
+                        target: "engine_ssz_proxy",
+                        version,
+                        "engine ssz forkchoice response converted to ssz wire type"
+                    );
+                    updated
+                }
+                Err(err) => {
+                    tracing::info!(
+                        target: "engine_ssz_proxy",
+                        version,
+                        %err,
+                        "engine ssz forkchoice response conversion failed"
+                    );
+                    return text_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string())
+                }
+            };
             ssz_response(updated)
         }
         Err(err) => {
