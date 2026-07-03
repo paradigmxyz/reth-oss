@@ -35,6 +35,7 @@ use reth_revm::{database::StateProviderDatabase, witness::ExecutionWitnessRecord
 use reth_rpc::EngineApi;
 use reth_storage_api::TransactionVariant;
 use reth_tasks::Runtime;
+use reth_tracing::tracing;
 use reth_transaction_pool::TransactionPool;
 use reth_trie_common::ExecutionWitnessMode;
 use ssz::Decode;
@@ -151,11 +152,13 @@ impl<Api> EngineSszProxyHandle<Api> {
 
     /// Sets the Engine API implementation used by the proxy.
     pub async fn set_engine_api(&self, engine_api: Api) {
+        tracing::info!(target: "engine_ssz_proxy", "engine ssz proxy async engine api handle installed");
         *self.engine_api.write().await = Some(engine_api);
     }
 
     /// Sets the Engine API implementation during synchronous launch wiring.
     pub fn set_engine_api_sync(&self, engine_api: Api) {
+        tracing::info!(target: "engine_ssz_proxy", "engine ssz proxy sync engine api handle installed");
         *self
             .engine_api
             .try_write()
@@ -164,11 +167,13 @@ impl<Api> EngineSszProxyHandle<Api> {
 
     /// Sets the witness generator used by `/payloads/witness`.
     pub async fn set_witness_handler(&self, witness_handler: Arc<dyn EngineSszWitness>) {
+        tracing::info!(target: "engine_ssz_proxy", "engine ssz proxy async witness handler installed");
         *self.witness_handler.write().await = Some(witness_handler);
     }
 
     /// Sets the witness generator during synchronous launch wiring.
     pub fn set_witness_handler_sync(&self, witness_handler: Arc<dyn EngineSszWitness>) {
+        tracing::info!(target: "engine_ssz_proxy", "engine ssz proxy sync witness handler installed");
         *self
             .witness_handler
             .try_write()
@@ -179,12 +184,24 @@ impl<Api> EngineSszProxyHandle<Api> {
 impl<Api: Clone> EngineSszProxyHandle<Api> {
     /// Returns the Engine API implementation used by the proxy.
     pub async fn engine_api(&self) -> Option<Api> {
-        self.engine_api.read().await.clone()
+        let engine_api = self.engine_api.read().await.clone();
+        tracing::info!(
+            target: "engine_ssz_proxy",
+            available = engine_api.is_some(),
+            "engine ssz proxy engine api handle lookup"
+        );
+        engine_api
     }
 
     /// Returns the witness generator used by `/payloads/witness`.
     pub async fn witness_handler(&self) -> Option<Arc<dyn EngineSszWitness>> {
-        self.witness_handler.read().await.clone()
+        let witness_handler = self.witness_handler.read().await.clone();
+        tracing::info!(
+            target: "engine_ssz_proxy",
+            available = witness_handler.is_some(),
+            "engine ssz proxy witness handler lookup"
+        );
+        witness_handler
     }
 }
 
@@ -222,13 +239,28 @@ where
         &self,
         block_hash: B256,
     ) -> Pin<Box<dyn Future<Output = Result<ExecutionWitnessV1, String>> + Send + '_>> {
+        tracing::info!(
+            target: "engine_ssz_proxy",
+            %block_hash,
+            "engine ssz witness generation requested"
+        );
         let provider = self.provider.clone();
         let evm_config = self.evm_config.clone();
         let task_spawner = self.task_spawner.clone();
 
         Box::pin(async move {
+            tracing::info!(
+                target: "engine_ssz_proxy",
+                %block_hash,
+                "engine ssz witness spawning blocking task"
+            );
             task_spawner
                 .spawn_blocking(move || {
+                    tracing::info!(
+                        target: "engine_ssz_proxy",
+                        %block_hash,
+                        "engine ssz witness blocking task started"
+                    );
                     let block = provider
                         .recovered_block(block_hash.into(), TransactionVariant::WithHash)
                         .map_err(|err| err.to_string())?
@@ -236,8 +268,23 @@ where
 
                     let block_number = block.header().number();
                     let parent_hash = block.header().parent_hash();
+                    tracing::info!(
+                        target: "engine_ssz_proxy",
+                        %block_hash,
+                        block_number,
+                        %parent_hash,
+                        tx_count = block.body().transactions().len(),
+                        "engine ssz witness recovered block"
+                    );
                     let state_provider =
                         provider.state_by_block_hash(parent_hash).map_err(|err| err.to_string())?;
+                    tracing::info!(
+                        target: "engine_ssz_proxy",
+                        %block_hash,
+                        block_number,
+                        %parent_hash,
+                        "engine ssz witness loaded parent state provider"
+                    );
                     let state = StateProviderDatabase::new(state_provider);
                     let mut db = reth_revm::State::builder()
                         .with_database(state)
@@ -247,17 +294,44 @@ where
                     let block_executor = evm_config.executor(&mut db);
                     let mode = ExecutionWitnessMode::Legacy;
                     let mut witness_record = ExecutionWitnessRecord::default();
+                    tracing::info!(
+                        target: "engine_ssz_proxy",
+                        %block_hash,
+                        block_number,
+                        ?mode,
+                        "engine ssz witness executing block for witness"
+                    );
                     block_executor
                         .execute_with_state_closure(&block, |statedb: &reth_revm::State<_>| {
+                            tracing::info!(
+                                target: "engine_ssz_proxy",
+                                %block_hash,
+                                block_number,
+                                "engine ssz witness recording executed state"
+                            );
                             witness_record.record_executed_state(statedb, mode);
                         })
                         .map_err(|err| err.to_string())?;
 
+                    tracing::info!(
+                        target: "engine_ssz_proxy",
+                        %block_hash,
+                        block_number,
+                        "engine ssz witness execution finished, converting witness"
+                    );
                     let witness = witness_record
                         .into_execution_witness(&*db.database, &provider, block_number, mode)
                         .map_err(|err| err.to_string())?;
 
-                    ExecutionWitnessV1::try_from(witness).map_err(|err| err.to_string())
+                    let witness =
+                        ExecutionWitnessV1::try_from(witness).map_err(|err| err.to_string())?;
+                    tracing::info!(
+                        target: "engine_ssz_proxy",
+                        %block_hash,
+                        block_number,
+                        "engine ssz witness generation finished"
+                    );
+                    Ok(witness)
                 })
                 .await
                 .map_err(|err| {
@@ -326,6 +400,16 @@ where
             return Box::pin(fut)
         }
 
+        tracing::info!(
+            target: "engine_ssz_proxy",
+            method = %request.method(),
+            path = %request.uri().path(),
+            query = ?request.uri().query(),
+            content_type = ?request.headers().get(CONTENT_TYPE).and_then(|value| value.to_str().ok()),
+            execution_version = ?request.headers().get(ETH_EXECUTION_VERSION).and_then(|value| value.to_str().ok()),
+            content_length = ?request.headers().get("content-length").and_then(|value| value.to_str().ok()),
+            "engine ssz proxy intercepted request"
+        );
         let handle = self.handle.clone();
         Box::pin(async move { Ok(handle_engine_ssz_request(handle, request).await) })
     }
@@ -341,52 +425,124 @@ where
     let method = request.method().as_str().to_owned();
     let path = request.uri().path().to_owned();
     let Some(endpoint) = parse_engine_path(&path) else {
+        tracing::info!(
+            target: "engine_ssz_proxy",
+            method = %method,
+            path = %path,
+            "engine ssz proxy unknown endpoint"
+        );
         return text_response(STATUS_NOT_FOUND, "unknown engine ssz endpoint")
     };
+    tracing::info!(
+        target: "engine_ssz_proxy",
+        method = %method,
+        path = %path,
+        endpoint = endpoint.name(),
+        query = ?request.uri().query(),
+        execution_version = ?request.headers().get(ETH_EXECUTION_VERSION).and_then(|value| value.to_str().ok()),
+        content_type = ?request.headers().get(CONTENT_TYPE).and_then(|value| value.to_str().ok()),
+        content_length = ?request.headers().get("content-length").and_then(|value| value.to_str().ok()),
+        "engine ssz proxy handling endpoint"
+    );
 
     match endpoint {
         EngineSszEndpoint::Capabilities => {
             if method != "GET" {
+                tracing::info!(
+                    target: "engine_ssz_proxy",
+                    method = %method,
+                    endpoint = endpoint.name(),
+                    "engine ssz proxy rejected method"
+                );
                 return text_response(STATUS_METHOD_NOT_ALLOWED, "method not allowed")
             }
+            tracing::info!(target: "engine_ssz_proxy", endpoint = endpoint.name(), "engine ssz capabilities dispatch");
             handle_capabilities()
         }
         EngineSszEndpoint::Identity => {
             if method != "GET" {
+                tracing::info!(
+                    target: "engine_ssz_proxy",
+                    method = %method,
+                    endpoint = endpoint.name(),
+                    "engine ssz proxy rejected method"
+                );
                 return text_response(STATUS_METHOD_NOT_ALLOWED, "method not allowed")
             }
             let Some(engine_api) = handle.engine_api().await else {
+                tracing::info!(target: "engine_ssz_proxy", endpoint = endpoint.name(), "engine ssz engine api unavailable");
                 return text_response(STATUS_SERVICE_UNAVAILABLE, "engine api unavailable")
             };
+            tracing::info!(target: "engine_ssz_proxy", endpoint = endpoint.name(), "engine ssz identity dispatch");
             engine_api.identity()
         }
         EngineSszEndpoint::NewPayload => {
             if method != "POST" {
+                tracing::info!(
+                    target: "engine_ssz_proxy",
+                    method = %method,
+                    endpoint = endpoint.name(),
+                    "engine ssz proxy rejected method"
+                );
                 return text_response(STATUS_METHOD_NOT_ALLOWED, "method not allowed")
             }
             let Some(fork) = request_fork(&request) else {
+                tracing::info!(target: "engine_ssz_proxy", endpoint = endpoint.name(), "engine ssz missing or unsupported fork header");
                 return text_response(STATUS_BAD_REQUEST, "unsupported fork")
             };
             let Ok(body) = request.into_body().collect().await.map(|body| body.to_bytes()) else {
+                tracing::info!(target: "engine_ssz_proxy", endpoint = endpoint.name(), fork = fork.name(), "engine ssz failed to read request body");
                 return text_response(STATUS_BAD_REQUEST, "failed to read request body")
             };
+            tracing::info!(
+                target: "engine_ssz_proxy",
+                endpoint = endpoint.name(),
+                fork = fork.name(),
+                version = fork.payloads_version(),
+                body_bytes = body.len(),
+                body_offset0 = ?first_offset_le(&body),
+                body_prefix = %ssz_prefix(&body),
+                "engine ssz newPayload dispatch"
+            );
             let Some(engine_api) = handle.engine_api().await else {
+                tracing::info!(target: "engine_ssz_proxy", endpoint = endpoint.name(), fork = fork.name(), "engine ssz engine api unavailable");
                 return text_response(STATUS_SERVICE_UNAVAILABLE, "engine api unavailable")
             };
             engine_api.new_payload(fork.payloads_version(), body.into()).await
         }
         EngineSszEndpoint::PayloadsWithWitness => {
             if method != "POST" {
+                tracing::info!(
+                    target: "engine_ssz_proxy",
+                    method = %method,
+                    endpoint = endpoint.name(),
+                    "engine ssz proxy rejected method"
+                );
                 return text_response(STATUS_METHOD_NOT_ALLOWED, "method not allowed")
             }
             let Some(fork) = request_fork(&request) else {
+                tracing::info!(target: "engine_ssz_proxy", endpoint = endpoint.name(), "engine ssz missing or unsupported fork header");
                 return text_response(STATUS_BAD_REQUEST, "unsupported fork")
             };
             let Ok(body) = request.into_body().collect().await.map(|body| body.to_bytes()) else {
+                tracing::info!(target: "engine_ssz_proxy", endpoint = endpoint.name(), fork = fork.name(), "engine ssz failed to read request body");
                 return text_response(STATUS_BAD_REQUEST, "failed to read request body")
             };
             let witness_handler = handle.witness_handler().await;
+            tracing::info!(
+                target: "engine_ssz_proxy",
+                endpoint = endpoint.name(),
+                fork = fork.name(),
+                version = fork.payloads_version(),
+                supports_witness = fork.supports_witness(),
+                witness_handler_available = witness_handler.is_some(),
+                body_bytes = body.len(),
+                body_offset0 = ?first_offset_le(&body),
+                body_prefix = %ssz_prefix(&body),
+                "engine ssz newPayloadWithWitness dispatch"
+            );
             let Some(engine_api) = handle.engine_api().await else {
+                tracing::info!(target: "engine_ssz_proxy", endpoint = endpoint.name(), fork = fork.name(), "engine ssz engine api unavailable");
                 return text_response(STATUS_SERVICE_UNAVAILABLE, "engine api unavailable")
             };
             engine_api
@@ -400,71 +556,168 @@ where
         }
         EngineSszEndpoint::GetPayload(payload_id) => {
             if method != "GET" {
+                tracing::info!(
+                    target: "engine_ssz_proxy",
+                    method = %method,
+                    endpoint = endpoint.name(),
+                    %payload_id,
+                    "engine ssz proxy rejected method"
+                );
                 return text_response(STATUS_METHOD_NOT_ALLOWED, "method not allowed")
             }
             let Some(fork) = request_fork(&request) else {
+                tracing::info!(target: "engine_ssz_proxy", endpoint = endpoint.name(), %payload_id, "engine ssz missing or unsupported fork header");
                 return text_response(STATUS_BAD_REQUEST, "unsupported fork")
             };
+            tracing::info!(
+                target: "engine_ssz_proxy",
+                method = %method,
+                path = %path,
+                ?fork,
+                get_payload_version = fork.get_payload_version(),
+                %payload_id,
+                "engine ssz getPayload request"
+            );
             let Some(engine_api) = handle.engine_api().await else {
+                tracing::info!(target: "engine_ssz_proxy", endpoint = endpoint.name(), fork = fork.name(), %payload_id, "engine ssz engine api unavailable");
                 return text_response(STATUS_SERVICE_UNAVAILABLE, "engine api unavailable")
             };
             engine_api.get_payload(fork.get_payload_version(), payload_id).await
         }
         EngineSszEndpoint::Forkchoice => {
             if method != "POST" {
+                tracing::info!(
+                    target: "engine_ssz_proxy",
+                    method = %method,
+                    endpoint = endpoint.name(),
+                    "engine ssz proxy rejected method"
+                );
                 return text_response(STATUS_METHOD_NOT_ALLOWED, "method not allowed")
             }
             let Some(fork) = request_fork(&request) else {
+                tracing::info!(target: "engine_ssz_proxy", endpoint = endpoint.name(), "engine ssz missing or unsupported fork header");
                 return text_response(STATUS_BAD_REQUEST, "unsupported fork")
             };
             let Ok(body) = request.into_body().collect().await.map(|body| body.to_bytes()) else {
+                tracing::info!(target: "engine_ssz_proxy", endpoint = endpoint.name(), fork = fork.name(), "engine ssz failed to read request body");
                 return text_response(STATUS_BAD_REQUEST, "failed to read request body")
             };
+            tracing::info!(
+                target: "engine_ssz_proxy",
+                endpoint = endpoint.name(),
+                fork = fork.name(),
+                version = fork.forkchoice_version(),
+                body_bytes = body.len(),
+                body_offset0 = ?first_offset_le(&body),
+                body_prefix = %ssz_prefix(&body),
+                "engine ssz forkchoice dispatch"
+            );
             let Some(engine_api) = handle.engine_api().await else {
+                tracing::info!(target: "engine_ssz_proxy", endpoint = endpoint.name(), fork = fork.name(), "engine ssz engine api unavailable");
                 return text_response(STATUS_SERVICE_UNAVAILABLE, "engine api unavailable")
             };
             engine_api.forkchoice_updated(fork.forkchoice_version(), body.into()).await
         }
         EngineSszEndpoint::Blobs(version) => {
             if method != "POST" {
+                tracing::info!(
+                    target: "engine_ssz_proxy",
+                    method = %method,
+                    endpoint = endpoint.name(),
+                    version,
+                    "engine ssz proxy rejected method"
+                );
                 return text_response(STATUS_METHOD_NOT_ALLOWED, "method not allowed")
             }
             let Ok(body) = request.into_body().collect().await.map(|body| body.to_bytes()) else {
+                tracing::info!(target: "engine_ssz_proxy", endpoint = endpoint.name(), version, "engine ssz failed to read request body");
                 return text_response(STATUS_BAD_REQUEST, "failed to read request body")
             };
+            tracing::info!(
+                target: "engine_ssz_proxy",
+                endpoint = endpoint.name(),
+                version,
+                body_bytes = body.len(),
+                body_offset0 = ?first_offset_le(&body),
+                body_prefix = %ssz_prefix(&body),
+                "engine ssz blobs dispatch"
+            );
             let Some(engine_api) = handle.engine_api().await else {
+                tracing::info!(target: "engine_ssz_proxy", endpoint = endpoint.name(), version, "engine ssz engine api unavailable");
                 return text_response(STATUS_SERVICE_UNAVAILABLE, "engine api unavailable")
             };
             engine_api.get_blobs(version, body.into()).await
         }
         EngineSszEndpoint::PayloadBodiesByHash => {
             if method != "POST" {
+                tracing::info!(
+                    target: "engine_ssz_proxy",
+                    method = %method,
+                    endpoint = endpoint.name(),
+                    "engine ssz proxy rejected method"
+                );
                 return text_response(STATUS_METHOD_NOT_ALLOWED, "method not allowed")
             }
             let Some(fork) = request_fork(&request) else {
+                tracing::info!(target: "engine_ssz_proxy", endpoint = endpoint.name(), "engine ssz missing or unsupported fork header");
                 return text_response(STATUS_BAD_REQUEST, "unsupported fork")
             };
             let hashes = match request.into_body().collect().await.map(|body| body.to_bytes()) {
                 Ok(body) => match BodiesByHashRequest::from_ssz_bytes(&body) {
-                    Ok(request) => request.block_hashes.into_iter().collect(),
-                    Err(_) => return text_response(STATUS_BAD_REQUEST, "invalid ssz"),
+                    Ok(request) => {
+                        tracing::info!(
+                            target: "engine_ssz_proxy",
+                            endpoint = endpoint.name(),
+                            fork = fork.name(),
+                            version = fork.get_payload_version(),
+                            body_bytes = body.len(),
+                            body_prefix = %ssz_prefix(&body),
+                            hashes = request.block_hashes.len(),
+                            "engine ssz payload bodies by hash decoded"
+                        );
+                        request.block_hashes.into_iter().collect()
+                    }
+                    Err(_) => {
+                        tracing::info!(target: "engine_ssz_proxy", endpoint = endpoint.name(), fork = fork.name(), "engine ssz payload bodies by hash decode failed");
+                        return text_response(STATUS_BAD_REQUEST, "invalid ssz")
+                    }
                 },
-                Err(_) => return text_response(STATUS_BAD_REQUEST, "failed to read request body"),
+                Err(_) => {
+                    tracing::info!(target: "engine_ssz_proxy", endpoint = endpoint.name(), fork = fork.name(), "engine ssz failed to read request body");
+                    return text_response(STATUS_BAD_REQUEST, "failed to read request body")
+                }
             };
+            tracing::info!(
+                target: "engine_ssz_proxy",
+                endpoint = endpoint.name(),
+                fork = fork.name(),
+                version = fork.get_payload_version(),
+                hashes = hashes.len(),
+                "engine ssz payload bodies by hash dispatch"
+            );
             let Some(engine_api) = handle.engine_api().await else {
+                tracing::info!(target: "engine_ssz_proxy", endpoint = endpoint.name(), fork = fork.name(), "engine ssz engine api unavailable");
                 return text_response(STATUS_SERVICE_UNAVAILABLE, "engine api unavailable")
             };
             engine_api.payload_bodies_by_hash(fork.get_payload_version(), hashes).await
         }
         EngineSszEndpoint::PayloadBodiesByRange => {
             if method != "GET" {
+                tracing::info!(
+                    target: "engine_ssz_proxy",
+                    method = %method,
+                    endpoint = endpoint.name(),
+                    "engine ssz proxy rejected method"
+                );
                 return text_response(STATUS_METHOD_NOT_ALLOWED, "method not allowed")
             }
             let Some(fork) = request_fork(&request) else {
+                tracing::info!(target: "engine_ssz_proxy", endpoint = endpoint.name(), "engine ssz missing or unsupported fork header");
                 return text_response(STATUS_BAD_REQUEST, "unsupported fork")
             };
 
             let Some(query) = request.uri().query() else {
+                tracing::info!(target: "engine_ssz_proxy", endpoint = endpoint.name(), fork = fork.name(), "engine ssz payload bodies range missing query");
                 return text_response(STATUS_BAD_REQUEST, "missing payload bodies query")
             };
             let mut start = None;
@@ -500,13 +753,26 @@ where
                 }
             }
             let Some(start) = start else {
+                tracing::info!(target: "engine_ssz_proxy", endpoint = endpoint.name(), fork = fork.name(), query = %query, "engine ssz payload bodies range missing from query");
                 return text_response(STATUS_BAD_REQUEST, "missing payload bodies from query")
             };
             let Some(count) = count else {
+                tracing::info!(target: "engine_ssz_proxy", endpoint = endpoint.name(), fork = fork.name(), query = %query, "engine ssz payload bodies range missing count query");
                 return text_response(STATUS_BAD_REQUEST, "missing payload bodies count query")
             };
+            tracing::info!(
+                target: "engine_ssz_proxy",
+                endpoint = endpoint.name(),
+                fork = fork.name(),
+                version = fork.get_payload_version(),
+                start,
+                count,
+                query = %query,
+                "engine ssz payload bodies by range dispatch"
+            );
 
             let Some(engine_api) = handle.engine_api().await else {
+                tracing::info!(target: "engine_ssz_proxy", endpoint = endpoint.name(), fork = fork.name(), "engine ssz engine api unavailable");
                 return text_response(STATUS_SERVICE_UNAVAILABLE, "engine api unavailable")
             };
             engine_api.payload_bodies_by_range(fork.get_payload_version(), start, count).await
@@ -565,6 +831,22 @@ enum EngineSszEndpoint {
     PayloadBodiesByRange,
 }
 
+impl EngineSszEndpoint {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Capabilities => "capabilities",
+            Self::Identity => "identity",
+            Self::NewPayload => "payloads",
+            Self::PayloadsWithWitness => "payloads/witness",
+            Self::GetPayload(_) => "get_payload",
+            Self::Forkchoice => "forkchoice",
+            Self::Blobs(_) => "blobs",
+            Self::PayloadBodiesByHash => "bodies/hash",
+            Self::PayloadBodiesByRange => "bodies/range",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum EngineSszFork {
     Paris,
@@ -576,6 +858,17 @@ enum EngineSszFork {
 }
 
 impl EngineSszFork {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Paris => "paris",
+            Self::Shanghai => "shanghai",
+            Self::Cancun => "cancun",
+            Self::Prague => "prague",
+            Self::Osaka => "osaka",
+            Self::Amsterdam => "amsterdam",
+        }
+    }
+
     const fn payloads_version(self) -> u8 {
         match self {
             Self::Paris => 1,
@@ -656,12 +949,22 @@ where
     ChainSpec: EthereumHardforks + Send + Sync + 'static,
 {
     fn identity(&self) -> HttpResponse {
+        tracing::info!(target: "engine_ssz_proxy", "engine ssz api identity adapter called");
         handle_identity(self.clone())
     }
 
     fn new_payload(&self, version: u8, body: Bytes) -> impl Future<Output = HttpResponse> + Send {
         let engine_api = self.clone();
-        async move { handle_new_payload(engine_api, version, &body).await }
+        async move {
+            tracing::info!(
+                target: "engine_ssz_proxy",
+                version,
+                body_bytes = body.len(),
+                body_prefix = %ssz_prefix(&body),
+                "engine ssz api new_payload adapter called"
+            );
+            handle_new_payload(engine_api, version, &body).await
+        }
     }
 
     fn new_payload_with_witness(
@@ -673,6 +976,15 @@ where
     ) -> impl Future<Output = HttpResponse> + Send {
         let engine_api = self.clone();
         async move {
+            tracing::info!(
+                target: "engine_ssz_proxy",
+                version,
+                supports_witness,
+                witness_handler_available = witness_handler.is_some(),
+                body_bytes = body.len(),
+                body_prefix = %ssz_prefix(&body),
+                "engine ssz api new_payload_with_witness adapter called"
+            );
             handle_new_payload_with_witness(
                 engine_api,
                 version,
@@ -690,12 +1002,30 @@ where
         body: Bytes,
     ) -> impl Future<Output = HttpResponse> + Send {
         let engine_api = self.clone();
-        async move { handle_forkchoice_updated(engine_api, version, &body).await }
+        async move {
+            tracing::info!(
+                target: "engine_ssz_proxy",
+                version,
+                body_bytes = body.len(),
+                body_prefix = %ssz_prefix(&body),
+                "engine ssz api forkchoice_updated adapter called"
+            );
+            handle_forkchoice_updated(engine_api, version, &body).await
+        }
     }
 
     fn get_blobs(&self, version: u8, body: Bytes) -> impl Future<Output = HttpResponse> + Send {
         let engine_api = self.clone();
-        async move { handle_get_blobs(engine_api, version, &body).await }
+        async move {
+            tracing::info!(
+                target: "engine_ssz_proxy",
+                version,
+                body_bytes = body.len(),
+                body_prefix = %ssz_prefix(&body),
+                "engine ssz api get_blobs adapter called"
+            );
+            handle_get_blobs(engine_api, version, &body).await
+        }
     }
 
     fn get_payload(
@@ -704,7 +1034,15 @@ where
         payload_id: PayloadId,
     ) -> impl Future<Output = HttpResponse> + Send {
         let engine_api = self.clone();
-        async move { handle_get_payload(engine_api, version, payload_id).await }
+        async move {
+            tracing::info!(
+                target: "engine_ssz_proxy",
+                version,
+                %payload_id,
+                "engine ssz api get_payload adapter called"
+            );
+            handle_get_payload(engine_api, version, payload_id).await
+        }
     }
 
     fn payload_bodies_by_hash(
@@ -714,6 +1052,12 @@ where
     ) -> impl Future<Output = HttpResponse> + Send {
         let engine_api = self.clone();
         async move {
+            tracing::info!(
+                target: "engine_ssz_proxy",
+                version,
+                hashes = hashes.len(),
+                "engine ssz api payload_bodies_by_hash adapter called"
+            );
             handle_get_payload_bodies(engine_api, version, PayloadBodiesRequest::Hash(hashes)).await
         }
     }
@@ -726,6 +1070,13 @@ where
     ) -> impl Future<Output = HttpResponse> + Send {
         let engine_api = self.clone();
         async move {
+            tracing::info!(
+                target: "engine_ssz_proxy",
+                version,
+                start,
+                count,
+                "engine ssz api payload_bodies_by_range adapter called"
+            );
             handle_get_payload_bodies(
                 engine_api,
                 version,
@@ -745,6 +1096,11 @@ where
     Validator: EngineApiValidator<EthEngineTypes>,
     ChainSpec: EthereumHardforks + Send + Sync + 'static,
 {
+    tracing::info!(
+        target: "engine_ssz_proxy",
+        client_version = ?engine_api.client_version(),
+        "engine ssz identity response"
+    );
     json_response(vec![engine_api.client_version().clone()])
 }
 
@@ -759,35 +1115,89 @@ where
     Validator: EngineApiValidator<EthEngineTypes>,
     ChainSpec: EthereumHardforks + Send + Sync + 'static,
 {
+    tracing::info!(
+        target: "engine_ssz_proxy",
+        version,
+        %payload_id,
+        "engine ssz handle_get_payload start"
+    );
     match version {
         1 => match engine_api.get_payload_v1_with_value_metered(payload_id).await {
-            Ok((payload, block_value)) => ssz_response(BuiltPayloadParis { payload, block_value }),
-            Err(err) => text_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string()),
+            Ok((payload, block_value)) => {
+                tracing::info!(
+                    target: "engine_ssz_proxy",
+                    version,
+                    %payload_id,
+                    %block_value,
+                    "engine ssz get_payload v1 success"
+                );
+                ssz_response(BuiltPayloadParis { payload, block_value })
+            }
+            Err(err) => {
+                tracing::info!(target: "engine_ssz_proxy", version, %payload_id, %err, "engine ssz get_payload v1 failed");
+                text_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string())
+            }
         },
         2 => match engine_api.get_payload_v2_metered(payload_id).await {
             Ok(payload) => match BuiltPayloadShanghai::try_from(payload) {
-                Ok(payload) => ssz_response(payload),
-                Err(err) => text_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string()),
+                Ok(payload) => {
+                    tracing::info!(target: "engine_ssz_proxy", version, %payload_id, "engine ssz get_payload v2 success");
+                    ssz_response(payload)
+                }
+                Err(err) => {
+                    tracing::info!(target: "engine_ssz_proxy", version, %payload_id, %err, "engine ssz get_payload v2 conversion failed");
+                    text_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string())
+                }
             },
-            Err(err) => text_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string()),
+            Err(err) => {
+                tracing::info!(target: "engine_ssz_proxy", version, %payload_id, %err, "engine ssz get_payload v2 failed");
+                text_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string())
+            }
         },
         3 => match engine_api.get_payload_v3_metered(payload_id).await {
-            Ok(payload) => ssz_response(payload),
-            Err(err) => text_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string()),
+            Ok(payload) => {
+                tracing::info!(target: "engine_ssz_proxy", version, %payload_id, "engine ssz get_payload v3 success");
+                ssz_response(payload)
+            }
+            Err(err) => {
+                tracing::info!(target: "engine_ssz_proxy", version, %payload_id, %err, "engine ssz get_payload v3 failed");
+                text_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string())
+            }
         },
         4 => match engine_api.get_payload_v4_metered(payload_id).await {
-            Ok(payload) => ssz_response(BuiltPayloadPrague::from(payload)),
-            Err(err) => text_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string()),
+            Ok(payload) => {
+                tracing::info!(target: "engine_ssz_proxy", version, %payload_id, "engine ssz get_payload v4 success");
+                ssz_response(BuiltPayloadPrague::from(payload))
+            }
+            Err(err) => {
+                tracing::info!(target: "engine_ssz_proxy", version, %payload_id, %err, "engine ssz get_payload v4 failed");
+                text_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string())
+            }
         },
         5 => match engine_api.get_payload_v5_metered(payload_id).await {
-            Ok(payload) => ssz_response(BuiltPayloadOsaka::from(payload)),
-            Err(err) => text_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string()),
+            Ok(payload) => {
+                tracing::info!(target: "engine_ssz_proxy", version, %payload_id, "engine ssz get_payload v5 success");
+                ssz_response(BuiltPayloadOsaka::from(payload))
+            }
+            Err(err) => {
+                tracing::info!(target: "engine_ssz_proxy", version, %payload_id, %err, "engine ssz get_payload v5 failed");
+                text_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string())
+            }
         },
         6 => match engine_api.get_payload_v6_metered(payload_id).await {
-            Ok(payload) => ssz_response(BuiltPayloadAmsterdam::from(payload)),
-            Err(err) => text_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string()),
+            Ok(payload) => {
+                tracing::info!(target: "engine_ssz_proxy", version, %payload_id, "engine ssz get_payload v6 success");
+                ssz_response(BuiltPayloadAmsterdam::from(payload))
+            }
+            Err(err) => {
+                tracing::info!(target: "engine_ssz_proxy", version, %payload_id, %err, "engine ssz get_payload v6 failed");
+                text_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string())
+            }
         },
-        _ => text_response(STATUS_BAD_REQUEST, "unsupported getPayload endpoint version"),
+        _ => {
+            tracing::info!(target: "engine_ssz_proxy", version, %payload_id, "engine ssz get_payload unsupported version");
+            text_response(STATUS_BAD_REQUEST, "unsupported getPayload endpoint version")
+        }
     }
 }
 
@@ -802,9 +1212,30 @@ where
     Validator: EngineApiValidator<EthEngineTypes>,
     ChainSpec: EthereumHardforks + Send + Sync + 'static,
 {
+    tracing::info!(
+        target: "engine_ssz_proxy",
+        version,
+        body_bytes = body.len(),
+        body_offset0 = ?first_offset_le(body),
+        body_prefix = %ssz_prefix(body),
+        "engine ssz handle_new_payload start"
+    );
     let payload = match decode_new_payload_request(version, body) {
-        Ok(payload) => payload,
-        Err(err) => return text_response(STATUS_BAD_REQUEST, err),
+        Ok(payload) => {
+            tracing::info!(
+                target: "engine_ssz_proxy",
+                version,
+                block_hash = %payload.block_hash(),
+                block_number = payload.block_number(),
+                gas_used = payload.gas_used(),
+                "engine ssz new_payload decoded payload"
+            );
+            payload
+        }
+        Err(err) => {
+            tracing::info!(target: "engine_ssz_proxy", version, err, "engine ssz new_payload decode failed");
+            return text_response(STATUS_BAD_REQUEST, err)
+        }
     };
 
     let response = match version {
@@ -817,8 +1248,20 @@ where
     };
 
     match response {
-        Ok(status) => ssz_response(status),
-        Err(err) => text_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string()),
+        Ok(status) => {
+            tracing::info!(
+                target: "engine_ssz_proxy",
+                version,
+                status = ?status.status,
+                latest_valid_hash = ?status.latest_valid_hash,
+                "engine ssz new_payload engine api success"
+            );
+            ssz_response(status)
+        }
+        Err(err) => {
+            tracing::info!(target: "engine_ssz_proxy", version, %err, "engine ssz new_payload engine api failed");
+            text_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string())
+        }
     }
 }
 
@@ -835,38 +1278,89 @@ where
     Validator: EngineApiValidator<EthEngineTypes>,
     ChainSpec: EthereumHardforks + Send + Sync + 'static,
 {
+    tracing::info!(
+        target: "engine_ssz_proxy",
+        version,
+        supports_witness,
+        witness_handler_available = witness_handler.is_some(),
+        body_bytes = body.len(),
+        body_prefix = %ssz_prefix(body),
+        "engine ssz handle_new_payload_with_witness start"
+    );
     if !supports_witness {
+        tracing::info!(target: "engine_ssz_proxy", version, "engine ssz witness rejected unsupported fork");
         return text_response(STATUS_BAD_REQUEST, "unsupported fork")
     }
 
     let status = match new_payload_status(engine_api, version, body).await {
-        Ok(status) => status,
-        Err(response) => return response,
+        Ok(status) => {
+            tracing::info!(
+                target: "engine_ssz_proxy",
+                version,
+                status = ?status.status,
+                latest_valid_hash = ?status.latest_valid_hash,
+                "engine ssz witness new_payload_status returned"
+            );
+            status
+        }
+        Err(response) => {
+            tracing::info!(target: "engine_ssz_proxy", version, "engine ssz witness new_payload_status returned error response");
+            return response
+        }
     };
 
     let payload_status = match EngineSszPayloadStatus::try_from(status.clone()) {
-        Ok(status) => status,
-        Err(err) => return text_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string()),
+        Ok(status) => {
+            tracing::info!(target: "engine_ssz_proxy", version, "engine ssz witness converted payload status to ssz");
+            status
+        }
+        Err(err) => {
+            tracing::info!(target: "engine_ssz_proxy", version, %err, "engine ssz witness payload status conversion failed");
+            return text_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string())
+        }
     };
     let witness = match status.status {
         PayloadStatusEnum::Valid => {
             let Some(block_hash) = status.latest_valid_hash else {
+                tracing::info!(target: "engine_ssz_proxy", version, "engine ssz witness valid status missing latest valid hash");
                 return text_response(STATUS_INTERNAL_SERVER_ERROR, "missing latest valid hash")
             };
             let Some(witness_handler) = witness_handler else {
+                tracing::info!(target: "engine_ssz_proxy", version, %block_hash, "engine ssz witness handler unavailable");
                 return text_response(
                     STATUS_SERVICE_UNAVAILABLE,
                     "execution witness handler unavailable",
                 )
             };
+            tracing::info!(target: "engine_ssz_proxy", version, %block_hash, "engine ssz witness generation dispatch");
             match witness_handler.generate_witness(block_hash).await {
-                Ok(witness) => Some(witness),
-                Err(err) => return text_response(STATUS_INTERNAL_SERVER_ERROR, err),
+                Ok(witness) => {
+                    tracing::info!(target: "engine_ssz_proxy", version, %block_hash, "engine ssz witness generation success");
+                    Some(witness)
+                }
+                Err(err) => {
+                    tracing::info!(target: "engine_ssz_proxy", version, %block_hash, %err, "engine ssz witness generation failed");
+                    return text_response(STATUS_INTERNAL_SERVER_ERROR, err)
+                }
             }
         }
-        _ => None,
+        _ => {
+            tracing::info!(
+                target: "engine_ssz_proxy",
+                version,
+                status = ?status.status,
+                "engine ssz witness skipped because payload status not valid"
+            );
+            None
+        }
     };
 
+    tracing::info!(
+        target: "engine_ssz_proxy",
+        version,
+        witness_present = witness.is_some(),
+        "engine ssz witness response ready"
+    );
     ssz_response(PayloadStatusWithWitness::new(payload_status, witness))
 }
 
@@ -881,18 +1375,48 @@ where
     Validator: EngineApiValidator<EthEngineTypes>,
     ChainSpec: EthereumHardforks + Send + Sync + 'static,
 {
+    tracing::info!(
+        target: "engine_ssz_proxy",
+        version,
+        body_bytes = body.len(),
+        body_prefix = %ssz_prefix(body),
+        "engine ssz new_payload_status start"
+    );
     let payload = decode_new_payload_request(version, body)
         .map_err(|err| text_response(STATUS_BAD_REQUEST, err))?;
+    tracing::info!(
+        target: "engine_ssz_proxy",
+        version,
+        block_hash = %payload.block_hash(),
+        block_number = payload.block_number(),
+        gas_used = payload.gas_used(),
+        "engine ssz new_payload_status decoded payload"
+    );
 
-    match version {
+    let response = match version {
         1 => engine_api.new_payload_v1(payload).await,
         2 => engine_api.new_payload_v2(payload).await,
         3 => engine_api.new_payload_v3(payload).await,
         4 => engine_api.new_payload_v4(payload).await,
         5 => engine_api.new_payload_v5(payload).await,
         _ => return Err(text_response(STATUS_BAD_REQUEST, "unsupported payload endpoint version")),
+    };
+    match response {
+        Ok(status) => {
+            tracing::info!(
+                target: "engine_ssz_proxy",
+                version,
+                status = ?status.status,
+                latest_valid_hash = ?status.latest_valid_hash,
+                "engine ssz new_payload_status engine api success"
+            );
+            Ok(status)
+        }
+        Err(err) => {
+            tracing::info!(target: "engine_ssz_proxy", version, %err, "engine ssz new_payload_status engine api failed");
+            Err(text_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string()))
+        }
     }
-    .map_err(|err| text_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string()))
 }
 
 async fn handle_forkchoice_updated<Provider, Pool, Validator, ChainSpec>(
@@ -906,9 +1430,31 @@ where
     Validator: EngineApiValidator<EthEngineTypes>,
     ChainSpec: EthereumHardforks + Send + Sync + 'static,
 {
+    tracing::info!(
+        target: "engine_ssz_proxy",
+        version,
+        body_bytes = body.len(),
+        body_offset0 = ?first_offset_le(body),
+        body_prefix = %ssz_prefix(body),
+        "engine ssz forkchoice handler start"
+    );
     let (state, attrs, custody_columns) = match decode_forkchoice_request(version, body) {
-        Ok(request) => request,
-        Err(err) => return text_response(STATUS_BAD_REQUEST, err),
+        Ok(request) => {
+            tracing::info!(
+                target: "engine_ssz_proxy",
+                version,
+                head_block_hash = %request.0.head_block_hash,
+                safe_block_hash = %request.0.safe_block_hash,
+                finalized_block_hash = %request.0.finalized_block_hash,
+                has_attrs = request.1.is_some(),
+                "engine ssz forkchoice decoded request"
+            );
+            request
+        }
+        Err(err) => {
+            tracing::info!(target: "engine_ssz_proxy", version, err, "engine ssz forkchoice decode failed");
+            return text_response(STATUS_BAD_REQUEST, err)
+        }
     };
 
     let response = match version {
@@ -920,14 +1466,36 @@ where
     };
 
     match response {
-        Ok(updated) => ssz_response(updated),
-        Err(err) => text_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string()),
+        Ok(updated) => {
+            tracing::info!(
+                target: "engine_ssz_proxy",
+                version,
+                payload_status = ?updated.payload_status.status,
+                latest_valid_hash = ?updated.payload_status.latest_valid_hash,
+                payload_id = ?updated.payload_id,
+                "engine ssz forkchoice engine api success"
+            );
+            ssz_response(updated)
+        }
+        Err(err) => {
+            tracing::info!(target: "engine_ssz_proxy", version, %err, "engine ssz forkchoice engine api failed");
+            text_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string())
+        }
     }
 }
 
 enum PayloadBodiesRequest {
     Hash(Vec<B256>),
     Range { start: u64, count: u64 },
+}
+
+impl PayloadBodiesRequest {
+    const fn label(&self) -> &'static str {
+        match self {
+            Self::Hash(_) => "hash",
+            Self::Range { .. } => "range",
+        }
+    }
 }
 
 async fn handle_get_payload_bodies<Provider, Pool, Validator, ChainSpec>(
@@ -941,6 +1509,13 @@ where
     Validator: EngineApiValidator<EthEngineTypes>,
     ChainSpec: EthereumHardforks + Send + Sync + 'static,
 {
+    let request_label = request.label();
+    tracing::info!(
+        target: "engine_ssz_proxy",
+        version,
+        request = request_label,
+        "engine ssz payload bodies handler start"
+    );
     match version {
         1 => {
             let response = fetch_payload_bodies_v1(engine_api, request).await;
@@ -990,7 +1565,10 @@ where
                 ExecutionPayloadBodyAmsterdam::try_from(body).ok()
             })
         }
-        _ => text_response(STATUS_BAD_REQUEST, "unsupported payload bodies fork"),
+        _ => {
+            tracing::info!(target: "engine_ssz_proxy", version, request = request_label, "engine ssz payload bodies unsupported fork");
+            text_response(STATUS_BAD_REQUEST, "unsupported payload bodies fork")
+        }
     }
 }
 
@@ -1004,15 +1582,25 @@ where
     Validator: EngineApiValidator<EthEngineTypes>,
     ChainSpec: EthereumHardforks + Send + Sync + 'static,
 {
+    tracing::info!(
+        target: "engine_ssz_proxy",
+        request = request.label(),
+        "engine ssz payload bodies fetch v1 start"
+    );
     match request {
         PayloadBodiesRequest::Hash(hashes) => {
+            tracing::info!(target: "engine_ssz_proxy", hashes = hashes.len(), "engine ssz get_payload_bodies_by_hash_v1 call");
             engine_api.get_payload_bodies_by_hash_v1_metered(hashes).await
         }
         PayloadBodiesRequest::Range { start, count } => {
+            tracing::info!(target: "engine_ssz_proxy", start, count, "engine ssz get_payload_bodies_by_range_v1 call");
             engine_api.get_payload_bodies_by_range_v1_metered(start, count).await
         }
     }
-    .map_err(|err| err.to_string())
+    .map_err(|err| {
+        tracing::info!(target: "engine_ssz_proxy", %err, "engine ssz payload bodies fetch v1 failed");
+        err.to_string()
+    })
 }
 
 async fn fetch_payload_bodies_v2<Provider, Pool, Validator, ChainSpec>(
@@ -1025,15 +1613,25 @@ where
     Validator: EngineApiValidator<EthEngineTypes>,
     ChainSpec: EthereumHardforks + Send + Sync + 'static,
 {
+    tracing::info!(
+        target: "engine_ssz_proxy",
+        request = request.label(),
+        "engine ssz payload bodies fetch v2 start"
+    );
     match request {
         PayloadBodiesRequest::Hash(hashes) => {
+            tracing::info!(target: "engine_ssz_proxy", hashes = hashes.len(), "engine ssz get_payload_bodies_by_hash_v2 call");
             engine_api.get_payload_bodies_by_hash_v2_metered(hashes).await
         }
         PayloadBodiesRequest::Range { start, count } => {
+            tracing::info!(target: "engine_ssz_proxy", start, count, "engine ssz get_payload_bodies_by_range_v2 call");
             engine_api.get_payload_bodies_by_range_v2_metered(start, count).await
         }
     }
-    .map_err(|err| err.to_string())
+    .map_err(|err| {
+        tracing::info!(target: "engine_ssz_proxy", %err, "engine ssz payload bodies fetch v2 failed");
+        err.to_string()
+    })
 }
 
 fn payload_bodies_response<LegacyBody, ForkBody>(
@@ -1043,8 +1641,24 @@ fn payload_bodies_response<LegacyBody, ForkBody>(
 where
     ForkBody: Default,
 {
+    tracing::info!(
+        target: "engine_ssz_proxy",
+        body_count = response.as_ref().ok().map(|bodies| bodies.len()),
+        "engine ssz payload bodies response conversion start"
+    );
     let bodies = response?;
-    BodiesResponse::from_optional_bodies(bodies, convert).map_err(|err| err.to_string())
+    let body_count = bodies.len();
+    let response = BodiesResponse::from_optional_bodies(bodies, convert).map_err(|err| {
+        tracing::info!(target: "engine_ssz_proxy", %err, "engine ssz payload bodies response conversion failed");
+        err.to_string()
+    })?;
+    tracing::info!(
+        target: "engine_ssz_proxy",
+        body_count,
+        entries = response.entries.len(),
+        "engine ssz payload bodies response conversion success"
+    );
+    Ok(response)
 }
 
 fn payload_bodies_http_response<LegacyBody, ForkBody>(
@@ -1054,9 +1668,19 @@ fn payload_bodies_http_response<LegacyBody, ForkBody>(
 where
     ForkBody: Default + ssz::Encode,
 {
+    tracing::info!(
+        target: "engine_ssz_proxy",
+        "engine ssz payload bodies http response start"
+    );
     match payload_bodies_response(response, convert) {
-        Ok(response) => ssz_response(response),
-        Err(err) => text_response(STATUS_INTERNAL_SERVER_ERROR, err),
+        Ok(response) => {
+            tracing::info!(target: "engine_ssz_proxy", "engine ssz payload bodies http response success");
+            ssz_response(response)
+        }
+        Err(err) => {
+            tracing::info!(target: "engine_ssz_proxy", %err, "engine ssz payload bodies http response failed");
+            text_response(STATUS_INTERNAL_SERVER_ERROR, err)
+        }
     }
 }
 
@@ -1072,74 +1696,187 @@ where
     Validator: EngineApiValidator<EthEngineTypes>,
     ChainSpec: EthereumHardforks + Send + Sync + 'static,
 {
+    tracing::info!(
+        target: "engine_ssz_proxy",
+        version,
+        body_bytes = body.len(),
+        body_offset0 = ?first_offset_le(body),
+        body_prefix = %ssz_prefix(body),
+        "engine ssz get_blobs handler start"
+    );
     match version {
         1 => {
             let hashes = match decode_blob_hashes_request(body) {
-                Ok(hashes) => hashes,
-                Err(err) => return text_response(STATUS_BAD_REQUEST, err),
+                Ok(hashes) => {
+                    tracing::info!(target: "engine_ssz_proxy", version, hashes = hashes.len(), "engine ssz get_blobs v1 decoded hashes");
+                    hashes
+                }
+                Err(err) => {
+                    tracing::info!(target: "engine_ssz_proxy", version, err, "engine ssz get_blobs v1 decode failed");
+                    return text_response(STATUS_BAD_REQUEST, err)
+                }
             };
             match engine_api.get_blobs_v1_metered(hashes) {
-                Ok(response) => ssz_response(response),
-                Err(err) => text_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string()),
+                Ok(response) => {
+                    tracing::info!(target: "engine_ssz_proxy", version, "engine ssz get_blobs v1 success");
+                    ssz_response(response)
+                }
+                Err(err) => {
+                    tracing::info!(target: "engine_ssz_proxy", version, %err, "engine ssz get_blobs v1 failed");
+                    text_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string())
+                }
             }
         }
         2 => {
             let hashes = match decode_blob_hashes_request(body) {
-                Ok(hashes) => hashes,
-                Err(err) => return text_response(STATUS_BAD_REQUEST, err),
+                Ok(hashes) => {
+                    tracing::info!(target: "engine_ssz_proxy", version, hashes = hashes.len(), "engine ssz get_blobs v2 decoded hashes");
+                    hashes
+                }
+                Err(err) => {
+                    tracing::info!(target: "engine_ssz_proxy", version, err, "engine ssz get_blobs v2 decode failed");
+                    return text_response(STATUS_BAD_REQUEST, err)
+                }
             };
             match engine_api.get_blobs_v2_metered(hashes) {
-                Ok(Some(response)) => ssz_response(response),
-                Ok(None) => no_content_response(),
-                Err(err) => text_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string()),
+                Ok(Some(response)) => {
+                    tracing::info!(target: "engine_ssz_proxy", version, "engine ssz get_blobs v2 success with response");
+                    ssz_response(response)
+                }
+                Ok(None) => {
+                    tracing::info!(target: "engine_ssz_proxy", version, "engine ssz get_blobs v2 success no content");
+                    no_content_response()
+                }
+                Err(err) => {
+                    tracing::info!(target: "engine_ssz_proxy", version, %err, "engine ssz get_blobs v2 failed");
+                    text_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string())
+                }
             }
         }
         3 => {
             let hashes = match decode_blob_hashes_request(body) {
-                Ok(hashes) => hashes,
-                Err(err) => return text_response(STATUS_BAD_REQUEST, err),
+                Ok(hashes) => {
+                    tracing::info!(target: "engine_ssz_proxy", version, hashes = hashes.len(), "engine ssz get_blobs v3 decoded hashes");
+                    hashes
+                }
+                Err(err) => {
+                    tracing::info!(target: "engine_ssz_proxy", version, err, "engine ssz get_blobs v3 decode failed");
+                    return text_response(STATUS_BAD_REQUEST, err)
+                }
             };
             match engine_api.get_blobs_v3_metered(hashes) {
-                Ok(Some(response)) => ssz_response(response),
-                Ok(None) => no_content_response(),
-                Err(err) => text_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string()),
+                Ok(Some(response)) => {
+                    tracing::info!(target: "engine_ssz_proxy", version, "engine ssz get_blobs v3 success with response");
+                    ssz_response(response)
+                }
+                Ok(None) => {
+                    tracing::info!(target: "engine_ssz_proxy", version, "engine ssz get_blobs v3 success no content");
+                    no_content_response()
+                }
+                Err(err) => {
+                    tracing::info!(target: "engine_ssz_proxy", version, %err, "engine ssz get_blobs v3 failed");
+                    text_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string())
+                }
             }
         }
         4 => {
             let (hashes, indices_bitarray) = match decode_blob_cells_request(body) {
-                Ok(request) => request,
-                Err(err) => return text_response(STATUS_BAD_REQUEST, err),
+                Ok(request) => {
+                    tracing::info!(
+                        target: "engine_ssz_proxy",
+                        version,
+                        hashes = request.0.len(),
+                        indices_bitarray = ?request.1,
+                        "engine ssz get_blobs v4 decoded cells request"
+                    );
+                    request
+                }
+                Err(err) => {
+                    tracing::info!(target: "engine_ssz_proxy", version, err, "engine ssz get_blobs v4 decode failed");
+                    return text_response(STATUS_BAD_REQUEST, err)
+                }
             };
             match engine_api.get_blobs_v4_metered(hashes, indices_bitarray) {
-                Ok(Some(response)) => ssz_response(response),
-                Ok(None) => no_content_response(),
-                Err(err) => text_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string()),
+                Ok(Some(response)) => {
+                    tracing::info!(target: "engine_ssz_proxy", version, "engine ssz get_blobs v4 success with response");
+                    ssz_response(response)
+                }
+                Ok(None) => {
+                    tracing::info!(target: "engine_ssz_proxy", version, "engine ssz get_blobs v4 success no content");
+                    no_content_response()
+                }
+                Err(err) => {
+                    tracing::info!(target: "engine_ssz_proxy", version, %err, "engine ssz get_blobs v4 failed");
+                    text_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string())
+                }
             }
         }
-        _ => text_response(STATUS_NOT_FOUND, "unsupported blobs endpoint version"),
+        _ => {
+            tracing::info!(target: "engine_ssz_proxy", version, "engine ssz get_blobs unsupported version");
+            text_response(STATUS_NOT_FOUND, "unsupported blobs endpoint version")
+        }
     }
 }
 
 /// Decodes the common getBlobs request container with only versioned hashes.
 fn decode_blob_hashes_request(body: &[u8]) -> Result<Vec<B256>, &'static str> {
+    tracing::info!(
+        target: "engine_ssz_proxy",
+        body_bytes = body.len(),
+        body_offset0 = ?first_offset_le(body),
+        body_prefix = %ssz_prefix(body),
+        "engine ssz decode blob hashes request"
+    );
     Vec::<B256>::from_ssz_bytes(body).map_err(|_| "invalid ssz")
 }
 
 /// Decodes the Amsterdam getBlobs request container with hashes and a cell index mask.
 fn decode_blob_cells_request(body: &[u8]) -> Result<(Vec<B256>, B128), &'static str> {
+    tracing::info!(
+        target: "engine_ssz_proxy",
+        body_bytes = body.len(),
+        body_offset0 = ?first_offset_le(body),
+        body_prefix = %ssz_prefix(body),
+        "engine ssz decode blob cells request"
+    );
     <(Vec<B256>, B128) as ssz::Decode>::from_ssz_bytes(body).map_err(|_| "invalid ssz")
 }
 
 fn decode_new_payload_request(version: u8, body: &[u8]) -> Result<ExecutionData, &'static str> {
+    tracing::info!(
+        target: "engine_ssz_proxy",
+        version,
+        body_bytes = body.len(),
+        body_offset0 = ?first_offset_le(body),
+        body_prefix = %ssz_prefix(body),
+        "engine ssz decode new payload request start"
+    );
     match version {
         1 => {
             let execution_payload =
                 decode_one::<ExecutionPayloadV1>(body).map_err(|_| "invalid ssz")?;
+            tracing::info!(
+                target: "engine_ssz_proxy",
+                version,
+                block_hash = %execution_payload.block_hash,
+                block_number = execution_payload.block_number,
+                tx_count = execution_payload.transactions.len(),
+                "engine ssz decoded execution payload v1"
+            );
             Ok(ExecutionData::new(execution_payload.into(), ExecutionPayloadSidecar::none()))
         }
         2 => {
             let execution_payload =
                 decode_one::<ExecutionPayloadV2>(body).map_err(|_| "invalid ssz")?;
+            tracing::info!(
+                target: "engine_ssz_proxy",
+                version,
+                block_hash = %execution_payload.payload_inner.block_hash,
+                block_number = execution_payload.payload_inner.block_number,
+                tx_count = execution_payload.payload_inner.transactions.len(),
+                withdrawals = execution_payload.withdrawals.len(),
+                "engine ssz decoded execution payload v2"
+            );
             Ok(ExecutionData::new(execution_payload.into(), ExecutionPayloadSidecar::none()))
         }
         3 => {
@@ -1148,6 +1885,16 @@ fn decode_new_payload_request(version: u8, body: &[u8]) -> Result<ExecutionData,
             let versioned_hashes = calculate_versioned_hashes(
                 &execution_payload.payload_inner.payload_inner.transactions,
             )?;
+            tracing::info!(
+                target: "engine_ssz_proxy",
+                version,
+                block_hash = %execution_payload.payload_inner.payload_inner.block_hash,
+                block_number = execution_payload.payload_inner.payload_inner.block_number,
+                %parent_beacon_block_root,
+                tx_count = execution_payload.payload_inner.payload_inner.transactions.len(),
+                versioned_hashes = versioned_hashes.len(),
+                "engine ssz decoded execution payload v3 envelope"
+            );
             let sidecar = ExecutionPayloadSidecar::v3(CancunPayloadFields {
                 parent_beacon_block_root,
                 versioned_hashes,
@@ -1161,6 +1908,17 @@ fn decode_new_payload_request(version: u8, body: &[u8]) -> Result<ExecutionData,
             let versioned_hashes = calculate_versioned_hashes(
                 &execution_payload.payload_inner.payload_inner.transactions,
             )?;
+            tracing::info!(
+                target: "engine_ssz_proxy",
+                version,
+                block_hash = %execution_payload.payload_inner.payload_inner.block_hash,
+                block_number = execution_payload.payload_inner.payload_inner.block_number,
+                %parent_beacon_block_root,
+                tx_count = execution_payload.payload_inner.payload_inner.transactions.len(),
+                execution_requests = execution_requests.len(),
+                versioned_hashes = versioned_hashes.len(),
+                "engine ssz decoded execution payload v4 envelope"
+            );
             let sidecar = ExecutionPayloadSidecar::v4(
                 CancunPayloadFields { parent_beacon_block_root, versioned_hashes },
                 PraguePayloadFields::new(RequestsOrHash::Requests(Requests::new(
@@ -1179,26 +1937,69 @@ fn decode_new_payload_request(version: u8, body: &[u8]) -> Result<ExecutionData,
             let versioned_hashes = calculate_versioned_hashes(
                 &execution_payload.payload_inner.payload_inner.payload_inner.transactions,
             )?;
+            tracing::info!(
+                target: "engine_ssz_proxy",
+                version,
+                block_hash = %execution_payload.payload_inner.payload_inner.payload_inner.block_hash,
+                block_number = execution_payload.payload_inner.payload_inner.payload_inner.block_number,
+                %parent_beacon_block_root,
+                tx_count = execution_payload.payload_inner.payload_inner.payload_inner.transactions.len(),
+                execution_requests = execution_requests.len(),
+                versioned_hashes = versioned_hashes.len(),
+                "engine ssz decoded execution payload v5 envelope"
+            );
             let sidecar = ExecutionPayloadSidecar::v4(
                 CancunPayloadFields { parent_beacon_block_root, versioned_hashes },
                 PraguePayloadFields::new(RequestsOrHash::Requests(execution_requests)),
             );
             Ok(ExecutionData::new(ExecutionPayload::V4(execution_payload), sidecar))
         }
-        _ => Err("unsupported payload endpoint version"),
+        _ => {
+            tracing::info!(target: "engine_ssz_proxy", version, "engine ssz decode new payload unsupported version");
+            Err("unsupported payload endpoint version")
+        }
     }
 }
 
 fn calculate_versioned_hashes(transactions: &[Bytes]) -> Result<Vec<B256>, &'static str> {
+    tracing::info!(
+        target: "engine_ssz_proxy",
+        transactions = transactions.len(),
+        "engine ssz calculating versioned hashes"
+    );
     let mut versioned_hashes = Vec::new();
-    for transaction in transactions {
+    for (index, transaction) in transactions.iter().enumerate() {
+        tracing::info!(
+            target: "engine_ssz_proxy",
+            tx_index = index,
+            tx_bytes = transaction.len(),
+            tx_prefix = %ssz_prefix(transaction),
+            "engine ssz decoding transaction for blob hashes"
+        );
         let transaction =
             TxEnvelope::decode_2718_exact(transaction.as_ref()).map_err(|_| "invalid tx")?;
         if let Some(hashes) = transaction.blob_versioned_hashes() {
+            tracing::info!(
+                target: "engine_ssz_proxy",
+                tx_index = index,
+                hashes = hashes.len(),
+                "engine ssz transaction has blob versioned hashes"
+            );
             versioned_hashes.extend_from_slice(hashes);
+        } else {
+            tracing::info!(
+                target: "engine_ssz_proxy",
+                tx_index = index,
+                "engine ssz transaction has no blob versioned hashes"
+            );
         }
     }
 
+    tracing::info!(
+        target: "engine_ssz_proxy",
+        versioned_hashes = versioned_hashes.len(),
+        "engine ssz calculated versioned hashes"
+    );
     Ok(versioned_hashes)
 }
 
@@ -1206,39 +2007,91 @@ fn decode_forkchoice_request(
     version: u8,
     body: &[u8],
 ) -> Result<(ForkchoiceState, Option<PayloadAttributes>, Option<B128>), &'static str> {
+    tracing::info!(
+        target: "engine_ssz_proxy",
+        version,
+        body_bytes = body.len(),
+        body_offset0 = ?first_offset_le(body),
+        body_prefix = %ssz_prefix(body),
+        "engine ssz decode forkchoice request start"
+    );
     match version {
         1..=3 => {
             let (forkchoice_state, payload_attributes) =
                 <(ForkchoiceState, Vec<PayloadAttributes>)>::from_ssz_bytes(body)
                     .map_err(|_| "invalid ssz")?;
+            tracing::info!(
+                target: "engine_ssz_proxy",
+                version,
+                head_block_hash = %forkchoice_state.head_block_hash,
+                safe_block_hash = %forkchoice_state.safe_block_hash,
+                finalized_block_hash = %forkchoice_state.finalized_block_hash,
+                payload_attributes = payload_attributes.len(),
+                "engine ssz decoded forkchoice v1-v3 request"
+            );
             Ok((forkchoice_state, payload_attrs(version, payload_attributes)?, None))
         }
         4 => {
             let (forkchoice_state, payload_attributes, custody_columns) =
                 <(ForkchoiceState, Vec<PayloadAttributes>, Vec<B128>)>::from_ssz_bytes(body)
                     .map_err(|_| "invalid ssz")?;
+            tracing::info!(
+                target: "engine_ssz_proxy",
+                version,
+                head_block_hash = %forkchoice_state.head_block_hash,
+                safe_block_hash = %forkchoice_state.safe_block_hash,
+                finalized_block_hash = %forkchoice_state.finalized_block_hash,
+                payload_attributes = payload_attributes.len(),
+                custody_columns = custody_columns.len(),
+                "engine ssz decoded forkchoice v4 request"
+            );
             Ok((
                 forkchoice_state,
                 payload_attrs(version, payload_attributes)?,
                 custody_columns_opt(custody_columns)?,
             ))
         }
-        _ => Err("unsupported forkchoice endpoint version"),
+        _ => {
+            tracing::info!(target: "engine_ssz_proxy", version, "engine ssz decode forkchoice unsupported version");
+            Err("unsupported forkchoice endpoint version")
+        }
     }
 }
 
 fn decode_one<T: ssz::Decode>(body: &[u8]) -> Result<T, ssz::DecodeError> {
+    tracing::info!(
+        target: "engine_ssz_proxy",
+        type_name = std::any::type_name::<T>(),
+        body_bytes = body.len(),
+        body_offset0 = ?first_offset_le(body),
+        body_prefix = %ssz_prefix(body),
+        "engine ssz decode one start"
+    );
     let mut builder = ssz::SszDecoderBuilder::new(body);
     builder.register_type::<T>()?;
     let mut decoder = builder.build()?;
-    decoder.decode_next()
+    let decoded = decoder.decode_next();
+    tracing::info!(
+        target: "engine_ssz_proxy",
+        type_name = std::any::type_name::<T>(),
+        success = decoded.is_ok(),
+        "engine ssz decode one finished"
+    );
+    decoded
 }
 
 fn payload_attrs(
     version: u8,
     attrs: Vec<PayloadAttributes>,
 ) -> Result<Option<PayloadAttributes>, &'static str> {
+    tracing::info!(
+        target: "engine_ssz_proxy",
+        version,
+        attrs = attrs.len(),
+        "engine ssz payload attrs decode"
+    );
     if attrs.len() > 1 {
+        tracing::info!(target: "engine_ssz_proxy", version, attrs = attrs.len(), "engine ssz payload attrs rejected too many values");
         return Err("payload_attributes must contain at most one value")
     }
 
@@ -1246,7 +2099,17 @@ fn payload_attrs(
 }
 
 fn custody_columns_opt(custody_columns: Vec<B128>) -> Result<Option<B128>, &'static str> {
+    tracing::info!(
+        target: "engine_ssz_proxy",
+        custody_columns = custody_columns.len(),
+        "engine ssz custody columns decode"
+    );
     if custody_columns.len() > 1 {
+        tracing::info!(
+            target: "engine_ssz_proxy",
+            custody_columns = custody_columns.len(),
+            "engine ssz custody columns rejected too many values"
+        );
         return Err("invalid params")
     }
 
@@ -1257,6 +2120,16 @@ fn validate_payload_attrs_version(
     version: u8,
     attrs: PayloadAttributes,
 ) -> Result<PayloadAttributes, &'static str> {
+    tracing::info!(
+        target: "engine_ssz_proxy",
+        version,
+        timestamp = attrs.timestamp,
+        has_withdrawals = attrs.withdrawals.is_some(),
+        has_parent_beacon_block_root = attrs.parent_beacon_block_root.is_some(),
+        has_slot_number = attrs.slot_number.is_some(),
+        has_target_gas_limit = attrs.target_gas_limit.is_some(),
+        "engine ssz validating payload attrs version"
+    );
     let matches_version = match version {
         1 => {
             attrs.withdrawals.is_none() &&
@@ -1282,24 +2155,49 @@ fn validate_payload_attrs_version(
     };
 
     if matches_version {
+        tracing::info!(target: "engine_ssz_proxy", version, timestamp = attrs.timestamp, "engine ssz payload attrs version valid");
         Ok(attrs)
     } else {
+        tracing::info!(target: "engine_ssz_proxy", version, timestamp = attrs.timestamp, "engine ssz payload attrs version mismatch");
         Err("payload_attributes version does not match endpoint")
     }
 }
 
+fn ssz_prefix(bytes: &[u8]) -> String {
+    bytes.iter().take(32).map(|byte| format!("{byte:02x}")).collect::<Vec<_>>().join("")
+}
+
+fn first_offset_le(bytes: &[u8]) -> Option<u32> {
+    bytes.get(0..4).map(|raw| u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]))
+}
+
 fn ssz_response<T: ssz::Encode>(value: T) -> HttpResponse {
+    let body = value.as_ssz_bytes();
+    tracing::info!(
+        target: "engine_ssz_proxy",
+        response_type = std::any::type_name::<T>(),
+        response_bytes = body.len(),
+        response_offset0 = ?first_offset_le(&body),
+        response_prefix = %ssz_prefix(&body),
+        "engine ssz response bytes"
+    );
     HttpResponse::builder()
         .status(STATUS_OK)
         .header(CONTENT_TYPE, OCTET_STREAM)
-        .body(HttpBody::from(value.as_ssz_bytes()))
+        .body(HttpBody::from(body))
         .expect("valid response")
 }
 
 fn json_response<T: serde::Serialize>(value: T) -> HttpResponse {
     let Ok(body) = serde_json::to_string(&value) else {
+        tracing::info!(target: "engine_ssz_proxy", "engine ssz json response encode failed");
         return text_response(STATUS_INTERNAL_SERVER_ERROR, "failed to encode json")
     };
+    tracing::info!(
+        target: "engine_ssz_proxy",
+        response_bytes = body.len(),
+        "engine ssz json response"
+    );
 
     HttpResponse::builder()
         .status(STATUS_OK)
@@ -1309,14 +2207,23 @@ fn json_response<T: serde::Serialize>(value: T) -> HttpResponse {
 }
 
 fn no_content_response() -> HttpResponse {
+    tracing::info!(target: "engine_ssz_proxy", status = 204, "engine ssz no content response");
     HttpResponse::builder().status(204).body(HttpBody::empty()).expect("valid response")
 }
 
 fn text_response(status: u16, body: impl Into<String>) -> HttpResponse {
+    let body = body.into();
+    tracing::info!(
+        target: "engine_ssz_proxy",
+        status,
+        response_bytes = body.len(),
+        response_body = %body,
+        "engine ssz text response"
+    );
     HttpResponse::builder()
         .status(status)
         .header(CONTENT_TYPE, TEXT_PLAIN)
-        .body(HttpBody::from(body.into()))
+        .body(HttpBody::from(body))
         .expect("valid response")
 }
 

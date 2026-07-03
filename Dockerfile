@@ -26,7 +26,7 @@ FROM chef AS builder
 COPY --from=planner /app/recipe.json recipe.json
 
 # Build profile, release by default
-ARG BUILD_PROFILE=maxperf
+ARG BUILD_PROFILE=release
 ENV BUILD_PROFILE=$BUILD_PROFILE
 
 # Extra Cargo flags
