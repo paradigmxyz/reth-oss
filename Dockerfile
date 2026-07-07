@@ -8,7 +8,7 @@ LABEL org.opencontainers.image.licenses="MIT OR Apache-2.0"
 
 # Install system dependencies
 COPY .github/scripts/install_llvm_ubuntu.sh /tmp/install_llvm.sh
-RUN /tmp/install_llvm.sh && rm /tmp/install_llvm.sh && \
+RUN sed -i 's/\r$//' /tmp/install_llvm.sh && /tmp/install_llvm.sh && rm /tmp/install_llvm.sh && \
     apt-get install -y --no-install-recommends libclang-dev pkg-config
 
 # Builds a cargo-chef plan

@@ -1,6 +1,8 @@
 book/cli/**/*.md linguist-vendored
 book/cli/cli.md -linguist-vendored
 
+*.sh text eol=lf
+
 crates/storage/libmdbx-rs/mdbx-sys/libmdbx/** linguist-vendored
 
 bun.lock linguist-language=JSON-with-Comments
