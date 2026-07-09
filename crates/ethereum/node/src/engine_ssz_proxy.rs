@@ -4,16 +4,23 @@
 //!
 //! [EIP-8178]: https://eips.ethereum.org/EIPS/eip-8178
 
-use alloy_consensus::{Transaction, TxEnvelope};
-use alloy_eips::{
-    eip2718::Decodable2718,
-    eip7685::{Requests, RequestsOrHash},
+use crate::engine_ssz_containers::{
+    BlobsV1Request, BlobsV1Response, BlobsV2Response, BlobsV3Response, BlobsV4Request,
+    BlobsV4Response, BodiesByHashRequest, BodiesResponseAmsterdam, BodiesResponseCancun,
+    BodiesResponseOsaka, BodiesResponseParis, BodiesResponsePrague, BodiesResponseShanghai,
+    ExecutionPayloadBodyAmsterdam, ExecutionPayloadBodyParis, ExecutionPayloadBodyShanghai,
+    ExecutionPayloadEnvelopeAmsterdam, ExecutionPayloadEnvelopeCancun,
+    ExecutionPayloadEnvelopeParis, ExecutionPayloadEnvelopePrague,
+    ExecutionPayloadEnvelopeShanghai, ForkchoiceUpdateAmsterdam, ForkchoiceUpdateCancun,
+    ForkchoiceUpdateParis, ForkchoiceUpdateResponse, ForkchoiceUpdateShanghai,
+    PayloadStatus as EngineSszPayloadStatus, MAX_BLOBS_REQUEST, MAX_BODIES_REQUEST,
 };
+use alloy_consensus::{Transaction, TxEnvelope};
+use alloy_eips::{eip2718::Decodable2718, eip7685::RequestsOrHash};
 use alloy_primitives::{Bytes, B128, B256};
 use alloy_rpc_types_engine::{
-    CancunPayloadFields, ExecutionData, ExecutionPayload, ExecutionPayloadSidecar,
-    ExecutionPayloadV1, ExecutionPayloadV2, ExecutionPayloadV3, ExecutionPayloadV4,
-    ForkchoiceState, PayloadAttributes, PraguePayloadFields,
+    CancunPayloadFields, ExecutionData, ExecutionPayload, ExecutionPayloadSidecar, ForkchoiceState,
+    PayloadAttributes, PraguePayloadFields,
 };
 use http_body_util::BodyExt;
 use jsonrpsee::server::{HttpBody, HttpRequest, HttpResponse};
@@ -46,7 +53,6 @@ const STATUS_METHOD_NOT_ALLOWED: u16 = 405;
 const STATUS_INTERNAL_SERVER_ERROR: u16 = 500;
 const STATUS_SERVICE_UNAVAILABLE: u16 = 503;
 
-const MAX_BLOB_LIMIT: usize = 128;
 const MAX_PAYLOAD_BYTES: u64 = 64 * 1024 * 1024;
 
 type EthEngineApi<Provider, Pool, Validator, ChainSpec> =
@@ -245,6 +251,41 @@ where
             };
             handle_forkchoice_updated(engine_api, fork.forkchoice_version(), &body).await
         }
+        EngineSszEndpoint::BodiesHash => {
+            if method != "POST" {
+                return text_response(STATUS_METHOD_NOT_ALLOWED, "method not allowed")
+            }
+            let Some(fork) = request_fork(&request) else {
+                return text_response(STATUS_BAD_REQUEST, "unsupported fork")
+            };
+            let Ok(body) = request.into_body().collect().await.map(|body| body.to_bytes()) else {
+                return text_response(STATUS_BAD_REQUEST, "failed to read request body")
+            };
+            let hashes = match BodiesByHashRequest::from_ssz_bytes(&body) {
+                Ok(request) => request.block_hashes,
+                Err(_) => return text_response(STATUS_BAD_REQUEST, "invalid ssz"),
+            };
+            let Some(engine_api) = handle.engine_api().await else {
+                return text_response(STATUS_SERVICE_UNAVAILABLE, "engine api unavailable")
+            };
+            handle_payload_bodies_by_hash(engine_api, fork, hashes).await
+        }
+        EngineSszEndpoint::BodiesRange => {
+            if method != "GET" {
+                return text_response(STATUS_METHOD_NOT_ALLOWED, "method not allowed")
+            }
+            let Some(fork) = request_fork(&request) else {
+                return text_response(STATUS_BAD_REQUEST, "unsupported fork")
+            };
+            let (start, count) = match parse_bodies_range_query(request.uri().query()) {
+                Ok(range) => range,
+                Err(err) => return text_response(STATUS_BAD_REQUEST, err),
+            };
+            let Some(engine_api) = handle.engine_api().await else {
+                return text_response(STATUS_SERVICE_UNAVAILABLE, "engine api unavailable")
+            };
+            handle_payload_bodies_by_range(engine_api, fork, start, count).await
+        }
         EngineSszEndpoint::Blobs(version) => {
             if method != "POST" {
                 return text_response(STATUS_METHOD_NOT_ALLOWED, "method not allowed")
@@ -279,6 +320,12 @@ fn parse_engine_path(path: &str) -> Option<EngineSszEndpoint> {
         (Some("engine"), Some("v1"), Some("forkchoice"), None, None) => {
             Some(EngineSszEndpoint::Forkchoice)
         }
+        (Some("engine"), Some("v1"), Some("bodies"), Some("hash"), None) => {
+            Some(EngineSszEndpoint::BodiesHash)
+        }
+        (Some("engine"), Some("v1"), Some("bodies"), None, None) => {
+            Some(EngineSszEndpoint::BodiesRange)
+        }
         (Some("engine"), Some("v1"), Some("blobs"), version, None) => {
             Some(EngineSszEndpoint::Blobs(parse_method_version(version?)?))
         }
@@ -292,6 +339,8 @@ enum EngineSszEndpoint {
     Identity,
     NewPayload,
     Forkchoice,
+    BodiesHash,
+    BodiesRange,
     Blobs(u8),
 }
 
@@ -355,8 +404,8 @@ fn handle_capabilities() -> HttpResponse {
         },
         "unscoped_endpoints": ["capabilities", "identity"],
         "limits": {
-            "bodies.max_count": 128,
-            "blobs.max_versioned_hashes": MAX_BLOB_LIMIT,
+            "bodies.max_count": MAX_BODIES_REQUEST,
+            "blobs.max_versioned_hashes": MAX_BLOBS_REQUEST,
             "payload.max_bytes": MAX_PAYLOAD_BYTES,
         },
     }))
@@ -400,7 +449,10 @@ where
     };
 
     match response {
-        Ok(status) => ssz_response(status),
+        Ok(status) => match EngineSszPayloadStatus::try_from(status) {
+            Ok(status) => ssz_response(status),
+            Err(err) => text_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string()),
+        },
         Err(err) => text_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string()),
     }
 }
@@ -430,8 +482,174 @@ where
     };
 
     match response {
-        Ok(updated) => ssz_response(updated),
+        Ok(updated) => match ForkchoiceUpdateResponse::try_from(updated) {
+            Ok(updated) => ssz_response(updated),
+            Err(err) => text_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string()),
+        },
         Err(err) => text_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string()),
+    }
+}
+
+async fn handle_payload_bodies_by_hash<Provider, Pool, Validator, ChainSpec>(
+    engine_api: EthEngineApi<Provider, Pool, Validator, ChainSpec>,
+    fork: EngineSszFork,
+    hashes: Vec<B256>,
+) -> HttpResponse
+where
+    Provider: HeaderProvider + BlockReader + StateProviderFactory + BalProvider + 'static,
+    Pool: TransactionPool + 'static,
+    Validator: EngineApiValidator<EthEngineTypes>,
+    ChainSpec: EthereumHardforks + Send + Sync + 'static,
+{
+    match fork {
+        EngineSszFork::Paris => {
+            match engine_api.get_payload_bodies_by_hash_v1_metered(hashes).await {
+                Ok(bodies) => match BodiesResponseParis::from_optional_bodies(bodies, |body| {
+                    ExecutionPayloadBodyParis::try_from(body).ok()
+                }) {
+                    Ok(response) => ssz_response(response),
+                    Err(err) => text_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string()),
+                },
+                Err(err) => text_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string()),
+            }
+        }
+        EngineSszFork::Shanghai => {
+            match engine_api.get_payload_bodies_by_hash_v1_metered(hashes).await {
+                Ok(bodies) => match BodiesResponseShanghai::from_optional_bodies(bodies, |body| {
+                    ExecutionPayloadBodyShanghai::try_from(body).ok()
+                }) {
+                    Ok(response) => ssz_response(response),
+                    Err(err) => text_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string()),
+                },
+                Err(err) => text_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string()),
+            }
+        }
+        EngineSszFork::Cancun => {
+            match engine_api.get_payload_bodies_by_hash_v1_metered(hashes).await {
+                Ok(bodies) => match BodiesResponseCancun::from_optional_bodies(bodies, |body| {
+                    ExecutionPayloadBodyShanghai::try_from(body).ok()
+                }) {
+                    Ok(response) => ssz_response(response),
+                    Err(err) => text_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string()),
+                },
+                Err(err) => text_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string()),
+            }
+        }
+        EngineSszFork::Prague => {
+            match engine_api.get_payload_bodies_by_hash_v1_metered(hashes).await {
+                Ok(bodies) => match BodiesResponsePrague::from_optional_bodies(bodies, |body| {
+                    ExecutionPayloadBodyShanghai::try_from(body).ok()
+                }) {
+                    Ok(response) => ssz_response(response),
+                    Err(err) => text_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string()),
+                },
+                Err(err) => text_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string()),
+            }
+        }
+        EngineSszFork::Osaka => {
+            match engine_api.get_payload_bodies_by_hash_v1_metered(hashes).await {
+                Ok(bodies) => match BodiesResponseOsaka::from_optional_bodies(bodies, |body| {
+                    ExecutionPayloadBodyShanghai::try_from(body).ok()
+                }) {
+                    Ok(response) => ssz_response(response),
+                    Err(err) => text_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string()),
+                },
+                Err(err) => text_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string()),
+            }
+        }
+        EngineSszFork::Amsterdam => {
+            match engine_api.get_payload_bodies_by_hash_v2_metered(hashes).await {
+                Ok(bodies) => match BodiesResponseAmsterdam::from_optional_bodies(bodies, |body| {
+                    ExecutionPayloadBodyAmsterdam::try_from(body).ok()
+                }) {
+                    Ok(response) => ssz_response(response),
+                    Err(err) => text_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string()),
+                },
+                Err(err) => text_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string()),
+            }
+        }
+    }
+}
+
+async fn handle_payload_bodies_by_range<Provider, Pool, Validator, ChainSpec>(
+    engine_api: EthEngineApi<Provider, Pool, Validator, ChainSpec>,
+    fork: EngineSszFork,
+    start: u64,
+    count: u64,
+) -> HttpResponse
+where
+    Provider: HeaderProvider + BlockReader + StateProviderFactory + BalProvider + 'static,
+    Pool: TransactionPool + 'static,
+    Validator: EngineApiValidator<EthEngineTypes>,
+    ChainSpec: EthereumHardforks + Send + Sync + 'static,
+{
+    match fork {
+        EngineSszFork::Paris => {
+            match engine_api.get_payload_bodies_by_range_v1_metered(start, count).await {
+                Ok(bodies) => match BodiesResponseParis::from_optional_bodies(bodies, |body| {
+                    ExecutionPayloadBodyParis::try_from(body).ok()
+                }) {
+                    Ok(response) => ssz_response(response),
+                    Err(err) => text_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string()),
+                },
+                Err(err) => text_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string()),
+            }
+        }
+        EngineSszFork::Shanghai => {
+            match engine_api.get_payload_bodies_by_range_v1_metered(start, count).await {
+                Ok(bodies) => match BodiesResponseShanghai::from_optional_bodies(bodies, |body| {
+                    ExecutionPayloadBodyShanghai::try_from(body).ok()
+                }) {
+                    Ok(response) => ssz_response(response),
+                    Err(err) => text_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string()),
+                },
+                Err(err) => text_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string()),
+            }
+        }
+        EngineSszFork::Cancun => {
+            match engine_api.get_payload_bodies_by_range_v1_metered(start, count).await {
+                Ok(bodies) => match BodiesResponseCancun::from_optional_bodies(bodies, |body| {
+                    ExecutionPayloadBodyShanghai::try_from(body).ok()
+                }) {
+                    Ok(response) => ssz_response(response),
+                    Err(err) => text_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string()),
+                },
+                Err(err) => text_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string()),
+            }
+        }
+        EngineSszFork::Prague => {
+            match engine_api.get_payload_bodies_by_range_v1_metered(start, count).await {
+                Ok(bodies) => match BodiesResponsePrague::from_optional_bodies(bodies, |body| {
+                    ExecutionPayloadBodyShanghai::try_from(body).ok()
+                }) {
+                    Ok(response) => ssz_response(response),
+                    Err(err) => text_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string()),
+                },
+                Err(err) => text_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string()),
+            }
+        }
+        EngineSszFork::Osaka => {
+            match engine_api.get_payload_bodies_by_range_v1_metered(start, count).await {
+                Ok(bodies) => match BodiesResponseOsaka::from_optional_bodies(bodies, |body| {
+                    ExecutionPayloadBodyShanghai::try_from(body).ok()
+                }) {
+                    Ok(response) => ssz_response(response),
+                    Err(err) => text_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string()),
+                },
+                Err(err) => text_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string()),
+            }
+        }
+        EngineSszFork::Amsterdam => {
+            match engine_api.get_payload_bodies_by_range_v2_metered(start, count).await {
+                Ok(bodies) => match BodiesResponseAmsterdam::from_optional_bodies(bodies, |body| {
+                    ExecutionPayloadBodyAmsterdam::try_from(body).ok()
+                }) {
+                    Ok(response) => ssz_response(response),
+                    Err(err) => text_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string()),
+                },
+                Err(err) => text_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string()),
+            }
+        }
     }
 }
 
@@ -454,7 +672,10 @@ where
                 Err(err) => return text_response(STATUS_BAD_REQUEST, err),
             };
             match engine_api.get_blobs_v1_metered(hashes) {
-                Ok(response) => ssz_response(response),
+                Ok(response) => match BlobsV1Response::try_from(response) {
+                    Ok(response) => ssz_response(response),
+                    Err(err) => text_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string()),
+                },
                 Err(err) => text_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string()),
             }
         }
@@ -464,7 +685,10 @@ where
                 Err(err) => return text_response(STATUS_BAD_REQUEST, err),
             };
             match engine_api.get_blobs_v2_metered(hashes) {
-                Ok(Some(response)) => ssz_response(response),
+                Ok(Some(response)) => match BlobsV2Response::try_from(response) {
+                    Ok(response) => ssz_response(response),
+                    Err(err) => text_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string()),
+                },
                 Ok(None) => no_content_response(),
                 Err(err) => text_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string()),
             }
@@ -475,7 +699,10 @@ where
                 Err(err) => return text_response(STATUS_BAD_REQUEST, err),
             };
             match engine_api.get_blobs_v3_metered(hashes) {
-                Ok(Some(response)) => ssz_response(response),
+                Ok(Some(response)) => match BlobsV3Response::try_from(response) {
+                    Ok(response) => ssz_response(response),
+                    Err(err) => text_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string()),
+                },
                 Ok(None) => no_content_response(),
                 Err(err) => text_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string()),
             }
@@ -486,7 +713,10 @@ where
                 Err(err) => return text_response(STATUS_BAD_REQUEST, err),
             };
             match engine_api.get_blobs_v4_metered(hashes, indices_bitarray) {
-                Ok(Some(response)) => ssz_response(response),
+                Ok(Some(response)) => match BlobsV4Response::try_from(response) {
+                    Ok(response) => ssz_response(response),
+                    Err(err) => text_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string()),
+                },
                 Ok(None) => no_content_response(),
                 Err(err) => text_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string()),
             }
@@ -495,31 +725,59 @@ where
     }
 }
 
+fn parse_bodies_range_query(query: Option<&str>) -> Result<(u64, u64), &'static str> {
+    let Some(query) = query else { return Err("missing bodies range query") };
+    let mut from = None;
+    let mut count = None;
+    for pair in query.split('&') {
+        let Some((key, value)) = pair.split_once('=') else { continue };
+        match key {
+            "from" => from = value.parse().ok(),
+            "count" => count = value.parse().ok(),
+            _ => {}
+        }
+    }
+
+    let from = from.ok_or("missing or invalid from query")?;
+    let count = count.ok_or("missing or invalid count query")?;
+    if usize::try_from(count).map_or(true, |count| count > MAX_BODIES_REQUEST) {
+        return Err("bodies count exceeds limit")
+    }
+    Ok((from, count))
+}
+
 /// Decodes the common getBlobs request container with only versioned hashes.
 fn decode_blob_hashes_request(body: &[u8]) -> Result<Vec<B256>, &'static str> {
-    Vec::<B256>::from_ssz_bytes(body).map_err(|_| "invalid ssz")
+    BlobsV1Request::from_ssz_bytes(body)
+        .map(|request| request.versioned_hashes)
+        .map_err(|_| "invalid ssz")
 }
 
 /// Decodes the Amsterdam getBlobs request container with hashes and a cell index mask.
 fn decode_blob_cells_request(body: &[u8]) -> Result<(Vec<B256>, B128), &'static str> {
-    <(Vec<B256>, B128) as ssz::Decode>::from_ssz_bytes(body).map_err(|_| "invalid ssz")
+    BlobsV4Request::from_ssz_bytes(body)
+        .map(|request| (request.versioned_hashes, request.indices_bitarray))
+        .map_err(|_| "invalid ssz")
 }
 
 fn decode_new_payload_request(version: u8, body: &[u8]) -> Result<ExecutionData, &'static str> {
     match version {
         1 => {
-            let execution_payload =
-                decode_one::<ExecutionPayloadV1>(body).map_err(|_| "invalid ssz")?;
+            let ExecutionPayloadEnvelopeParis { payload: execution_payload } =
+                ExecutionPayloadEnvelopeParis::from_ssz_bytes(body).map_err(|_| "invalid ssz")?;
             Ok(ExecutionData::new(execution_payload.into(), ExecutionPayloadSidecar::none()))
         }
         2 => {
-            let execution_payload =
-                decode_one::<ExecutionPayloadV2>(body).map_err(|_| "invalid ssz")?;
+            let ExecutionPayloadEnvelopeShanghai { payload: execution_payload } =
+                ExecutionPayloadEnvelopeShanghai::from_ssz_bytes(body)
+                    .map_err(|_| "invalid ssz")?;
             Ok(ExecutionData::new(execution_payload.into(), ExecutionPayloadSidecar::none()))
         }
         3 => {
-            let (execution_payload, parent_beacon_block_root) =
-                <(ExecutionPayloadV3, B256)>::from_ssz_bytes(body).map_err(|_| "invalid ssz")?;
+            let ExecutionPayloadEnvelopeCancun {
+                payload: execution_payload,
+                parent_beacon_block_root,
+            } = ExecutionPayloadEnvelopeCancun::from_ssz_bytes(body).map_err(|_| "invalid ssz")?;
             let versioned_hashes = calculate_versioned_hashes(
                 &execution_payload.payload_inner.payload_inner.transactions,
             )?;
@@ -530,32 +788,33 @@ fn decode_new_payload_request(version: u8, body: &[u8]) -> Result<ExecutionData,
             Ok(ExecutionData::new(execution_payload.into(), sidecar))
         }
         4 => {
-            let (execution_payload, parent_beacon_block_root, execution_requests) =
-                <(ExecutionPayloadV3, B256, Vec<Bytes>)>::from_ssz_bytes(body)
-                    .map_err(|_| "invalid ssz")?;
+            let ExecutionPayloadEnvelopePrague {
+                payload: execution_payload,
+                parent_beacon_block_root,
+                execution_requests,
+            } = ExecutionPayloadEnvelopePrague::from_ssz_bytes(body).map_err(|_| "invalid ssz")?;
             let versioned_hashes = calculate_versioned_hashes(
                 &execution_payload.payload_inner.payload_inner.transactions,
             )?;
             let sidecar = ExecutionPayloadSidecar::v4(
                 CancunPayloadFields { parent_beacon_block_root, versioned_hashes },
-                PraguePayloadFields::new(RequestsOrHash::Requests(Requests::new(
-                    execution_requests,
-                ))),
+                PraguePayloadFields::new(RequestsOrHash::Requests(execution_requests)),
             );
             Ok(ExecutionData::new(execution_payload.into(), sidecar))
         }
         5 => {
-            let (execution_payload, parent_beacon_block_root, execution_requests) =
-                <(ExecutionPayloadV4, B256, Vec<Bytes>)>::from_ssz_bytes(body)
-                    .map_err(|_| "invalid ssz")?;
+            let ExecutionPayloadEnvelopeAmsterdam {
+                payload: execution_payload,
+                parent_beacon_block_root,
+                execution_requests,
+            } = ExecutionPayloadEnvelopeAmsterdam::from_ssz_bytes(body)
+                .map_err(|_| "invalid ssz")?;
             let versioned_hashes = calculate_versioned_hashes(
                 &execution_payload.payload_inner.payload_inner.payload_inner.transactions,
             )?;
             let sidecar = ExecutionPayloadSidecar::v4(
                 CancunPayloadFields { parent_beacon_block_root, versioned_hashes },
-                PraguePayloadFields::new(RequestsOrHash::Requests(Requests::new(
-                    execution_requests,
-                ))),
+                PraguePayloadFields::new(RequestsOrHash::Requests(execution_requests)),
             );
             Ok(ExecutionData::new(ExecutionPayload::V4(execution_payload), sidecar))
         }
@@ -581,84 +840,31 @@ fn decode_forkchoice_request(
     body: &[u8],
 ) -> Result<(ForkchoiceState, Option<PayloadAttributes>, Option<B128>), &'static str> {
     match version {
-        1..=3 => {
-            let (forkchoice_state, payload_attributes) =
-                <(ForkchoiceState, Vec<PayloadAttributes>)>::from_ssz_bytes(body)
-                    .map_err(|_| "invalid ssz")?;
-            Ok((forkchoice_state, payload_attrs(version, payload_attributes)?, None))
+        1 => {
+            let ForkchoiceUpdateParis { forkchoice_state, payload_attributes } =
+                ForkchoiceUpdateParis::from_ssz_bytes(body).map_err(|_| "invalid ssz")?;
+            Ok((forkchoice_state, payload_attributes.into_option().map(Into::into), None))
+        }
+        2 => {
+            let ForkchoiceUpdateShanghai { forkchoice_state, payload_attributes } =
+                ForkchoiceUpdateShanghai::from_ssz_bytes(body).map_err(|_| "invalid ssz")?;
+            Ok((forkchoice_state, payload_attributes.into_option().map(Into::into), None))
+        }
+        3 => {
+            let ForkchoiceUpdateCancun { forkchoice_state, payload_attributes } =
+                ForkchoiceUpdateCancun::from_ssz_bytes(body).map_err(|_| "invalid ssz")?;
+            Ok((forkchoice_state, payload_attributes.into_option().map(Into::into), None))
         }
         4 => {
-            let (forkchoice_state, payload_attributes, custody_columns) =
-                <(ForkchoiceState, Vec<PayloadAttributes>, Vec<B128>)>::from_ssz_bytes(body)
-                    .map_err(|_| "invalid ssz")?;
+            let ForkchoiceUpdateAmsterdam { forkchoice_state, payload_attributes, custody_columns } =
+                ForkchoiceUpdateAmsterdam::from_ssz_bytes(body).map_err(|_| "invalid ssz")?;
             Ok((
                 forkchoice_state,
-                payload_attrs(version, payload_attributes)?,
-                custody_columns_opt(custody_columns)?,
+                payload_attributes.into_option().map(Into::into),
+                custody_columns.into_option(),
             ))
         }
         _ => Err("unsupported forkchoice endpoint version"),
-    }
-}
-
-fn decode_one<T: ssz::Decode>(body: &[u8]) -> Result<T, ssz::DecodeError> {
-    let mut builder = ssz::SszDecoderBuilder::new(body);
-    builder.register_type::<T>()?;
-    let mut decoder = builder.build()?;
-    decoder.decode_next()
-}
-
-fn payload_attrs(
-    version: u8,
-    attrs: Vec<PayloadAttributes>,
-) -> Result<Option<PayloadAttributes>, &'static str> {
-    if attrs.len() > 1 {
-        return Err("payload_attributes must contain at most one value")
-    }
-
-    attrs.into_iter().next().map(|attrs| validate_payload_attrs_version(version, attrs)).transpose()
-}
-
-fn custody_columns_opt(custody_columns: Vec<B128>) -> Result<Option<B128>, &'static str> {
-    if custody_columns.len() > 1 {
-        return Err("invalid params")
-    }
-
-    Ok(custody_columns.into_iter().next())
-}
-
-fn validate_payload_attrs_version(
-    version: u8,
-    attrs: PayloadAttributes,
-) -> Result<PayloadAttributes, &'static str> {
-    let matches_version = match version {
-        1 => {
-            attrs.withdrawals.is_none() &&
-                attrs.parent_beacon_block_root.is_none() &&
-                attrs.slot_number.is_none()
-        }
-        2 => {
-            attrs.withdrawals.is_some() &&
-                attrs.parent_beacon_block_root.is_none() &&
-                attrs.slot_number.is_none()
-        }
-        3 => {
-            attrs.withdrawals.is_some() &&
-                attrs.parent_beacon_block_root.is_some() &&
-                attrs.slot_number.is_none()
-        }
-        4 => {
-            attrs.withdrawals.is_some() &&
-                attrs.parent_beacon_block_root.is_some() &&
-                attrs.slot_number.is_some()
-        }
-        _ => false,
-    };
-
-    if matches_version {
-        Ok(attrs)
-    } else {
-        Err("payload_attributes version does not match endpoint")
     }
 }
 
@@ -724,14 +930,31 @@ mod tests {
     }
 
     #[test]
+    fn parses_payload_bodies_endpoints() {
+        let endpoint = parse_engine_path("/engine/v1/bodies/hash").unwrap();
+        assert_eq!(endpoint, EngineSszEndpoint::BodiesHash);
+
+        let endpoint = parse_engine_path("/engine/v1/bodies").unwrap();
+        assert_eq!(endpoint, EngineSszEndpoint::BodiesRange);
+    }
+
+    #[test]
     fn rejects_legacy_version_scoped_endpoint() {
         assert!(parse_engine_path("/engine/v4/payloads").is_none());
     }
 
     #[test]
+    fn parses_bodies_range_query() {
+        assert_eq!(parse_bodies_range_query(Some("from=12&count=3")).unwrap(), (12, 3));
+        assert!(parse_bodies_range_query(Some("from=12")).is_err());
+        assert!(parse_bodies_range_query(Some("from=12&count=33")).is_err());
+    }
+
+    #[test]
     fn decodes_top_level_blob_hashes_request() {
         let hashes = vec![B256::ZERO, B256::with_last_byte(1)];
-        let decoded = decode_blob_hashes_request(&hashes.as_ssz_bytes()).unwrap();
+        let request = BlobsV1Request { versioned_hashes: hashes.clone() };
+        let decoded = decode_blob_hashes_request(&request.as_ssz_bytes()).unwrap();
         assert_eq!(decoded, hashes);
     }
 
@@ -742,32 +965,18 @@ mod tests {
             safe_block_hash: B256::ZERO,
             finalized_block_hash: B256::ZERO,
         };
-        let encoded =
-            (forkchoice_state, Vec::<PayloadAttributes>::new(), vec![B128::with_last_byte(1)])
-                .as_ssz_bytes();
+        let request = ForkchoiceUpdateAmsterdam {
+            forkchoice_state,
+            payload_attributes: crate::engine_ssz_containers::Optional::<
+                crate::engine_ssz_containers::PayloadAttributesAmsterdam,
+            >::none(),
+            custody_columns: crate::engine_ssz_containers::Optional::some(B128::with_last_byte(1)),
+        };
 
         let (decoded_state, decoded_attrs, custody_columns) =
-            decode_forkchoice_request(4, &encoded).unwrap();
+            decode_forkchoice_request(4, &request.as_ssz_bytes()).unwrap();
         assert_eq!(decoded_state, forkchoice_state);
         assert!(decoded_attrs.is_none());
         assert_eq!(custody_columns, Some(B128::with_last_byte(1)));
-    }
-
-    #[test]
-    fn rejects_forkchoice_v4_with_multiple_custody_columns() {
-        let forkchoice_state = ForkchoiceState {
-            head_block_hash: B256::ZERO,
-            safe_block_hash: B256::ZERO,
-            finalized_block_hash: B256::ZERO,
-        };
-        let encoded = (
-            forkchoice_state,
-            Vec::<PayloadAttributes>::new(),
-            vec![B128::ZERO, B128::with_last_byte(1)],
-        )
-            .as_ssz_bytes();
-
-        let err = decode_forkchoice_request(4, &encoded).unwrap_err();
-        assert_eq!(err, "invalid params");
     }
 }
