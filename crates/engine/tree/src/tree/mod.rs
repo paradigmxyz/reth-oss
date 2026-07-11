@@ -6,6 +6,7 @@ use crate::{
     tree::{error::InsertPayloadError, payload_validator::TreeCtx},
 };
 use alloy_consensus::BlockHeader;
+use alloy_eip8289::{WamItems, WarmAccessMultiset, WARMING_WINDOW};
 use alloy_eips::{eip1898::BlockWithParent, merge::EPOCH_SLOTS, BlockNumHash, NumHash};
 use alloy_primitives::{map::B256Map, B256};
 use alloy_rpc_types_engine::{
@@ -39,7 +40,7 @@ use reth_stages_api::ControlFlow;
 use reth_tasks::{spawn_os_thread, utils::increase_thread_priority};
 use reth_trie::{prefix_set::TriePrefixSetsMut, ComputedTrieData};
 use reth_trie_db::ChangesetCache;
-use revm::interpreter::debug_unreachable;
+use revm::{interpreter::debug_unreachable, primitives::hardfork::SpecId};
 use state::TreeState;
 use std::{fmt::Debug, ops, sync::Arc, time::Duration};
 
@@ -64,6 +65,7 @@ pub mod state_root_strategy;
 mod tests;
 mod trie_updates;
 pub mod types;
+pub(crate) mod warm_access;
 
 use crate::{persistence::PersistenceResult, tree::error::AdvancePersistenceError};
 pub use block_buffer::BlockBuffer;
@@ -393,7 +395,7 @@ where
     ) -> Self {
         let (incoming_tx, incoming) = crossbeam_channel::unbounded();
 
-        Self {
+        let mut this = Self {
             provider,
             consensus,
             payload_validator,
@@ -415,7 +417,13 @@ where
             building_payload: false,
             pending_sparse_trie_prune: None,
             runtime,
-        }
+        };
+
+        let canonical_head = this.state.tree_state.current_canonical_head;
+        this.update_canonical_warm_accesses(canonical_head)
+            .expect("failed to initialize canonical WAM from provider BAL history");
+
+        this
     }
 
     /// Creates a new [`EngineApiTreeHandler`] instance and spawns it in its
@@ -501,6 +509,157 @@ where
             .tree_state
             .canonical_block_number()
             .saturating_sub(self.persistence_state.last_persisted_block.number)
+    }
+
+    fn reconstruct_warm_accesses(
+        &self,
+        tip: BlockNumHash,
+    ) -> ProviderResult<(WarmAccessMultiset, u64)> {
+        let mut warm_accesses = WarmAccessMultiset::default();
+        let mut depth = 0;
+        let start = tip.number.saturating_sub(WARMING_WINDOW.saturating_sub(1));
+
+        for number in start..=tip.number {
+            let hash = if number == tip.number {
+                Some(tip.hash)
+            } else {
+                // After restart/reset, the tree can be empty; the provider fallback is the
+                // recoverable canonical history path for the warming window.
+                self.state.tree_state.block_hash_on_chain(tip.hash, number, |number| {
+                    self.provider.block_hash(number).ok().flatten()
+                })
+            };
+            let Some(hash) = hash else {
+                return Err(Self::missing_canonical_hash_error(number, tip))
+            };
+
+            let Some(bal) = self.provider.bal_store().get_decoded_by_hash(hash)? else {
+                if self.block_has_bal_hash(hash)? {
+                    return Err(Self::missing_expected_bal_error(number, hash))
+                }
+                continue;
+            };
+            let items = WamItems::from_accounts(bal.as_bal().as_slice());
+            warm_accesses.apply_item_transition(&items, None);
+            depth += 1;
+        }
+
+        Ok((warm_accesses, depth))
+    }
+
+    fn block_has_bal_hash(&self, hash: B256) -> ProviderResult<bool> {
+        if let Some(header) = self.state.tree_state.sealed_header_by_hash(&hash) {
+            return Ok(header.block_access_list_hash().is_some())
+        }
+
+        let canonical_head = self.canonical_in_memory_state.get_canonical_head();
+        if canonical_head.hash() == hash {
+            return Ok(canonical_head.block_access_list_hash().is_some())
+        }
+
+        self.provider
+            .header(hash)?
+            .ok_or(ProviderError::HeaderNotFound(hash.into()))
+            .map(|header| header.block_access_list_hash().is_some())
+    }
+
+    fn is_bogota_active_at(&self, tip: BlockNumHash) -> ProviderResult<bool> {
+        let canonical_head = self.canonical_in_memory_state.get_canonical_head();
+        let header = if canonical_head.hash() == tip.hash {
+            canonical_head
+        } else if let Some(header) = self.state.tree_state.sealed_header_by_hash(&tip.hash) {
+            header.clone()
+        } else {
+            let header = self
+                .provider
+                .header(tip.hash)?
+                .ok_or(ProviderError::HeaderNotFound(tip.hash.into()))?;
+            SealedHeader::new(header, tip.hash)
+        };
+
+        let evm_env = self.evm_config.evm_env(header.header()).map_err(ProviderError::other)?;
+        Ok(Into::<SpecId>::into(*evm_env.spec_id()).is_enabled_in(SpecId::BOGOTA))
+    }
+
+    fn missing_expected_bal_error(number: u64, hash: B256) -> ProviderError {
+        ProviderError::other(std::io::Error::other(format!(
+            "missing expected BAL for block #{number} ({hash})"
+        )))
+    }
+
+    fn missing_canonical_hash_error(number: u64, tip: BlockNumHash) -> ProviderError {
+        ProviderError::other(std::io::Error::other(format!(
+            "failed to resolve canonical block #{number} while reconstructing WAM for tip {:?}",
+            tip
+        )))
+    }
+
+    fn update_canonical_warm_accesses(&mut self, tip: BlockNumHash) -> ProviderResult<()> {
+        if !self.is_bogota_active_at(tip)? {
+            self.state.tree_state.set_warm_accesses(WarmAccessMultiset::default(), 0);
+            return Ok(())
+        }
+
+        let (warm_accesses, depth) = self.reconstruct_warm_accesses(tip)?;
+        self.state.tree_state.set_warm_accesses(warm_accesses, depth);
+        Ok(())
+    }
+
+    fn advance_canonical_warm_accesses(
+        &mut self,
+        new_blocks: &[ExecutedBlock<N>],
+    ) -> ProviderResult<()> {
+        for block in new_blocks {
+            let num_hash = block.recovered_block().num_hash();
+            if !self.is_bogota_active_at(num_hash)? {
+                self.state.tree_state.set_warm_accesses(WarmAccessMultiset::default(), 0);
+                continue
+            }
+
+            let Some(add_bal) = self.provider.bal_store().get_decoded_by_hash(num_hash.hash)?
+            else {
+                if block.recovered_block().header().block_access_list_hash().is_some() {
+                    return Err(Self::missing_expected_bal_error(num_hash.number, num_hash.hash))
+                }
+                continue;
+            };
+            let add = WamItems::from_accounts(add_bal.as_bal().as_slice());
+
+            let previous_depth = self.state.tree_state.warm_access_depth;
+            let leaving_items = if previous_depth >= WARMING_WINDOW {
+                let Some(number) = num_hash.number.checked_sub(WARMING_WINDOW) else { continue };
+                let Some(hash) = self.state.tree_state.block_hash_on_chain(
+                    block.recovered_block().parent_hash(),
+                    number,
+                    |number| self.provider.block_hash(number).ok().flatten(),
+                ) else {
+                    return self.update_canonical_warm_accesses(num_hash)
+                };
+
+                match self.provider.bal_store().get_decoded_by_hash(hash)? {
+                    Some(bal) => Some(WamItems::from_accounts(bal.as_bal().as_slice())),
+                    None if self.block_has_bal_hash(hash)? => {
+                        return Err(Self::missing_expected_bal_error(number, hash))
+                    }
+                    None => {
+                        warn!(target: "engine::tree", ?number, ?hash, "Leaving pre-BAL block has no BAL; rebuilding WAM");
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
+            if previous_depth >= WARMING_WINDOW && leaving_items.is_none() {
+                return self.update_canonical_warm_accesses(num_hash);
+            }
+
+            self.state.tree_state.warm_accesses.apply_item_transition(&add, leaving_items.as_ref());
+            self.state.tree_state.warm_access_depth =
+                previous_depth.saturating_add(1).min(WARMING_WINDOW);
+        }
+
+        Ok(())
     }
 
     /// Returns `true` when the main loop should stop draining the tree input channel.
@@ -974,6 +1133,7 @@ where
 
         // Update tree state with the new canonical head
         self.state.tree_state.set_canonical_head(canonical_header.num_hash());
+        self.update_canonical_warm_accesses(canonical_header.num_hash())?;
 
         // Handle the state update based on whether this is an unwind scenario
         if new_head_number < current_head_number {
@@ -1305,7 +1465,7 @@ where
         // Ensure we can apply a new chain update for the head block
         if let Some(chain_update) = self.on_new_head(state.head_block_hash)? {
             let tip = chain_update.tip().clone_sealed_header();
-            self.on_canonical_chain_update(chain_update);
+            self.on_canonical_chain_update(chain_update)?;
 
             // Update the safe and finalized blocks and ensure their values are valid
             if let Err(outcome) = self.ensure_consistent_forkchoice_state(state) {
@@ -1840,6 +2000,7 @@ where
             // update the tracked chain height, after backfill sync both the canonical height and
             // persisted height are the same
             self.state.tree_state.set_canonical_head(new_head.num_hash());
+            self.update_canonical_warm_accesses(new_head.num_hash())?;
             self.persistence_state.finish(new_head.hash(), new_head.number());
 
             // update the tracked canonical head
@@ -1929,7 +2090,7 @@ where
     /// This will update the tracked canonical in memory state and do the necessary housekeeping.
     fn make_canonical(&mut self, target: B256) -> ProviderResult<()> {
         if let Some(chain_update) = self.on_new_head(target)? {
-            self.on_canonical_chain_update(chain_update);
+            self.on_canonical_chain_update(chain_update)?;
         }
 
         self.on_canonicalized_sync_target(target);
@@ -2684,12 +2845,21 @@ where
     /// Invoked when we the canonical chain has been updated.
     ///
     /// This is invoked on a valid forkchoice update, or if we can make the target block canonical.
-    fn on_canonical_chain_update(&mut self, chain_update: NewCanonicalChain<N>) {
+    fn on_canonical_chain_update(
+        &mut self,
+        chain_update: NewCanonicalChain<N>,
+    ) -> ProviderResult<()> {
         trace!(target: "engine::tree", new_blocks = %chain_update.new_block_count(), reorged_blocks =  %chain_update.reorged_block_count(), "applying new chain update");
         let start = Instant::now();
 
         // update the tracked canonical head
         self.state.tree_state.set_canonical_head(chain_update.tip().num_hash());
+        match &chain_update {
+            NewCanonicalChain::Commit { new } => self.advance_canonical_warm_accesses(new),
+            NewCanonicalChain::Reorg { .. } => {
+                self.update_canonical_warm_accesses(chain_update.tip().num_hash())
+            }
+        }?;
 
         let tip = chain_update.tip().clone_sealed_header();
         let notification = chain_update.to_chain_notification();
@@ -2721,6 +2891,8 @@ where
             Box::new(tip),
             start.elapsed(),
         ));
+
+        Ok(())
     }
 
     /// This updates metrics based on the given reorg length and first reorged block number.
@@ -3026,6 +3198,7 @@ where
             executed_block: executed,
             execution_timing_stats: timing_stats,
             raw_bal,
+            wam_items: _,
         } = execute(&mut self.payload_validator, input, ctx)?;
 
         if let Some(raw_bal) = raw_bal {
