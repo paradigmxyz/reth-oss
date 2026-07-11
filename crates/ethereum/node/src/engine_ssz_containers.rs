@@ -6,10 +6,18 @@
 //! [execution-apis PR #793](https://github.com/ethereum/execution-apis/pull/793), plus the
 //! experimental payload-with-witness response type that extends the same REST-SSZ model.
 
-use alloy_eips::{eip4895::Withdrawal, eip7685::Requests};
+use alloy_eips::{
+    eip4844::{Blob, Bytes48},
+    eip4895::Withdrawal,
+    eip7594::Cell,
+    eip7685::Requests,
+};
 use alloy_primitives::{Address, B128, B256, U256};
 use alloy_rpc_types_engine::{
-    BlobsBundleV1, BlobsBundleV2, ExecutionPayloadEnvelopeV2 as LegacyBuiltPayloadShanghai,
+    BlobAndProofV1, BlobAndProofV2, BlobsBundleV1, BlobsBundleV2,
+    ExecutionPayloadBodyV1 as LegacyExecutionPayloadBodyV1,
+    ExecutionPayloadBodyV2 as LegacyExecutionPayloadBodyV2,
+    ExecutionPayloadEnvelopeV2 as LegacyBuiltPayloadShanghai,
     ExecutionPayloadEnvelopeV4 as LegacyBuiltPayloadPrague,
     ExecutionPayloadEnvelopeV5 as LegacyBuiltPayloadOsaka,
     ExecutionPayloadEnvelopeV6 as LegacyBuiltPayloadAmsterdam, ExecutionPayloadFieldV2,
@@ -97,6 +105,330 @@ impl<T: ssz::Decode> ssz::Decode for Optional<T> {
         }
         Ok(Self(values))
     }
+}
+
+/// Paris historical payload body.
+#[derive(Clone, Debug, Default, PartialEq, Eq, ssz_derive::Encode, ssz_derive::Decode)]
+pub struct ExecutionPayloadBodyParis {
+    /// Enveloped encoded transactions.
+    pub transactions: Vec<alloy_primitives::Bytes>,
+}
+
+/// Shanghai historical payload body.
+#[derive(Clone, Debug, Default, PartialEq, Eq, ssz_derive::Encode, ssz_derive::Decode)]
+pub struct ExecutionPayloadBodyShanghai {
+    /// Enveloped encoded transactions.
+    pub transactions: Vec<alloy_primitives::Bytes>,
+    /// Withdrawals included in the block.
+    pub withdrawals: Vec<Withdrawal>,
+}
+
+/// Cancun uses the Shanghai historical payload body schema.
+pub type ExecutionPayloadBodyCancun = ExecutionPayloadBodyShanghai;
+/// Prague uses the Shanghai historical payload body schema.
+pub type ExecutionPayloadBodyPrague = ExecutionPayloadBodyShanghai;
+/// Osaka uses the Shanghai historical payload body schema.
+pub type ExecutionPayloadBodyOsaka = ExecutionPayloadBodyShanghai;
+
+/// Error converting a legacy payload body into a fork-specific body.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PayloadBodyConversionError {
+    /// A required fork field was absent.
+    MissingField(&'static str),
+    /// A later-fork field would be discarded.
+    UnexpectedField(&'static str),
+}
+
+impl core::fmt::Display for PayloadBodyConversionError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::MissingField(field) => write!(f, "missing required payload body field: {field}"),
+            Self::UnexpectedField(field) => write!(f, "unexpected payload body field: {field}"),
+        }
+    }
+}
+
+impl core::error::Error for PayloadBodyConversionError {}
+
+impl TryFrom<LegacyExecutionPayloadBodyV1> for ExecutionPayloadBodyParis {
+    type Error = PayloadBodyConversionError;
+
+    fn try_from(value: LegacyExecutionPayloadBodyV1) -> Result<Self, Self::Error> {
+        if value.withdrawals.is_some() {
+            return Err(PayloadBodyConversionError::UnexpectedField("withdrawals"))
+        }
+        Ok(Self { transactions: value.transactions })
+    }
+}
+
+impl TryFrom<LegacyExecutionPayloadBodyV1> for ExecutionPayloadBodyShanghai {
+    type Error = PayloadBodyConversionError;
+
+    fn try_from(value: LegacyExecutionPayloadBodyV1) -> Result<Self, Self::Error> {
+        Ok(Self {
+            transactions: value.transactions,
+            withdrawals: value
+                .withdrawals
+                .ok_or(PayloadBodyConversionError::MissingField("withdrawals"))?,
+        })
+    }
+}
+
+impl TryFrom<LegacyExecutionPayloadBodyV2> for ExecutionPayloadBodyAmsterdam {
+    type Error = PayloadBodyConversionError;
+
+    fn try_from(value: LegacyExecutionPayloadBodyV2) -> Result<Self, Self::Error> {
+        Ok(Self {
+            transactions: value.transactions,
+            withdrawals: value
+                .withdrawals
+                .ok_or(PayloadBodyConversionError::MissingField("withdrawals"))?,
+            block_access_list: value
+                .block_access_list
+                .ok_or(PayloadBodyConversionError::MissingField("block_access_list"))?,
+        })
+    }
+}
+
+/// Amsterdam historical payload body.
+#[derive(Clone, Debug, Default, PartialEq, Eq, ssz_derive::Encode, ssz_derive::Decode)]
+pub struct ExecutionPayloadBodyAmsterdam {
+    /// Enveloped encoded transactions.
+    pub transactions: Vec<alloy_primitives::Bytes>,
+    /// Withdrawals included in the block.
+    pub withdrawals: Vec<Withdrawal>,
+    /// RLP-encoded block access list.
+    pub block_access_list: alloy_primitives::Bytes,
+}
+
+/// A historical payload body response entry with explicit availability.
+#[derive(Clone, Debug, PartialEq, Eq, ssz_derive::Encode, ssz_derive::Decode)]
+pub struct BodyEntry<T> {
+    /// Whether the body is available.
+    pub available: bool,
+    /// Body contents, ignored when unavailable.
+    pub body: T,
+}
+
+impl<T> BodyEntry<T> {
+    /// Creates an available body entry.
+    pub const fn available(body: T) -> Self {
+        Self { available: true, body }
+    }
+}
+
+impl<T: Default> BodyEntry<T> {
+    /// Creates an unavailable body entry.
+    pub fn unavailable() -> Self {
+        Self { available: false, body: T::default() }
+    }
+}
+
+/// Bounded historical payload body response.
+#[derive(Clone, Debug, PartialEq, Eq, ssz_derive::Encode, ssz_derive::Decode)]
+pub struct BodiesResponse<T> {
+    /// Body entries in request or range order.
+    pub entries: Vec<BodyEntry<T>>,
+}
+
+/// Error converting a historical body response.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BodiesResponseConversionError {
+    /// More than the REST-SSZ maximum number of entries was returned.
+    TooManyEntries,
+}
+
+impl core::fmt::Display for BodiesResponseConversionError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::TooManyEntries => f.write_str("too many payload body entries"),
+        }
+    }
+}
+
+impl core::error::Error for BodiesResponseConversionError {}
+
+impl<T: Default> BodiesResponse<T> {
+    /// Converts legacy optional bodies into fork-specific response entries.
+    pub fn from_optional_bodies<LegacyBody>(
+        bodies: Vec<Option<LegacyBody>>,
+        convert: impl Fn(LegacyBody) -> Option<T>,
+    ) -> Result<Self, BodiesResponseConversionError> {
+        if bodies.len() > 32 {
+            return Err(BodiesResponseConversionError::TooManyEntries)
+        }
+        Ok(Self {
+            entries: bodies
+                .into_iter()
+                .map(|body| match body.and_then(&convert) {
+                    Some(body) => BodyEntry::available(body),
+                    None => BodyEntry::unavailable(),
+                })
+                .collect(),
+        })
+    }
+}
+
+/// Paris historical bodies response.
+pub type BodiesResponseParis = BodiesResponse<ExecutionPayloadBodyParis>;
+/// Shanghai historical bodies response.
+pub type BodiesResponseShanghai = BodiesResponse<ExecutionPayloadBodyShanghai>;
+/// Cancun historical bodies response.
+pub type BodiesResponseCancun = BodiesResponse<ExecutionPayloadBodyCancun>;
+/// Prague historical bodies response.
+pub type BodiesResponsePrague = BodiesResponse<ExecutionPayloadBodyPrague>;
+/// Osaka historical bodies response.
+pub type BodiesResponseOsaka = BodiesResponse<ExecutionPayloadBodyOsaka>;
+/// Amsterdam historical bodies response.
+pub type BodiesResponseAmsterdam = BodiesResponse<ExecutionPayloadBodyAmsterdam>;
+
+/// REST-SSZ request for historical bodies by hash.
+#[derive(Clone, Debug, PartialEq, Eq, ssz_derive::Encode, ssz_derive::Decode)]
+pub struct BodiesByHashRequest {
+    /// Requested block hashes.
+    pub block_hashes: Vec<B256>,
+}
+
+/// A blob response entry with explicit availability.
+#[derive(Clone, Debug, PartialEq, Eq, ssz_derive::Encode, ssz_derive::Decode)]
+pub struct BlobEntry<T> {
+    /// Whether the contents are available.
+    pub available: bool,
+    /// Contents, zero-valued when unavailable.
+    pub contents: T,
+}
+
+/// Bounded blob response.
+#[derive(Clone, Debug, PartialEq, Eq, ssz_derive::Encode, ssz_derive::Decode)]
+pub struct BlobsResponse<T> {
+    /// One response entry per requested hash.
+    pub entries: Vec<BlobEntry<T>>,
+}
+
+/// Whole-blob response.
+pub type BlobsV1Response = BlobsResponse<BlobAndProofV1>;
+/// All-or-nothing cell-proof response.
+pub type BlobsV2Response = BlobsResponse<BlobAndProofV2>;
+/// Partial cell-proof response.
+pub type BlobsV3Response = BlobsResponse<BlobAndProofV2>;
+/// Partial cell-range response.
+pub type BlobsV4Response = BlobsResponse<BlobCellsAndProofs>;
+
+impl<T> BlobsResponse<T> {
+    fn from_entries(entries: Vec<BlobEntry<T>>) -> Result<Self, BlobResponseConversionError> {
+        if entries.len() > 128 {
+            return Err(BlobResponseConversionError::TooManyEntries)
+        }
+        Ok(Self { entries })
+    }
+}
+
+/// Error converting a blob response.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BlobResponseConversionError {
+    /// More than the REST-SSZ maximum number of entries was returned.
+    TooManyEntries,
+}
+
+impl core::fmt::Display for BlobResponseConversionError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::TooManyEntries => f.write_str("too many blob entries"),
+        }
+    }
+}
+
+impl core::error::Error for BlobResponseConversionError {}
+
+impl TryFrom<Vec<Option<BlobAndProofV1>>> for BlobsV1Response {
+    type Error = BlobResponseConversionError;
+
+    fn try_from(value: Vec<Option<BlobAndProofV1>>) -> Result<Self, Self::Error> {
+        let entries = value
+            .into_iter()
+            .map(|value| match value {
+                Some(contents) => BlobEntry { available: true, contents },
+                None => BlobEntry {
+                    available: false,
+                    contents: BlobAndProofV1 { blob: Box::new(Blob::ZERO), proof: Bytes48::ZERO },
+                },
+            })
+            .collect();
+        Self::from_entries(entries)
+    }
+}
+
+impl TryFrom<Vec<BlobAndProofV2>> for BlobsV2Response {
+    type Error = BlobResponseConversionError;
+
+    fn try_from(value: Vec<BlobAndProofV2>) -> Result<Self, Self::Error> {
+        Self::from_entries(
+            value.into_iter().map(|contents| BlobEntry { available: true, contents }).collect(),
+        )
+    }
+}
+
+impl TryFrom<Vec<Option<BlobAndProofV2>>> for BlobsV3Response {
+    type Error = BlobResponseConversionError;
+
+    fn try_from(value: Vec<Option<BlobAndProofV2>>) -> Result<Self, Self::Error> {
+        let entries = value
+            .into_iter()
+            .map(|value| match value {
+                Some(contents) => BlobEntry { available: true, contents },
+                None => BlobEntry {
+                    available: false,
+                    contents: BlobAndProofV2 { blob: Box::new(Blob::ZERO), proofs: Vec::new() },
+                },
+            })
+            .collect();
+        Self::from_entries(entries)
+    }
+}
+
+/// Blob cells and proofs with REST-SSZ optional positions.
+#[derive(Clone, Debug, Default, PartialEq, Eq, ssz_derive::Encode, ssz_derive::Decode)]
+pub struct BlobCellsAndProofs {
+    /// Requested blob cells.
+    pub blob_cells: Vec<Optional<Cell>>,
+    /// Proofs for the requested cells.
+    pub proofs: Vec<Optional<Bytes48>>,
+}
+
+impl TryFrom<Vec<Option<BlobCellsAndProofs>>> for BlobsV4Response {
+    type Error = BlobResponseConversionError;
+
+    fn try_from(value: Vec<Option<BlobCellsAndProofs>>) -> Result<Self, Self::Error> {
+        let entries = value
+            .into_iter()
+            .map(|value| match value {
+                Some(contents) => BlobEntry { available: true, contents },
+                None => BlobEntry { available: false, contents: BlobCellsAndProofs::default() },
+            })
+            .collect();
+        Self::from_entries(entries)
+    }
+}
+
+/// V1-V3 blob request container.
+#[derive(Clone, Debug, PartialEq, Eq, ssz_derive::Encode, ssz_derive::Decode)]
+pub struct BlobsV1Request {
+    /// Requested versioned hashes.
+    pub versioned_hashes: Vec<B256>,
+}
+
+/// V2 uses the V1 request schema.
+pub type BlobsV2Request = BlobsV1Request;
+/// V3 uses the V1 request schema.
+pub type BlobsV3Request = BlobsV1Request;
+
+/// V4 blob request container.
+#[derive(Clone, Debug, PartialEq, Eq, ssz_derive::Encode, ssz_derive::Decode)]
+pub struct BlobsV4Request {
+    /// Requested versioned hashes.
+    pub versioned_hashes: Vec<B256>,
+    /// Requested cell indices.
+    pub indices_bitarray: B128,
 }
 
 /// Engine API v2 REST-SSZ payload status.
