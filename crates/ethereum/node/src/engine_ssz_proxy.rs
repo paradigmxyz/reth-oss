@@ -20,11 +20,12 @@ use alloy_rpc_types_engine::{
     CancunPayloadFields, ExecutionData, ExecutionPayload, ExecutionPayloadFieldV2,
     ExecutionPayloadSidecar, ForkchoiceState, PayloadAttributes, PayloadId, PraguePayloadFields,
 };
-use http_body_util::BodyExt;
+use http_body_util::{BodyExt, LengthLimitError, Limited};
 use jsonrpsee::server::{HttpBody, HttpRequest, HttpResponse};
 use reth_chainspec::EthereumHardforks;
-use reth_engine_primitives::EngineApiValidator;
+use reth_engine_primitives::{BeaconForkChoiceUpdateError, EngineApiValidator};
 use reth_ethereum_engine_primitives::EthEngineTypes;
+use reth_payload_primitives::EngineObjectValidationError;
 use reth_provider::{BalProvider, BlockReader, HeaderProvider, StateProviderFactory};
 use reth_rpc::EngineApi;
 use reth_rpc_engine_api::EngineApiError;
@@ -41,15 +42,32 @@ use tower::{BoxError, Layer, Service};
 
 const OCTET_STREAM: &str = "application/octet-stream";
 const APPLICATION_JSON: &str = "application/json";
-const TEXT_PLAIN: &str = "text/plain";
+const PROBLEM_JSON: &str = "application/problem+json";
 const CONTENT_TYPE: &str = "content-type";
+const CONTENT_LENGTH: &str = "content-length";
 const CACHE_CONTROL: &str = "cache-control";
 const ETH_EXECUTION_VERSION: &str = "eth-execution-version";
+
+const ERROR_INVALID_REQUEST: &str = "/engine-api/errors/invalid-request";
+const ERROR_SSZ_DECODE: &str = "/engine-api/errors/ssz-decode-error";
+const ERROR_INVALID_BODY: &str = "/engine-api/errors/invalid-body";
+const ERROR_INVALID_ATTRIBUTES: &str = "/engine-api/errors/invalid-attributes";
+const ERROR_INVALID_FORKCHOICE: &str = "/engine-api/errors/invalid-forkchoice";
+const ERROR_REQUEST_TOO_LARGE: &str = "/engine-api/errors/request-too-large";
+const ERROR_UNSUPPORTED_FORK: &str = "/engine-api/errors/unsupported-fork";
+const ERROR_UNSUPPORTED_MEDIA_TYPE: &str = "/engine-api/errors/unsupported-media-type";
+const ERROR_UNKNOWN_PAYLOAD: &str = "/engine-api/errors/unknown-payload";
+const ERROR_INTERNAL: &str = "/engine-api/errors/internal";
+const ERROR_NOT_FOUND: &str = "/engine-api/errors/not-found";
 
 const STATUS_OK: u16 = 200;
 const STATUS_BAD_REQUEST: u16 = 400;
 const STATUS_NOT_FOUND: u16 = 404;
 const STATUS_METHOD_NOT_ALLOWED: u16 = 405;
+const STATUS_CONFLICT: u16 = 409;
+const STATUS_PAYLOAD_TOO_LARGE: u16 = 413;
+const STATUS_UNSUPPORTED_MEDIA_TYPE: u16 = 415;
+const STATUS_UNPROCESSABLE_ENTITY: u16 = 422;
 const STATUS_INTERNAL_SERVER_ERROR: u16 = 500;
 const STATUS_SERVICE_UNAVAILABLE: u16 = 503;
 
@@ -203,79 +221,90 @@ where
     let method = request.method().as_str().to_owned();
     let path = request.uri().path().to_owned();
     let Some(endpoint) = parse_engine_path(&path) else {
-        return text_response(STATUS_NOT_FOUND, "unknown engine ssz endpoint")
+        return problem_response(
+            STATUS_NOT_FOUND,
+            ERROR_NOT_FOUND,
+            Some("unknown engine ssz endpoint".into()),
+        )
     };
 
     match endpoint {
         EngineSszEndpoint::Capabilities => {
             if method != "GET" {
-                return text_response(STATUS_METHOD_NOT_ALLOWED, "method not allowed")
+                return method_not_allowed_response()
             }
             handle_capabilities()
         }
         EngineSszEndpoint::Identity => {
             if method != "GET" {
-                return text_response(STATUS_METHOD_NOT_ALLOWED, "method not allowed")
+                return method_not_allowed_response()
             }
             let Some(engine_api) = handle.engine_api().await else {
-                return text_response(STATUS_SERVICE_UNAVAILABLE, "engine api unavailable")
+                return internal_response(STATUS_SERVICE_UNAVAILABLE, "engine api unavailable")
             };
             handle_identity(engine_api)
         }
         EngineSszEndpoint::NewPayload => {
             if method != "POST" {
-                return text_response(STATUS_METHOD_NOT_ALLOWED, "method not allowed")
+                return method_not_allowed_response()
             }
             let Some(fork) = request_fork(&request) else {
-                return text_response(STATUS_BAD_REQUEST, "unsupported fork")
+                return problem_response(STATUS_BAD_REQUEST, ERROR_UNSUPPORTED_FORK, None)
             };
-            let Ok(body) = request.into_body().collect().await.map(|body| body.to_bytes()) else {
-                return text_response(STATUS_BAD_REQUEST, "failed to read request body")
+            let body = match read_ssz_body(request, MAX_PAYLOAD_BYTES).await {
+                Ok(body) => body,
+                Err(response) => return response,
             };
             let Some(engine_api) = handle.engine_api().await else {
-                return text_response(STATUS_SERVICE_UNAVAILABLE, "engine api unavailable")
+                return internal_response(STATUS_SERVICE_UNAVAILABLE, "engine api unavailable")
             };
             handle_new_payload(engine_api, fork, &body).await
         }
         EngineSszEndpoint::GetPayload(payload_id) => {
             if method != "GET" {
-                return text_response(STATUS_METHOD_NOT_ALLOWED, "method not allowed")
+                return method_not_allowed_response()
             }
             let Ok(payload_id) = payload_id else {
-                return text_response(STATUS_BAD_REQUEST, "invalid payload id")
+                return problem_response(
+                    STATUS_BAD_REQUEST,
+                    ERROR_INVALID_REQUEST,
+                    Some("invalid payload id".into()),
+                )
             };
             let Some(fork) = request_fork(&request) else {
-                return text_response(STATUS_BAD_REQUEST, "unsupported fork")
+                return problem_response(STATUS_BAD_REQUEST, ERROR_UNSUPPORTED_FORK, None)
             };
             let Some(engine_api) = handle.engine_api().await else {
-                return text_response(STATUS_SERVICE_UNAVAILABLE, "engine api unavailable")
+                return internal_response(STATUS_SERVICE_UNAVAILABLE, "engine api unavailable")
             };
             handle_get_payload(engine_api, fork, payload_id).await
         }
         EngineSszEndpoint::Forkchoice => {
             if method != "POST" {
-                return text_response(STATUS_METHOD_NOT_ALLOWED, "method not allowed")
+                return method_not_allowed_response()
             }
             let Some(fork) = request_fork(&request) else {
-                return text_response(STATUS_BAD_REQUEST, "unsupported fork")
+                return problem_response(STATUS_BAD_REQUEST, ERROR_UNSUPPORTED_FORK, None)
             };
-            let Ok(body) = request.into_body().collect().await.map(|body| body.to_bytes()) else {
-                return text_response(STATUS_BAD_REQUEST, "failed to read request body")
+            let body = match read_ssz_body(request, MAX_PAYLOAD_BYTES).await {
+                Ok(body) => body,
+                Err(response) => return response,
             };
             let Some(engine_api) = handle.engine_api().await else {
-                return text_response(STATUS_SERVICE_UNAVAILABLE, "engine api unavailable")
+                return internal_response(STATUS_SERVICE_UNAVAILABLE, "engine api unavailable")
             };
             handle_forkchoice_updated(engine_api, fork, &body).await
         }
         EngineSszEndpoint::Blobs(version) => {
             if method != "POST" {
-                return text_response(STATUS_METHOD_NOT_ALLOWED, "method not allowed")
+                return method_not_allowed_response()
             }
-            let Ok(body) = request.into_body().collect().await.map(|body| body.to_bytes()) else {
-                return text_response(STATUS_BAD_REQUEST, "failed to read request body")
+            let body = match read_ssz_body(request, MAX_PAYLOAD_BYTES).await {
+                Ok(body) => body,
+                Err(response) => return response,
             };
             let Some(engine_api) = handle.engine_api().await else {
-                return text_response(STATUS_SERVICE_UNAVAILABLE, "engine api unavailable")
+                return internal_response(STATUS_SERVICE_UNAVAILABLE, "engine api unavailable")
             };
             handle_get_blobs(engine_api, version, &body).await
         }
@@ -369,8 +398,178 @@ impl std::str::FromStr for EngineSszFork {
     }
 }
 
+fn fork_at_timestamp<ChainSpec: EthereumHardforks>(
+    chain_spec: &ChainSpec,
+    timestamp: u64,
+) -> EngineSszFork {
+    if chain_spec.is_amsterdam_active_at_timestamp(timestamp) {
+        EngineSszFork::Amsterdam
+    } else if chain_spec.is_osaka_active_at_timestamp(timestamp) {
+        EngineSszFork::Osaka
+    } else if chain_spec.is_prague_active_at_timestamp(timestamp) {
+        EngineSszFork::Prague
+    } else if chain_spec.is_cancun_active_at_timestamp(timestamp) {
+        EngineSszFork::Cancun
+    } else if chain_spec.is_shanghai_active_at_timestamp(timestamp) {
+        EngineSszFork::Shanghai
+    } else {
+        EngineSszFork::Paris
+    }
+}
+
+fn ensure_fork_at_timestamp<ChainSpec: EthereumHardforks>(
+    chain_spec: &ChainSpec,
+    fork: EngineSszFork,
+    timestamp: u64,
+) -> Result<(), HttpResponse> {
+    if fork_at_timestamp(chain_spec, timestamp) == fork {
+        Ok(())
+    } else {
+        Err(problem_response(STATUS_BAD_REQUEST, ERROR_UNSUPPORTED_FORK, None))
+    }
+}
+
 fn parse_method_version(version: &str) -> Option<u8> {
     version.strip_prefix('v')?.parse().ok().filter(|version| (1..=4).contains(version))
+}
+
+async fn read_ssz_body(request: HttpRequest, max_bytes: u64) -> Result<Vec<u8>, HttpResponse> {
+    let content_type = request
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .map(str::trim);
+    if content_type != Some(OCTET_STREAM) {
+        return Err(problem_response(
+            STATUS_UNSUPPORTED_MEDIA_TYPE,
+            ERROR_UNSUPPORTED_MEDIA_TYPE,
+            None,
+        ))
+    }
+
+    let advertised_length = if let Some(value) = request.headers().get(CONTENT_LENGTH) {
+        let Some(value) = value.to_str().ok().and_then(|value| value.parse::<u64>().ok()) else {
+            return Err(problem_response(
+                STATUS_BAD_REQUEST,
+                ERROR_INVALID_REQUEST,
+                Some("invalid content-length header".into()),
+            ))
+        };
+        if value > max_bytes {
+            return Err(problem_response(STATUS_PAYLOAD_TOO_LARGE, ERROR_REQUEST_TOO_LARGE, None))
+        }
+        Some(value)
+    } else {
+        None
+    };
+
+    let Ok(limit) = usize::try_from(max_bytes) else {
+        return Err(internal_response(STATUS_INTERNAL_SERVER_ERROR, "invalid body limit"))
+    };
+    let body = match Limited::new(request.into_body(), limit).collect().await {
+        Ok(body) => body.to_bytes().to_vec(),
+        Err(err) if err.downcast_ref::<LengthLimitError>().is_some() => {
+            return Err(problem_response(STATUS_PAYLOAD_TOO_LARGE, ERROR_REQUEST_TOO_LARGE, None))
+        }
+        Err(err) => {
+            return Err(problem_response(
+                STATUS_BAD_REQUEST,
+                ERROR_INVALID_REQUEST,
+                Some(err.to_string()),
+            ))
+        }
+    };
+
+    if advertised_length.is_some_and(|length| length != body.len() as u64) {
+        return Err(problem_response(
+            STATUS_BAD_REQUEST,
+            ERROR_INVALID_REQUEST,
+            Some("content-length does not match request body".into()),
+        ))
+    }
+    Ok(body)
+}
+
+fn engine_api_error_response(err: EngineApiError) -> HttpResponse {
+    let (status, problem_type) = match &err {
+        EngineApiError::UnknownPayload => (STATUS_NOT_FOUND, ERROR_UNKNOWN_PAYLOAD),
+        EngineApiError::PayloadRequestTooLarge { .. } |
+        EngineApiError::BlobRequestTooLarge { .. } => {
+            (STATUS_PAYLOAD_TOO_LARGE, ERROR_REQUEST_TOO_LARGE)
+        }
+        EngineApiError::InvalidBodiesRange { .. } => (STATUS_BAD_REQUEST, ERROR_INVALID_REQUEST),
+        EngineApiError::EngineObjectValidationError(error) => match error {
+            EngineObjectValidationError::UnsupportedFork => {
+                (STATUS_BAD_REQUEST, ERROR_UNSUPPORTED_FORK)
+            }
+            EngineObjectValidationError::Payload(_) => {
+                (STATUS_UNPROCESSABLE_ENTITY, ERROR_INVALID_BODY)
+            }
+            EngineObjectValidationError::PayloadAttributes(_) => {
+                (STATUS_UNPROCESSABLE_ENTITY, ERROR_INVALID_ATTRIBUTES)
+            }
+            EngineObjectValidationError::InvalidParams(_) => {
+                (STATUS_BAD_REQUEST, ERROR_INVALID_REQUEST)
+            }
+        },
+        EngineApiError::ForkChoiceUpdate(error) => match error {
+            BeaconForkChoiceUpdateError::ForkchoiceUpdateError(error) => match error {
+                alloy_rpc_types_engine::ForkchoiceUpdateError::UpdatedInvalidPayloadAttributes => {
+                    (STATUS_UNPROCESSABLE_ENTITY, ERROR_INVALID_ATTRIBUTES)
+                }
+                alloy_rpc_types_engine::ForkchoiceUpdateError::InvalidState |
+                alloy_rpc_types_engine::ForkchoiceUpdateError::UnknownFinalBlock => {
+                    (STATUS_CONFLICT, ERROR_INVALID_FORKCHOICE)
+                }
+                _ => (STATUS_INTERNAL_SERVER_ERROR, ERROR_INTERNAL),
+            },
+            BeaconForkChoiceUpdateError::EngineUnavailable |
+            BeaconForkChoiceUpdateError::Internal(_) => {
+                (STATUS_INTERNAL_SERVER_ERROR, ERROR_INTERNAL)
+            }
+        },
+        EngineApiError::UnexpectedRequestsHash => (STATUS_UNPROCESSABLE_ENTITY, ERROR_INVALID_BODY),
+        EngineApiError::TerminalBlockHash { .. } |
+        EngineApiError::NewPayload(_) |
+        EngineApiError::Internal(_) |
+        EngineApiError::GetPayloadError(_) |
+        EngineApiError::Other(_) => (STATUS_INTERNAL_SERVER_ERROR, ERROR_INTERNAL),
+    };
+    problem_response(status, problem_type, Some(err.to_string()))
+}
+
+fn method_not_allowed_response() -> HttpResponse {
+    problem_response(
+        STATUS_METHOD_NOT_ALLOWED,
+        ERROR_INVALID_REQUEST,
+        Some("method not allowed".into()),
+    )
+}
+
+fn internal_response(status: u16, detail: impl Into<String>) -> HttpResponse {
+    problem_response(status, ERROR_INTERNAL, Some(detail.into()))
+}
+
+enum RequestDecodeError {
+    Ssz(&'static str),
+    InvalidBody(&'static str),
+}
+
+impl From<ssz::DecodeError> for RequestDecodeError {
+    fn from(_: ssz::DecodeError) -> Self {
+        Self::Ssz("invalid ssz")
+    }
+}
+
+fn request_decode_response(error: RequestDecodeError) -> HttpResponse {
+    let (status, problem_type, detail) = match error {
+        RequestDecodeError::Ssz(detail) => (STATUS_BAD_REQUEST, ERROR_SSZ_DECODE, detail),
+        RequestDecodeError::InvalidBody(detail) => {
+            (STATUS_UNPROCESSABLE_ENTITY, ERROR_INVALID_BODY, detail)
+        }
+    };
+    problem_response(status, problem_type, Some(detail.into()))
 }
 
 fn handle_capabilities() -> HttpResponse {
@@ -418,50 +617,101 @@ where
                 let block_value = payload.block_value;
                 match payload.execution_payload {
                     ExecutionPayloadFieldV2::V1(payload) => {
-                        get_payload_response(BuiltPayloadParis { payload, block_value })
+                        if let Err(response) = ensure_fork_at_timestamp(
+                            engine_api.chain_spec(),
+                            fork,
+                            payload.timestamp(),
+                        ) {
+                            response
+                        } else {
+                            get_payload_response(BuiltPayloadParis { payload, block_value })
+                        }
                     }
                     ExecutionPayloadFieldV2::V2(_) => {
-                        text_response(STATUS_BAD_REQUEST, "unsupported fork")
+                        internal_response(STATUS_INTERNAL_SERVER_ERROR, "unexpected payload fork")
                     }
                 }
             }
-            Err(err) => get_payload_error_response(err),
+            Err(err) => engine_api_error_response(err),
         },
         EngineSszFork::Shanghai => match engine_api.get_payload_v2_metered(payload_id).await {
             Ok(payload) => match BuiltPayloadShanghai::try_from(payload) {
-                Ok(payload) => get_payload_response(payload),
-                Err(err) => text_response(STATUS_BAD_REQUEST, err.to_string()),
+                Ok(payload) => {
+                    if let Err(response) = ensure_fork_at_timestamp(
+                        engine_api.chain_spec(),
+                        fork,
+                        payload.payload.timestamp(),
+                    ) {
+                        response
+                    } else {
+                        get_payload_response(payload)
+                    }
+                }
+                Err(err) => internal_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string()),
             },
-            Err(err) => get_payload_error_response(err),
+            Err(err) => engine_api_error_response(err),
         },
         EngineSszFork::Cancun => match engine_api.get_payload_v3_metered(payload_id).await {
-            Ok(payload) => get_payload_response(BuiltPayloadCancun::from(payload)),
-            Err(err) => get_payload_error_response(err),
+            Ok(payload) => {
+                let payload = BuiltPayloadCancun::from(payload);
+                if let Err(response) = ensure_fork_at_timestamp(
+                    engine_api.chain_spec(),
+                    fork,
+                    payload.execution_payload.timestamp(),
+                ) {
+                    response
+                } else {
+                    get_payload_response(payload)
+                }
+            }
+            Err(err) => engine_api_error_response(err),
         },
         EngineSszFork::Prague => match engine_api.get_payload_v4_metered(payload_id).await {
-            Ok(payload) => get_payload_response(BuiltPayloadPrague::from(payload)),
-            Err(err) => get_payload_error_response(err),
+            Ok(payload) => {
+                let payload = BuiltPayloadPrague::from(payload);
+                if let Err(response) = ensure_fork_at_timestamp(
+                    engine_api.chain_spec(),
+                    fork,
+                    payload.payload.timestamp(),
+                ) {
+                    response
+                } else {
+                    get_payload_response(payload)
+                }
+            }
+            Err(err) => engine_api_error_response(err),
         },
         EngineSszFork::Osaka => match engine_api.get_payload_v5_metered(payload_id).await {
-            Ok(payload) => get_payload_response(BuiltPayloadOsaka::from(payload)),
-            Err(err) => get_payload_error_response(err),
+            Ok(payload) => {
+                let payload = BuiltPayloadOsaka::from(payload);
+                if let Err(response) = ensure_fork_at_timestamp(
+                    engine_api.chain_spec(),
+                    fork,
+                    payload.payload.timestamp(),
+                ) {
+                    response
+                } else {
+                    get_payload_response(payload)
+                }
+            }
+            Err(err) => engine_api_error_response(err),
         },
         EngineSszFork::Amsterdam => match engine_api.get_payload_v6_metered(payload_id).await {
-            Ok(payload) => get_payload_response(BuiltPayloadAmsterdam::from(payload)),
-            Err(err) => get_payload_error_response(err),
+            Ok(payload) => {
+                let payload = BuiltPayloadAmsterdam::from(payload);
+                if let Err(response) = ensure_fork_at_timestamp(
+                    engine_api.chain_spec(),
+                    fork,
+                    payload.payload.timestamp(),
+                ) {
+                    response
+                } else {
+                    get_payload_response(payload)
+                }
+            }
+            Err(err) => engine_api_error_response(err),
         },
     }
-}
-
-fn get_payload_error_response(err: EngineApiError) -> HttpResponse {
-    let status = match &err {
-        EngineApiError::UnknownPayload => STATUS_NOT_FOUND,
-        EngineApiError::EngineObjectValidationError(
-            reth_payload_primitives::EngineObjectValidationError::UnsupportedFork,
-        ) => STATUS_BAD_REQUEST,
-        _ => STATUS_INTERNAL_SERVER_ERROR,
-    };
-    text_response(status, err.to_string())
 }
 
 async fn handle_new_payload<Provider, Pool, Validator, ChainSpec>(
@@ -477,8 +727,13 @@ where
 {
     let payload = match decode_new_payload_request(fork, body) {
         Ok(payload) => payload,
-        Err(err) => return text_response(STATUS_BAD_REQUEST, err),
+        Err(err) => return request_decode_response(err),
     };
+    if let Err(response) =
+        ensure_fork_at_timestamp(engine_api.chain_spec(), fork, payload.payload.timestamp())
+    {
+        return response
+    }
 
     let response = match fork.payloads_version() {
         1 => engine_api.new_payload_v1(payload).await,
@@ -486,15 +741,15 @@ where
         3 => engine_api.new_payload_v3(payload).await,
         4 => engine_api.new_payload_v4(payload).await,
         5 => engine_api.new_payload_v5(payload).await,
-        _ => return text_response(STATUS_BAD_REQUEST, "unsupported payload endpoint version"),
+        _ => return problem_response(STATUS_BAD_REQUEST, ERROR_UNSUPPORTED_FORK, None),
     };
 
     match response {
         Ok(status) => match EngineSszPayloadStatus::try_from(status) {
             Ok(status) => ssz_response(status),
-            Err(err) => text_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string()),
+            Err(err) => internal_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string()),
         },
-        Err(err) => text_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string()),
+        Err(err) => engine_api_error_response(err),
     }
 }
 
@@ -511,23 +766,30 @@ where
 {
     let (state, attrs, custody_columns) = match decode_forkchoice_request(fork, body) {
         Ok(request) => request,
-        Err(err) => return text_response(STATUS_BAD_REQUEST, err),
+        Err(err) => return request_decode_response(err),
     };
+    if let Some(attrs) = attrs.as_ref() {
+        if let Err(response) =
+            ensure_fork_at_timestamp(engine_api.chain_spec(), fork, attrs.timestamp)
+        {
+            return response
+        }
+    }
 
     let response = match fork.forkchoice_version() {
         1 => engine_api.fork_choice_updated_v1_metered(state, attrs).await,
         2 => engine_api.fork_choice_updated_v2_metered(state, attrs).await,
         3 => engine_api.fork_choice_updated_v3_metered(state, attrs).await,
         4 => engine_api.fork_choice_updated_v4_metered(state, attrs, custody_columns).await,
-        _ => return text_response(STATUS_BAD_REQUEST, "unsupported forkchoice endpoint version"),
+        _ => return problem_response(STATUS_BAD_REQUEST, ERROR_UNSUPPORTED_FORK, None),
     };
 
     match response {
         Ok(updated) => match ForkchoiceUpdateResponse::try_from(updated) {
             Ok(updated) => ssz_response(updated),
-            Err(err) => text_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string()),
+            Err(err) => internal_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string()),
         },
-        Err(err) => text_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string()),
+        Err(err) => engine_api_error_response(err),
     }
 }
 
@@ -547,81 +809,84 @@ where
         1 => {
             let hashes = match decode_blob_hashes_request(body) {
                 Ok(hashes) => hashes,
-                Err(err) => return text_response(STATUS_BAD_REQUEST, err),
+                Err(err) => return request_decode_response(err),
             };
             match engine_api.get_blobs_v1_metered(hashes) {
                 Ok(response) => ssz_response(response),
-                Err(err) => text_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string()),
+                Err(err) => engine_api_error_response(err),
             }
         }
         2 => {
             let hashes = match decode_blob_hashes_request(body) {
                 Ok(hashes) => hashes,
-                Err(err) => return text_response(STATUS_BAD_REQUEST, err),
+                Err(err) => return request_decode_response(err),
             };
             match engine_api.get_blobs_v2_metered(hashes) {
                 Ok(Some(response)) => ssz_response(response),
                 Ok(None) => no_content_response(),
-                Err(err) => text_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string()),
+                Err(err) => engine_api_error_response(err),
             }
         }
         3 => {
             let hashes = match decode_blob_hashes_request(body) {
                 Ok(hashes) => hashes,
-                Err(err) => return text_response(STATUS_BAD_REQUEST, err),
+                Err(err) => return request_decode_response(err),
             };
             match engine_api.get_blobs_v3_metered(hashes) {
                 Ok(Some(response)) => ssz_response(response),
                 Ok(None) => no_content_response(),
-                Err(err) => text_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string()),
+                Err(err) => engine_api_error_response(err),
             }
         }
         4 => {
             let (hashes, indices_bitarray) = match decode_blob_cells_request(body) {
                 Ok(request) => request,
-                Err(err) => return text_response(STATUS_BAD_REQUEST, err),
+                Err(err) => return request_decode_response(err),
             };
             match engine_api.get_blobs_v4_metered(hashes, indices_bitarray) {
                 Ok(Some(response)) => ssz_response(response),
                 Ok(None) => no_content_response(),
-                Err(err) => text_response(STATUS_INTERNAL_SERVER_ERROR, err.to_string()),
+                Err(err) => engine_api_error_response(err),
             }
         }
-        _ => text_response(STATUS_NOT_FOUND, "unsupported blobs endpoint version"),
+        _ => problem_response(
+            STATUS_NOT_FOUND,
+            ERROR_NOT_FOUND,
+            Some("unsupported blobs endpoint version".into()),
+        ),
     }
 }
 
 /// Decodes the common getBlobs request container with only versioned hashes.
-fn decode_blob_hashes_request(body: &[u8]) -> Result<Vec<B256>, &'static str> {
-    Vec::<B256>::from_ssz_bytes(body).map_err(|_| "invalid ssz")
+fn decode_blob_hashes_request(body: &[u8]) -> Result<Vec<B256>, RequestDecodeError> {
+    Vec::<B256>::from_ssz_bytes(body).map_err(Into::into)
 }
 
 /// Decodes the Amsterdam getBlobs request container with hashes and a cell index mask.
-fn decode_blob_cells_request(body: &[u8]) -> Result<(Vec<B256>, B128), &'static str> {
-    <(Vec<B256>, B128) as ssz::Decode>::from_ssz_bytes(body).map_err(|_| "invalid ssz")
+fn decode_blob_cells_request(body: &[u8]) -> Result<(Vec<B256>, B128), RequestDecodeError> {
+    <(Vec<B256>, B128) as ssz::Decode>::from_ssz_bytes(body).map_err(Into::into)
 }
 
 fn decode_new_payload_request(
     fork: EngineSszFork,
     body: &[u8],
-) -> Result<ExecutionData, &'static str> {
+) -> Result<ExecutionData, RequestDecodeError> {
     match fork {
         EngineSszFork::Paris => {
             let ExecutionPayloadEnvelopeParis { payload: execution_payload } =
-                ExecutionPayloadEnvelopeParis::from_ssz_bytes(body).map_err(|_| "invalid ssz")?;
+                ExecutionPayloadEnvelopeParis::from_ssz_bytes(body)?;
             Ok(ExecutionData::new(execution_payload.into(), ExecutionPayloadSidecar::none()))
         }
         EngineSszFork::Shanghai => {
             let ExecutionPayloadEnvelopeShanghai { payload: execution_payload } =
-                ExecutionPayloadEnvelopeShanghai::from_ssz_bytes(body)
-                    .map_err(|_| "invalid ssz")?;
+                ExecutionPayloadEnvelopeShanghai::from_ssz_bytes(body)?;
             Ok(ExecutionData::new(execution_payload.into(), ExecutionPayloadSidecar::none()))
         }
         EngineSszFork::Cancun => {
             let ExecutionPayloadEnvelopeCancun {
                 payload: execution_payload,
                 parent_beacon_block_root,
-            } = ExecutionPayloadEnvelopeCancun::from_ssz_bytes(body).map_err(|_| "invalid ssz")?;
+            } = ExecutionPayloadEnvelopeCancun::from_ssz_bytes(body)?;
             let versioned_hashes = calculate_versioned_hashes(
                 &execution_payload.payload_inner.payload_inner.transactions,
             )?;
@@ -636,7 +901,7 @@ fn decode_new_payload_request(
                 payload: execution_payload,
                 parent_beacon_block_root,
                 execution_requests,
-            } = ExecutionPayloadEnvelopePrague::from_ssz_bytes(body).map_err(|_| "invalid ssz")?;
+            } = ExecutionPayloadEnvelopePrague::from_ssz_bytes(body)?;
             let versioned_hashes = calculate_versioned_hashes(
                 &execution_payload.payload_inner.payload_inner.transactions,
             )?;
@@ -651,7 +916,7 @@ fn decode_new_payload_request(
                 payload: execution_payload,
                 parent_beacon_block_root,
                 execution_requests,
-            } = ExecutionPayloadEnvelopeOsaka::from_ssz_bytes(body).map_err(|_| "invalid ssz")?;
+            } = ExecutionPayloadEnvelopeOsaka::from_ssz_bytes(body)?;
             let versioned_hashes = calculate_versioned_hashes(
                 &execution_payload.payload_inner.payload_inner.transactions,
             )?;
@@ -666,8 +931,7 @@ fn decode_new_payload_request(
                 payload: execution_payload,
                 parent_beacon_block_root,
                 execution_requests,
-            } = ExecutionPayloadEnvelopeAmsterdam::from_ssz_bytes(body)
-                .map_err(|_| "invalid ssz")?;
+            } = ExecutionPayloadEnvelopeAmsterdam::from_ssz_bytes(body)?;
             let versioned_hashes = calculate_versioned_hashes(
                 &execution_payload.payload_inner.payload_inner.payload_inner.transactions,
             )?;
@@ -680,11 +944,11 @@ fn decode_new_payload_request(
     }
 }
 
-fn calculate_versioned_hashes(transactions: &[Bytes]) -> Result<Vec<B256>, &'static str> {
+fn calculate_versioned_hashes(transactions: &[Bytes]) -> Result<Vec<B256>, RequestDecodeError> {
     let mut versioned_hashes = Vec::new();
     for transaction in transactions {
-        let transaction =
-            TxEnvelope::decode_2718_exact(transaction.as_ref()).map_err(|_| "invalid tx")?;
+        let transaction = TxEnvelope::decode_2718_exact(transaction.as_ref())
+            .map_err(|_| RequestDecodeError::InvalidBody("invalid transaction"))?;
         if let Some(hashes) = transaction.blob_versioned_hashes() {
             versioned_hashes.extend_from_slice(hashes);
         }
@@ -696,36 +960,36 @@ fn calculate_versioned_hashes(transactions: &[Bytes]) -> Result<Vec<B256>, &'sta
 fn decode_forkchoice_request(
     fork: EngineSszFork,
     body: &[u8],
-) -> Result<(ForkchoiceState, Option<PayloadAttributes>, Option<B128>), &'static str> {
+) -> Result<(ForkchoiceState, Option<PayloadAttributes>, Option<B128>), RequestDecodeError> {
     match fork {
         EngineSszFork::Paris => {
             let ForkchoiceUpdateParis { forkchoice_state, payload_attributes } =
-                ForkchoiceUpdateParis::from_ssz_bytes(body).map_err(|_| "invalid ssz")?;
+                ForkchoiceUpdateParis::from_ssz_bytes(body)?;
             Ok((forkchoice_state, optional_attrs(payload_attributes), None))
         }
         EngineSszFork::Shanghai => {
             let ForkchoiceUpdateShanghai { forkchoice_state, payload_attributes } =
-                ForkchoiceUpdateShanghai::from_ssz_bytes(body).map_err(|_| "invalid ssz")?;
+                ForkchoiceUpdateShanghai::from_ssz_bytes(body)?;
             Ok((forkchoice_state, optional_attrs(payload_attributes), None))
         }
         EngineSszFork::Cancun => {
             let ForkchoiceUpdateCancun { forkchoice_state, payload_attributes } =
-                ForkchoiceUpdateCancun::from_ssz_bytes(body).map_err(|_| "invalid ssz")?;
+                ForkchoiceUpdateCancun::from_ssz_bytes(body)?;
             Ok((forkchoice_state, optional_attrs(payload_attributes), None))
         }
         EngineSszFork::Prague => {
             let ForkchoiceUpdatePrague { forkchoice_state, payload_attributes } =
-                ForkchoiceUpdatePrague::from_ssz_bytes(body).map_err(|_| "invalid ssz")?;
+                ForkchoiceUpdatePrague::from_ssz_bytes(body)?;
             Ok((forkchoice_state, optional_attrs(payload_attributes), None))
         }
         EngineSszFork::Osaka => {
             let ForkchoiceUpdateOsaka { forkchoice_state, payload_attributes } =
-                ForkchoiceUpdateOsaka::from_ssz_bytes(body).map_err(|_| "invalid ssz")?;
+                ForkchoiceUpdateOsaka::from_ssz_bytes(body)?;
             Ok((forkchoice_state, optional_attrs(payload_attributes), None))
         }
         EngineSszFork::Amsterdam => {
             let ForkchoiceUpdateAmsterdam { forkchoice_state, payload_attributes, custody_columns } =
-                ForkchoiceUpdateAmsterdam::from_ssz_bytes(body).map_err(|_| "invalid ssz")?;
+                ForkchoiceUpdateAmsterdam::from_ssz_bytes(body)?;
             Ok((
                 forkchoice_state,
                 optional_attrs(payload_attributes),
@@ -761,7 +1025,7 @@ fn get_payload_response<T: ssz::Encode>(value: T) -> HttpResponse {
 
 fn json_response<T: serde::Serialize>(value: T) -> HttpResponse {
     let Ok(body) = serde_json::to_string(&value) else {
-        return text_response(STATUS_INTERNAL_SERVER_ERROR, "failed to encode json")
+        return internal_response(STATUS_INTERNAL_SERVER_ERROR, "failed to encode json")
     };
 
     HttpResponse::builder()
@@ -775,11 +1039,19 @@ fn no_content_response() -> HttpResponse {
     HttpResponse::builder().status(204).body(HttpBody::empty()).expect("valid response")
 }
 
-fn text_response(status: u16, body: impl Into<String>) -> HttpResponse {
+fn problem_response(
+    status: u16,
+    problem_type: &'static str,
+    detail: Option<String>,
+) -> HttpResponse {
+    let body = match detail {
+        Some(detail) => serde_json::json!({ "type": problem_type, "detail": detail }),
+        None => serde_json::json!({ "type": problem_type }),
+    };
     HttpResponse::builder()
         .status(status)
-        .header(CONTENT_TYPE, TEXT_PLAIN)
-        .body(HttpBody::from(body.into()))
+        .header(CONTENT_TYPE, PROBLEM_JSON)
+        .body(HttpBody::from(body.to_string()))
         .expect("valid response")
 }
 
