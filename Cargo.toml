@@ -690,3 +690,13 @@ vergen-git2 = "10.0.1"
 
 # networking
 ipnet = "2.11"
+
+# Keep the coordinated EIP-7805 Engine API types on one Alloy source until the upstream Alloy
+# changes are released together.
+[patch.crates-io]
+alloy-consensus = { git = "https://github.com/Rimeeeeee/alloy.git", branch = "focil-eip7805" }
+alloy-eips = { git = "https://github.com/Rimeeeeee/alloy.git", branch = "focil-eip7805" }
+alloy-rpc-types-beacon = { git = "https://github.com/Rimeeeeee/alloy.git", branch = "focil-eip7805" }
+alloy-rpc-types-engine = { git = "https://github.com/Rimeeeeee/alloy.git", branch = "focil-eip7805" }
+alloy-serde = { git = "https://github.com/Rimeeeeee/alloy.git", branch = "focil-eip7805" }
+alloy-tx-macros = { git = "https://github.com/Rimeeeeee/alloy.git", branch = "focil-eip7805" }

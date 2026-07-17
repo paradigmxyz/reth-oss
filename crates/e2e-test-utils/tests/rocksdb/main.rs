@@ -94,8 +94,8 @@ const fn test_attributes_generator(timestamp: u64) -> EthPayloadAttributes {
             parent_beacon_block_root: Some(B256::ZERO),
             slot_number: None,
             target_gas_limit: None,
+            inclusion_list_transactions: None,
         },
-        inclusion_list_transactions: None,
     }
 }
 

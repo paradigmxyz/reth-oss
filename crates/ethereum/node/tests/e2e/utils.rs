@@ -28,8 +28,8 @@ pub(crate) const fn eth_payload_attributes(timestamp: u64) -> EthPayloadAttribut
             parent_beacon_block_root: Some(B256::ZERO),
             slot_number: None,
             target_gas_limit: None,
+            inclusion_list_transactions: None,
         },
-        inclusion_list_transactions: None,
     }
 }
 
@@ -45,8 +45,8 @@ pub(crate) const fn eth_payload_attributes_shanghai(timestamp: u64) -> EthPayloa
             parent_beacon_block_root: None,
             slot_number: None,
             target_gas_limit: None,
+            inclusion_list_transactions: None,
         },
-        inclusion_list_transactions: None,
     }
 }
 
@@ -66,8 +66,8 @@ pub(crate) const fn eth_payload_attributes_amsterdam(timestamp: u64) -> EthPaylo
             parent_beacon_block_root: Some(B256::ZERO),
             slot_number: Some(timestamp),
             target_gas_limit: None,
+            inclusion_list_transactions: None,
         },
-        inclusion_list_transactions: None,
     }
 }
 

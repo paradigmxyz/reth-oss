@@ -11,20 +11,17 @@ pub struct EthPayloadAttributes {
     /// Payload attributes shared with earlier Engine API versions.
     #[serde(flatten)]
     pub inner: PayloadAttributes,
-    /// Transactions that the payload builder must attempt to include.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub inclusion_list_transactions: Option<Vec<Bytes>>,
 }
 
 impl EthPayloadAttributes {
     /// Wraps pre-Bogota payload attributes.
     pub const fn new(inner: PayloadAttributes) -> Self {
-        Self { inner, inclusion_list_transactions: None }
+        Self { inner }
     }
 
     /// Sets the EIP-7805 inclusion list.
     pub fn with_inclusion_list(mut self, transactions: Vec<Bytes>) -> Self {
-        self.inclusion_list_transactions = Some(transactions);
+        self.inner.inclusion_list_transactions = Some(transactions);
         self
     }
 }
@@ -54,7 +51,7 @@ impl reth_payload_primitives::PayloadAttributes for EthPayloadAttributes {
         payload_id_with_inclusion_list(
             parent_hash,
             &self.inner,
-            self.inclusion_list_transactions.as_deref(),
+            self.inner.inclusion_list_transactions.as_deref(),
         )
     }
 
@@ -79,7 +76,7 @@ impl reth_payload_primitives::PayloadAttributes for EthPayloadAttributes {
     }
 
     fn inclusion_list_transactions(&self) -> Option<&[Bytes]> {
-        self.inclusion_list_transactions.as_deref()
+        self.inner.inclusion_list_transactions.as_deref()
     }
 }
 

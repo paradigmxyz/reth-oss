@@ -122,8 +122,7 @@ dependencies = [
 [[package]]
 name = "alloy-consensus"
 version = "2.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a6ff0c4adba2abdcd9fb5829ae5f4394c06f8585ed283a9ba79aa33763c802e1"
+source = "git+https://github.com/Rimeeeeee/alloy.git?branch=focil-eip7805#6d36a4952da01d1833786e840bd15acbe0e01f9a"
 dependencies = [
  "alloy-eips",
  "alloy-primitives",
@@ -266,8 +265,7 @@ dependencies = [
 [[package]]
 name = "alloy-eips"
 version = "2.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ea4c0453065b9206acc0f869a258dc8dcbbd595e144b4446f2c493a24a814d1f"
+source = "git+https://github.com/Rimeeeeee/alloy.git?branch=focil-eip7805#6d36a4952da01d1833786e840bd15acbe0e01f9a"
 dependencies = [
  "alloy-eip2124",
  "alloy-eip2930",
@@ -640,8 +638,7 @@ dependencies = [
 [[package]]
 name = "alloy-rpc-types-beacon"
 version = "2.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "81133671b8da58169589aac996f3c4da23bbdee85b13ecee7098065f3eae718a"
+source = "git+https://github.com/Rimeeeeee/alloy.git?branch=focil-eip7805#6d36a4952da01d1833786e840bd15acbe0e01f9a"
 dependencies = [
  "alloy-eips",
  "alloy-primitives",
@@ -673,8 +670,7 @@ dependencies = [
 [[package]]
 name = "alloy-rpc-types-engine"
 version = "2.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5b1f682c4881aa7000ac7cc86d7aeeb3b09836a77a90b329820140233651aeea"
+source = "git+https://github.com/Rimeeeeee/alloy.git?branch=focil-eip7805#6d36a4952da01d1833786e840bd15acbe0e01f9a"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -757,8 +753,7 @@ dependencies = [
 [[package]]
 name = "alloy-serde"
 version = "2.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c1e97b3e0b9f816b25083045dcfa69431bd059a078e828e4d82d296d1949b96c"
+source = "git+https://github.com/Rimeeeeee/alloy.git?branch=focil-eip7805#6d36a4952da01d1833786e840bd15acbe0e01f9a"
 dependencies = [
  "alloy-primitives",
  "arbitrary",
@@ -971,8 +966,7 @@ dependencies = [
 [[package]]
 name = "alloy-tx-macros"
 version = "2.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "406bc1183f6843e0aba09f7b3365e828b597213d60793ba5cb41befc863e3a78"
+source = "git+https://github.com/Rimeeeeee/alloy.git?branch=focil-eip7805#6d36a4952da01d1833786e840bd15acbe0e01f9a"
 dependencies = [
  "darling 0.23.0",
  "proc-macro2",
