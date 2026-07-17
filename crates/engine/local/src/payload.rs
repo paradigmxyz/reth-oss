@@ -3,8 +3,8 @@
 
 use alloy_consensus::BlockHeader;
 use alloy_primitives::{Address, B256};
+use alloy_rpc_types_engine::PayloadAttributes as EthPayloadAttributes;
 use reth_chainspec::{EthChainSpec, EthereumHardforks};
-use reth_ethereum_engine_primitives::EthPayloadAttributes;
 use reth_payload_primitives::PayloadAttributesBuilder;
 use reth_primitives_traits::SealedHeader;
 use std::sync::Arc;
@@ -60,6 +60,5 @@ where
             slot_number: self.chain_spec.is_amsterdam_active_at_timestamp(timestamp).then_some(0),
             ..Default::default()
         }
-        .into()
     }
 }

@@ -8,8 +8,8 @@ use crate::{
 use alloy_consensus::Block;
 use alloy_primitives::U256;
 use alloy_rpc_types::engine::PayloadId;
+use alloy_rpc_types_engine::PayloadAttributes as EthPayloadAttributes;
 use reth_chain_state::CanonStateNotification;
-use reth_ethereum_engine_primitives::EthPayloadAttributes;
 use reth_payload_builder_primitives::PayloadBuilderError;
 use reth_payload_primitives::{PayloadKind, PayloadTypes};
 use reth_primitives_traits::{Block as _, RecoveredBlock};

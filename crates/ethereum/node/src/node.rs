@@ -3,12 +3,12 @@
 use crate::{EthEngineTypes, EthEvmConfig};
 use alloy_eips::{eip7840::BlobParams, merge::EPOCH_SLOTS};
 use alloy_network::Ethereum;
-use alloy_rpc_types_engine::ExecutionData;
+use alloy_rpc_types_engine::{ExecutionData, PayloadAttributes as EthPayloadAttributes};
 use reth_chainspec::{ChainSpec, EthChainSpec, EthereumHardforks, Hardforks};
 use reth_engine_local::LocalPayloadAttributesBuilder;
 use reth_engine_primitives::EngineTypes;
 use reth_ethereum_consensus::EthBeaconConsensus;
-use reth_ethereum_engine_primitives::{EthBuiltPayload, EthPayloadAttributes};
+use reth_ethereum_engine_primitives::EthBuiltPayload;
 use reth_ethereum_primitives::{EthPrimitives, TransactionSigned};
 use reth_evm::{
     eth::spec::EthExecutorSpec, ConfigureEvm, EvmFactory, EvmFactoryFor, NextBlockEnvAttributes,
