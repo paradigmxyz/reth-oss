@@ -2258,6 +2258,7 @@ mod tests {
             parent_beacon_block_root: None,
             slot_number: None,
             target_gas_limit: None,
+            inclusion_list_transactions: None,
         };
         let custody_columns = B128::from(0b1010u128);
 
@@ -2319,6 +2320,7 @@ mod tests {
             parent_beacon_block_root: None,
             slot_number: None,
             target_gas_limit: None,
+            inclusion_list_transactions: None,
         };
 
         let api_task = tokio::spawn(async move {
@@ -2368,6 +2370,7 @@ mod tests {
             parent_beacon_block_root: None,
             slot_number: None,
             target_gas_limit: None,
+            inclusion_list_transactions: None,
         };
 
         let api_task = tokio::spawn(async move {

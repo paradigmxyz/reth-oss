@@ -229,6 +229,7 @@ where
                 parent_beacon_block_root: Some(B256::ZERO),
                 slot_number: None,
                 target_gas_limit: None,
+                inclusion_list_transactions: None,
             };
 
             env.active_node_state_mut()?
@@ -303,6 +304,7 @@ where
                     parent_beacon_block_root: Some(B256::ZERO),
                     slot_number: None,
                     target_gas_limit: None,
+                    inclusion_list_transactions: None,
                 };
 
                 let fresh_fcu_result = EngineApiClient::<Engine>::fork_choice_updated_v3(

@@ -763,6 +763,7 @@ fn process_payload_attributes_shares_sparse_trie_during_validation_fallback() {
             parent_beacon_block_root: None,
             slot_number: None,
             target_gas_limit: None,
+            inclusion_list_transactions: None,
         }
         .into(),
         &head,
