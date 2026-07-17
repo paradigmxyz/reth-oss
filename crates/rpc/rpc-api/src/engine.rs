@@ -23,7 +23,41 @@ use jsonrpsee::{core::RpcResult, proc_macros::rpc, RpcModule};
 use reth_engine_primitives::EngineTypes;
 use serde_json::Value;
 
-pub use alloy_rpc_types_engine::{ForkchoiceUpdatedV2, PayloadStatusV2};
+/// EIP-7805 payload status as defined by the Bogota EELS test release.
+// TODO(focil): Reconcile this temporary test-release response shape with the finalized Engine API
+// once the inclusion-list response fields are standardized. `tests-focil@v0.1.0` uses a distinct
+// `INCLUSION_LIST_UNSATISFIED` status and rejects the later `inclusionListSatisfied` field.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PayloadStatusV2 {
+    pub status: String,
+    pub latest_valid_hash: Option<B256>,
+    pub validation_error: Option<String>,
+}
+
+impl PayloadStatusV2 {
+    pub fn new(payload_status: PayloadStatus, inclusion_list_satisfied: Option<bool>) -> Self {
+        let status = if payload_status.is_valid() && inclusion_list_satisfied == Some(false) {
+            "INCLUSION_LIST_UNSATISFIED".to_owned()
+        } else {
+            payload_status.status.as_str().to_owned()
+        };
+
+        Self {
+            status,
+            latest_valid_hash: payload_status.latest_valid_hash,
+            validation_error: payload_status.status.validation_error().map(str::to_owned),
+        }
+    }
+}
+
+/// EIP-7805 forkchoice response matching the Bogota EELS test release.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ForkchoiceUpdatedV2 {
+    pub payload_status: PayloadStatusV2,
+    pub payload_id: Option<PayloadId>,
+}
 
 /// Helper trait for the engine api server.
 ///
