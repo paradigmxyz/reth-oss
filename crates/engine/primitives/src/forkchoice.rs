@@ -174,10 +174,12 @@ impl ForkchoiceStatus {
                 // `Accepted` is only returned on `newPayload`. It would be a valid state here.
                 Self::Valid
             }
-            PayloadStatusEnum::Invalid { .. } => Self::Invalid,
+            PayloadStatusEnum::Invalid { .. } | PayloadStatusEnum::InclusionListUnsatisfied => {
+                // `InclusionListUnsatisfied` is specific to newPayloadV6 and cannot be
+                // represented by FCU, so treat it as an invalid forkchoice status.
+                Self::Invalid
+            }
             PayloadStatusEnum::Syncing => Self::Syncing,
-            // This status is specific to newPayloadV6; it cannot be represented by FCU.
-            PayloadStatusEnum::InclusionListUnsatisfied => Self::Invalid,
         }
     }
 }
