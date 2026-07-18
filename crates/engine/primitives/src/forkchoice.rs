@@ -176,6 +176,8 @@ impl ForkchoiceStatus {
             }
             PayloadStatusEnum::Invalid { .. } => Self::Invalid,
             PayloadStatusEnum::Syncing => Self::Syncing,
+            // This status is specific to newPayloadV6; it cannot be represented by FCU.
+            PayloadStatusEnum::InclusionListUnsatisfied => Self::Invalid,
         }
     }
 }

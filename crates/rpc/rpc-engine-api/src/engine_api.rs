@@ -13,7 +13,7 @@ use alloy_rpc_types_engine::{
     ExecutionPayloadBodiesV2, ExecutionPayloadBodyV1, ExecutionPayloadBodyV2,
     ExecutionPayloadInputV2, ExecutionPayloadSidecar, ExecutionPayloadV1, ExecutionPayloadV3,
     ExecutionPayloadV4, ForkchoiceState, ForkchoiceUpdated, PayloadId, PayloadStatus,
-    PraguePayloadFields,
+    PayloadStatusEnum, PraguePayloadFields,
 };
 use async_trait::async_trait;
 use jsonrpsee_core::{server::RpcModule, RpcResult};
@@ -323,7 +323,12 @@ where
         if payload_status.is_valid() {
             // Ensure the post-state recorded the inclusion-list result, while returning the
             // standard Engine API status shape expected by the Bogota EELS tests.
-            self.inclusion_list_satisfied(block_hash).await?;
+            if !self.inclusion_list_satisfied(block_hash).await? {
+                return Ok(PayloadStatus {
+                    status: PayloadStatusEnum::InclusionListUnsatisfied,
+                    latest_valid_hash: payload_status.latest_valid_hash,
+                });
+            }
         }
         Ok(payload_status)
     }
