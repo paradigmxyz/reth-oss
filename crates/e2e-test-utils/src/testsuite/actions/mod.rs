@@ -244,6 +244,10 @@ pub fn validate_fcu_response(response: &ForkchoiceUpdated, context: &str) -> Res
             debug!("{}: FCU accepted for processing", context);
             Ok(())
         }
+        PayloadStatusEnum::InclusionListUnsatisfied => Err(eyre::eyre!(
+            "{}: FCU returned INCLUSION_LIST_UNSATISFIED, which is only valid for newPayloadV6",
+            context
+        )),
     }
 }
 
@@ -316,5 +320,9 @@ pub fn expect_fcu_not_syncing_or_accepted(
                 syncing_or_accepted_status
             ))
         }
+        PayloadStatusEnum::InclusionListUnsatisfied => Err(eyre::eyre!(
+            "{}: Expected FCU status VALID or INVALID, but got INCLUSION_LIST_UNSATISFIED",
+            context
+        )),
     }
 }
