@@ -8,9 +8,6 @@
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
-// Keep the Ethereum engine primitive implementations linked for the local engine feature set.
-use reth_ethereum_engine_primitives as _;
-
 pub mod miner;
 pub mod payload;
 

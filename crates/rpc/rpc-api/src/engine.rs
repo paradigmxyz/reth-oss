@@ -23,6 +23,7 @@ use jsonrpsee::{core::RpcResult, proc_macros::rpc, RpcModule};
 use reth_engine_primitives::EngineTypes;
 use serde_json::Value;
 
+pub use alloy_rpc_types_engine::{ForkchoiceUpdatedV2, PayloadStatusV2};
 /// Helper trait for the engine api server.
 ///
 /// This type-erases the concrete [`jsonrpsee`] server implementation and only returns the
