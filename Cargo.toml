@@ -724,3 +724,4 @@ alloy-transport-http = { git = "https://github.com/Rimeeeeee/alloy.git", branch 
 alloy-transport-ipc = { git = "https://github.com/Rimeeeeee/alloy.git", branch = "focil-eip7805" }
 alloy-transport-ws = { git = "https://github.com/Rimeeeeee/alloy.git", branch = "focil-eip7805" }
 alloy-tx-macros = { git = "https://github.com/Rimeeeeee/alloy.git", branch = "focil-eip7805" }
+alloy-hardforks = { git = "https://github.com/alloy-rs/hardforks.git", branch = "main" }
