@@ -133,7 +133,6 @@ const fn status_code(status: &PayloadStatusEnum) -> u8 {
         PayloadStatusEnum::Invalid { .. } => 1,
         PayloadStatusEnum::Syncing => 2,
         PayloadStatusEnum::Accepted => 3,
-        PayloadStatusEnum::InclusionListUnsatisfied => 4,
     }
 }
 
@@ -143,7 +142,6 @@ fn status_from_code(code: u8) -> Result<PayloadStatusEnum, ssz::DecodeError> {
         1 => Ok(PayloadStatusEnum::Invalid { validation_error: String::new() }),
         2 => Ok(PayloadStatusEnum::Syncing),
         3 => Ok(PayloadStatusEnum::Accepted),
-        4 => Ok(PayloadStatusEnum::InclusionListUnsatisfied),
         _ => Err(ssz::DecodeError::BytesInvalid("unknown payload status code".into())),
     }
 }

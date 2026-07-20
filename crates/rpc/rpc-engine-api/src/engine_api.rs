@@ -12,8 +12,8 @@ use alloy_rpc_types_engine::{
     CancunPayloadFields, ClientVersionV1, ExecutionData, ExecutionPayloadBodiesV1,
     ExecutionPayloadBodiesV2, ExecutionPayloadBodyV1, ExecutionPayloadBodyV2,
     ExecutionPayloadInputV2, ExecutionPayloadSidecar, ExecutionPayloadV1, ExecutionPayloadV3,
-    ExecutionPayloadV4, ForkchoiceState, ForkchoiceUpdated, PayloadId, PayloadStatus,
-    PayloadStatusEnum, PraguePayloadFields,
+    ExecutionPayloadV4, ForkchoiceState, ForkchoiceUpdated, ForkchoiceUpdatedV2, PayloadId,
+    PayloadStatus, PayloadStatusEnum, PayloadStatusV2, PraguePayloadFields,
 };
 use async_trait::async_trait;
 use jsonrpsee_core::{server::RpcModule, RpcResult};
@@ -298,13 +298,12 @@ where
     }
 
     /// Handler for `engine_newPayloadV6` with EIP-7805 inclusion-list validation.
-    // TODO(focil): Keep the response as Alloy's base PayloadStatus until the EELS test release's
-    // separate inclusion-list status is included in the finalized Engine API schema.
+    /// Returns the finalized EIP-7805 V2 status, including inclusion-list satisfaction.
     pub async fn new_payload_v6(
         &self,
         payload: PayloadT::ExecutionData,
         inclusion_list_transactions: Vec<Bytes>,
-    ) -> EngineApiResult<PayloadStatus> {
+    ) -> EngineApiResult<PayloadStatusV2> {
         let block_hash = payload.block_hash();
         let payload_or_attrs = PayloadOrAttributes::<
             '_,
@@ -320,17 +319,12 @@ where
             .beacon_consensus
             .new_payload_with_inclusion_list(payload, inclusion_list_transactions)
             .await?;
-        if payload_status.is_valid() {
-            // Ensure the post-state recorded the inclusion-list result, while returning the
-            // standard Engine API status shape expected by the Bogota EELS tests.
-            if !self.inclusion_list_satisfied(block_hash).await? {
-                return Ok(PayloadStatus {
-                    status: PayloadStatusEnum::InclusionListUnsatisfied,
-                    latest_valid_hash: payload_status.latest_valid_hash,
-                });
-            }
-        }
-        Ok(payload_status)
+        let inclusion_list_satisfied = if payload_status.is_valid() {
+            Some(self.inclusion_list_satisfied(block_hash).await?)
+        } else {
+            None
+        };
+        Ok(PayloadStatusV2::new(payload_status, inclusion_list_satisfied))
     }
 
     /// Metrics version of `new_payload_v6`.
@@ -338,7 +332,7 @@ where
         &self,
         payload: PayloadT::ExecutionData,
         inclusion_list_transactions: Vec<Bytes>,
-    ) -> EngineApiResult<PayloadStatus> {
+    ) -> EngineApiResult<PayloadStatusV2> {
         let start = Instant::now();
         let result = Self::new_payload_v6(self, payload, inclusion_list_transactions).await;
         self.inner.metrics.latency.new_payload_v6.record(start.elapsed());
@@ -481,21 +475,28 @@ where
     }
 
     /// Handles `engine_forkchoiceUpdatedV5`.
-    // TODO(focil): Keep the response as Alloy's base ForkchoiceUpdated while the EELS test release
-    // rejects the later `inclusionListSatisfied` response field.
+    /// Returns the finalized EIP-7805 V2 forkchoice response.
     pub async fn fork_choice_updated_v5(
         &self,
         state: ForkchoiceState,
         payload_attrs: Option<EngineT::PayloadAttributes>,
         custody_columns: Option<B128>,
-    ) -> EngineApiResult<ForkchoiceUpdated> {
+    ) -> EngineApiResult<ForkchoiceUpdatedV2> {
         if let Some(custody_columns) = custody_columns {
             self.inner.cell_custody.set(custody_columns);
         }
         let response = self
             .validate_and_execute_forkchoice(EngineApiMessageVersion::V5, state, payload_attrs)
             .await?;
-        Ok(response)
+        let inclusion_list_satisfied = if response.payload_status.is_valid() {
+            Some(self.inclusion_list_satisfied(state.head_block_hash).await?)
+        } else {
+            None
+        };
+        Ok(ForkchoiceUpdatedV2 {
+            payload_status: PayloadStatusV2::new(response.payload_status, inclusion_list_satisfied),
+            payload_id: response.payload_id,
+        })
     }
 
     /// Metrics version of `fork_choice_updated_v5`.
@@ -504,7 +505,7 @@ where
         state: ForkchoiceState,
         payload_attrs: Option<EngineT::PayloadAttributes>,
         custody_columns: Option<B128>,
-    ) -> EngineApiResult<ForkchoiceUpdated> {
+    ) -> EngineApiResult<ForkchoiceUpdatedV2> {
         let start = Instant::now();
         let result =
             Self::fork_choice_updated_v5(self, state, payload_attrs, custody_columns).await;
@@ -1393,7 +1394,7 @@ where
         parent_beacon_block_root: B256,
         requests: RequestsOrHash,
         inclusion_list_transactions: Vec<Bytes>,
-    ) -> RpcResult<PayloadStatus> {
+    ) -> RpcResult<PayloadStatusV2> {
         trace!(target: "rpc::engine", "Serving engine_newPayloadV6");
         if requests.is_hash() && !self.inner.accept_execution_requests_hash {
             return Err(EngineApiError::UnexpectedRequestsHash.into());
@@ -1467,7 +1468,7 @@ where
         fork_choice_state: ForkchoiceState,
         payload_attributes: Option<EngineT::PayloadAttributes>,
         custody_columns: Option<B128>,
-    ) -> RpcResult<ForkchoiceUpdated> {
+    ) -> RpcResult<ForkchoiceUpdatedV2> {
         trace!(target: "rpc::engine", "Serving engine_forkchoiceUpdatedV5");
         Ok(self
             .fork_choice_updated_v5_metered(fork_choice_state, payload_attributes, custody_columns)

@@ -97,7 +97,7 @@ pub trait EngineApi<Engine: EngineTypes> {
         parent_beacon_block_root: B256,
         execution_requests: RequestsOrHash,
         inclusion_list_transactions: Vec<Bytes>,
-    ) -> RpcResult<PayloadStatus>;
+    ) -> RpcResult<PayloadStatusV2>;
 
     /// See also <https://github.com/ethereum/execution-apis/blob/6709c2a795b707202e93c4f2867fa0bf2640a84f/src/engine/paris.md#engine_forkchoiceupdatedv1>
     ///
@@ -170,7 +170,7 @@ pub trait EngineApi<Engine: EngineTypes> {
         fork_choice_state: ForkchoiceState,
         payload_attributes: Option<Engine::PayloadAttributes>,
         custody_columns: Option<B128>,
-    ) -> RpcResult<ForkchoiceUpdated>;
+    ) -> RpcResult<ForkchoiceUpdatedV2>;
 
     /// See also <https://github.com/ethereum/execution-apis/blob/6709c2a795b707202e93c4f2867fa0bf2640a84f/src/engine/paris.md#engine_getpayloadv1>
     ///
