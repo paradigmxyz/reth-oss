@@ -12,6 +12,7 @@ use alloy_consensus::{BlockHeader, Transaction};
 use alloy_eips::eip2718::Decodable2718;
 use alloy_primitives::{Bytes, U256};
 use alloy_rlp::Encodable;
+use alloy_rpc_types_engine::PayloadAttributes as EthPayloadAttributes;
 use reth_basic_payload_builder::{
     is_better_payload, BuildArguments, BuildOutcome, MissingPayloadBehaviour, PayloadBuilder,
     PayloadConfig,
@@ -27,7 +28,7 @@ use reth_evm::{
 };
 use reth_evm_ethereum::EthEvmConfig;
 use reth_execution_cache::{CachedStateMetrics, CachedStateMetricsSource, CachedStateProvider};
-use reth_payload_builder::{BlobSidecars, EthBuiltPayload, EthPayloadAttributes};
+use reth_payload_builder::{BlobSidecars, EthBuiltPayload};
 use reth_payload_builder_primitives::PayloadBuilderError;
 use reth_payload_primitives::PayloadAttributes;
 use reth_primitives_traits::{transaction::error::InvalidTransactionError, SignedTransaction};

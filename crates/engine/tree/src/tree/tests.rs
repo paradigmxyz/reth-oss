@@ -17,13 +17,14 @@ use alloy_primitives::{
 use alloy_rlp::Decodable;
 use alloy_rpc_types_engine::{
     ExecutionData, ExecutionPayloadSidecar, ExecutionPayloadV1, ForkchoiceState,
+    PayloadAttributes as EthPayloadAttributes,
 };
 use assert_matches::assert_matches;
 use reth_chain_state::{test_utils::TestBlockBuilder, BlockState, StateTrieOverlayManager};
 use reth_chainspec::{ChainSpec, HOLESKY, MAINNET};
 use reth_engine_primitives::{EngineApiValidator, ForkchoiceStatus, NoopInvalidBlockHook};
 use reth_ethereum_consensus::EthBeaconConsensus;
-use reth_ethereum_engine_primitives::{EthEngineTypes, EthPayloadAttributes};
+use reth_ethereum_engine_primitives::EthEngineTypes;
 use reth_ethereum_primitives::{Block, EthPrimitives};
 use reth_evm_ethereum::MockEvmConfig;
 use reth_payload_builder::PayloadServiceCommand;
@@ -762,6 +763,7 @@ fn process_payload_attributes_shares_sparse_trie_during_validation_fallback() {
             parent_beacon_block_root: None,
             slot_number: None,
             target_gas_limit: None,
+            inclusion_list_transactions: None,
         }
         .into(),
         &head,

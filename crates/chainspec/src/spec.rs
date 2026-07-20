@@ -1215,6 +1215,19 @@ impl ChainSpecBuilder {
         self
     }
 
+    /// Enable Bogota at genesis.
+    pub fn bogota_activated(mut self) -> Self {
+        self = self.amsterdam_activated();
+        self.hardforks.insert(EthereumHardfork::Bogota, ForkCondition::Timestamp(0));
+        self
+    }
+
+    /// Enable Bogota at the given timestamp.
+    pub fn with_bogota_at(mut self, timestamp: u64) -> Self {
+        self.hardforks.insert(EthereumHardfork::Bogota, ForkCondition::Timestamp(timestamp));
+        self
+    }
+
     /// Build the resulting [`ChainSpec`].
     ///
     /// # Panics
@@ -1935,7 +1948,7 @@ Post-merge hard forks (timestamp based):
             &DEV,
             &[(
                 Head { number: 0, ..Default::default() },
-                ForkId { hash: ForkHash(hex!("0x0b1a4ef7")), next: 0 },
+                ForkId { hash: ForkHash(hex!("0x83071bcf")), next: 0 },
             )],
         )
     }

@@ -60,6 +60,7 @@ async fn testing_rpc_build_block_works() -> eyre::Result<()> {
                 parent_beacon_block_root: None,
                 slot_number: None,
                 target_gas_limit: None,
+                inclusion_list_transactions: None,
             };
 
             let request = TestingBuildBlockRequestV1 {
@@ -140,6 +141,7 @@ async fn testing_rpc_commit_block_works() -> eyre::Result<()> {
                 parent_beacon_block_root: Some(B256::ZERO),
                 slot_number: Some(timestamp),
                 target_gas_limit: None,
+                inclusion_list_transactions: None,
             };
 
             tokio::spawn(async move {

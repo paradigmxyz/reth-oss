@@ -245,6 +245,7 @@ async fn test_testing_build_block_v1_osaka() -> eyre::Result<()> {
         parent_beacon_block_root: Some(B256::ZERO),
         slot_number: None,
         target_gas_limit: None,
+        inclusion_list_transactions: None,
     };
 
     let request = TestingBuildBlockRequestV1 {
@@ -334,6 +335,7 @@ async fn test_engine_ssz_proxy_can_mine_block() -> eyre::Result<()> {
         parent_beacon_block_root: Some(B256::ZERO),
         slot_number: None,
         target_gas_limit: None,
+        inclusion_list_transactions: None,
     };
 
     let envelope = node

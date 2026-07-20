@@ -11,9 +11,6 @@
 
 extern crate alloc;
 
-mod attributes;
-pub use attributes::EthPayloadAttributes;
-
 mod payload;
 use alloy_primitives::Bytes;
 pub use payload::{BlobSidecars, EthBuiltPayload};
@@ -88,7 +85,7 @@ pub struct EthPayloadTypes;
 
 impl PayloadTypes for EthPayloadTypes {
     type BuiltPayload = EthBuiltPayload;
-    type PayloadAttributes = EthPayloadAttributes;
+    type PayloadAttributes = alloy_rpc_types_engine::PayloadAttributes;
     type ExecutionData = ExecutionData;
 
     fn block_to_payload(

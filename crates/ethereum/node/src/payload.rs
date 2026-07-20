@@ -1,7 +1,8 @@
 //! Payload component configuration for the Ethereum node.
 
+use alloy_rpc_types_engine::PayloadAttributes as EthPayloadAttributes;
 use reth_chainspec::{EthChainSpec, EthereumHardforks};
-use reth_ethereum_engine_primitives::{EthBuiltPayload, EthPayloadAttributes};
+use reth_ethereum_engine_primitives::EthBuiltPayload;
 use reth_ethereum_payload_builder::EthereumBuilderConfig;
 use reth_ethereum_primitives::EthPrimitives;
 use reth_evm::ConfigureEvm;

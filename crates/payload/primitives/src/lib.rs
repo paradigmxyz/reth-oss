@@ -25,8 +25,8 @@ pub use error::{
 
 mod traits;
 pub use traits::{
-    payload_id, payload_id_with_inclusion_list, BuildNextEnv, BuiltPayload,
-    BuiltPayloadExecutedBlock, PayloadAttributes, PayloadAttributesBuilder,
+    payload_id, BuildNextEnv, BuiltPayload, BuiltPayloadExecutedBlock, PayloadAttributes,
+    PayloadAttributesBuilder,
 };
 
 mod payload;
@@ -62,8 +62,10 @@ pub trait PayloadTypes: Send + Sync + Unpin + core::fmt::Debug + Clone + 'static
 /// * If V2, this ensures that the payload timestamp is pre-Cancun.
 /// * If V3, this ensures that the payload timestamp is within the Cancun timestamp.
 /// * If V4, this ensures that the payload timestamp is within the Prague timestamp.
-/// * If V5, this ensures that the payload timestamp is within the Osaka timestamp.
-/// * If V6, this ensures that the payload timestamp is within the Amsterdam timestamp.
+/// * If V5, this ensures that payloads are within Osaka and FOCIL payload attributes are within
+///   Bogota.
+/// * If V6, this ensures that `engine_getPayloadV6` payloads are within Amsterdam and
+///   `engine_newPayloadV6` FOCIL payloads are within Bogota.
 ///
 /// Additionally, it ensures that `engine_getPayloadV4` is not used for an Osaka payload and that
 /// staggered endpoint upgrades reject the next fork once a newer method version is required.
@@ -155,10 +157,10 @@ pub fn validate_payload_timestamp(
     }
 
     let is_amsterdam = chain_spec.is_amsterdam_active_at_timestamp(timestamp);
+    let is_bogota = chain_spec.is_bogota_active_at_timestamp(timestamp);
 
-    // Bogota does not have a stable hardfork identifier yet. The experimental devnet activates
-    // its Engine API methods together with the current Amsterdam schedule.
-    if version.is_v5() && kind == MessageValidationKind::PayloadAttributes && !is_amsterdam {
+    // `engine_forkchoiceUpdatedV5` carries FOCIL payload attributes and is enabled by Bogota.
+    if version.is_v5() && kind == MessageValidationKind::PayloadAttributes && !is_bogota {
         return Err(EngineObjectValidationError::UnsupportedFork)
     }
 
@@ -180,16 +182,16 @@ pub fn validate_payload_timestamp(
         return Err(EngineObjectValidationError::UnsupportedFork)
     }
 
-    if version.is_v6() && !is_amsterdam {
-        // From the Engine API spec:
-        // <https://github.com/ethereum/execution-apis/blob/15399c2e2f16a5f800bf3f285640357e2c245ad9/src/engine/osaka.md#specification>
-        //
-        // For `engine_getPayloadV6`
-        //
-        // 1. Client software MUST return -38005: Unsupported fork error if the timestamp of the
-        //    built payload does not fall within the time frame of the Amsterdam fork.
-
-        return Err(EngineObjectValidationError::UnsupportedFork)
+    if version.is_v6() {
+        // `engine_getPayloadV6` is the Amsterdam payload-envelope method, while
+        // `engine_newPayloadV6` is the Bogota FOCIL method.
+        let fork_active = match kind {
+            MessageValidationKind::GetPayload => is_amsterdam,
+            MessageValidationKind::Payload | MessageValidationKind::PayloadAttributes => is_bogota,
+        };
+        if !fork_active {
+            return Err(EngineObjectValidationError::UnsupportedFork)
+        }
     }
 
     Ok(())
@@ -318,9 +320,24 @@ pub fn validate_slot_number_presence<T: EthereumHardforks>(
     Ok(())
 }
 
+/// Maximum RLP-encoded size of an EIP-7805 inclusion list.
+pub const MAX_INCLUSION_LIST_BYTES: usize = 8192;
+
+/// Validates the encoded RLP size of an EIP-7805 inclusion list.
+pub fn validate_inclusion_list_size(
+    transactions: &[Bytes],
+) -> Result<(), EngineObjectValidationError> {
+    if alloy_rlp::list_length::<Bytes, [u8]>(&transactions) > MAX_INCLUSION_LIST_BYTES {
+        return Err(EngineObjectValidationError::InvalidParams("InclusionListTooLarge".into()))
+    }
+    Ok(())
+}
+
 /// Validates EIP-7805 inclusion-list presence on forkchoice payload attributes.
-pub fn validate_inclusion_list_presence<Type: PayloadAttributes>(
+pub fn validate_inclusion_list_presence<T: EthereumHardforks, Type: PayloadAttributes>(
+    chain_spec: &T,
     version: EngineApiMessageVersion,
+    timestamp: u64,
     attributes: &Type,
 ) -> Result<(), EngineObjectValidationError> {
     let has_inclusion_list = attributes.inclusion_list_transactions().is_some();
@@ -333,6 +350,14 @@ pub fn validate_inclusion_list_presence<Type: PayloadAttributes>(
         {
             Err(MessageValidationKind::PayloadAttributes
                 .to_error(VersionSpecificValidationError::InclusionListNotSupported))
+        }
+        EngineApiMessageVersion::V5
+            if has_inclusion_list && !chain_spec.is_bogota_active_at_timestamp(timestamp) =>
+        {
+            Err(EngineObjectValidationError::UnsupportedFork)
+        }
+        EngineApiMessageVersion::V5 if has_inclusion_list => {
+            validate_inclusion_list_size(attributes.inclusion_list_transactions().unwrap())
         }
         EngineApiMessageVersion::V5 if !has_inclusion_list => {
             Err(MessageValidationKind::PayloadAttributes
@@ -552,7 +577,12 @@ where
             payload_or_attrs.block_access_list().is_some(),
         )?;
     } else if let PayloadOrAttributes::PayloadAttributes(attributes) = payload_or_attrs {
-        validate_inclusion_list_presence(version, attributes)?;
+        validate_inclusion_list_presence(
+            chain_spec,
+            version,
+            payload_or_attrs.timestamp(),
+            attributes,
+        )?;
     }
 
     validate_slot_number_presence(
@@ -781,6 +811,69 @@ mod tests {
             MessageValidationKind::GetPayload,
         );
         assert_matches!(res, Ok(()));
+    }
+
+    #[test]
+    fn validate_bogota_focil_version_restrictions() {
+        let bogota_activation = 1000;
+        let chain_spec = ChainSpecBuilder::mainnet()
+            .amsterdam_activated()
+            .with_bogota_at(bogota_activation)
+            .build();
+
+        // FCU V5 carries FOCIL payload attributes and is unsupported before Bogota.
+        let res = validate_payload_timestamp(
+            &chain_spec,
+            EngineApiMessageVersion::V5,
+            bogota_activation - 1,
+            MessageValidationKind::PayloadAttributes,
+        );
+        assert_matches!(res, Err(EngineObjectValidationError::UnsupportedFork));
+
+        let res = validate_payload_timestamp(
+            &chain_spec,
+            EngineApiMessageVersion::V5,
+            bogota_activation,
+            MessageValidationKind::PayloadAttributes,
+        );
+        assert_matches!(res, Ok(()));
+
+        // NewPayload V6 carries FOCIL transactions and is likewise Bogota-gated.
+        let res = validate_payload_timestamp(
+            &chain_spec,
+            EngineApiMessageVersion::V6,
+            bogota_activation - 1,
+            MessageValidationKind::Payload,
+        );
+        assert_matches!(res, Err(EngineObjectValidationError::UnsupportedFork));
+
+        let res = validate_payload_timestamp(
+            &chain_spec,
+            EngineApiMessageVersion::V6,
+            bogota_activation,
+            MessageValidationKind::Payload,
+        );
+        assert_matches!(res, Ok(()));
+
+        // GetPayload V6 remains the Amsterdam BAL method.
+        let res = validate_payload_timestamp(
+            &chain_spec,
+            EngineApiMessageVersion::V6,
+            0,
+            MessageValidationKind::GetPayload,
+        );
+        assert_matches!(res, Ok(()));
+    }
+
+    #[test]
+    fn validate_inclusion_list_size_limit() {
+        assert_matches!(validate_inclusion_list_size(&[]), Ok(()));
+
+        let oversized = vec![Bytes::from(vec![0u8; MAX_INCLUSION_LIST_BYTES])];
+        assert_matches!(
+            validate_inclusion_list_size(&oversized),
+            Err(EngineObjectValidationError::InvalidParams(_))
+        );
     }
 
     #[test]

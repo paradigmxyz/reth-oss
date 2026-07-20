@@ -690,3 +690,38 @@ vergen-git2 = "10.0.1"
 
 # networking
 ipnet = "2.11"
+
+# Keep the coordinated EIP-7805 Engine API types on one Alloy source until the upstream Alloy
+# changes are released together.
+[patch.crates-io]
+alloy-contract = { git = "https://github.com/Rimeeeeee/alloy.git", branch = "focil-eip7805" }
+alloy-consensus = { git = "https://github.com/Rimeeeeee/alloy.git", branch = "focil-eip7805" }
+alloy-consensus-any = { git = "https://github.com/Rimeeeeee/alloy.git", branch = "focil-eip7805" }
+alloy-eips = { git = "https://github.com/Rimeeeeee/alloy.git", branch = "focil-eip7805" }
+alloy-genesis = { git = "https://github.com/Rimeeeeee/alloy.git", branch = "focil-eip7805" }
+alloy-json-rpc = { git = "https://github.com/Rimeeeeee/alloy.git", branch = "focil-eip7805" }
+alloy-network = { git = "https://github.com/Rimeeeeee/alloy.git", branch = "focil-eip7805" }
+alloy-network-primitives = { git = "https://github.com/Rimeeeeee/alloy.git", branch = "focil-eip7805" }
+alloy-provider = { git = "https://github.com/Rimeeeeee/alloy.git", branch = "focil-eip7805" }
+alloy-pubsub = { git = "https://github.com/Rimeeeeee/alloy.git", branch = "focil-eip7805" }
+alloy-rpc-client = { git = "https://github.com/Rimeeeeee/alloy.git", branch = "focil-eip7805" }
+alloy-rpc-types = { git = "https://github.com/Rimeeeeee/alloy.git", branch = "focil-eip7805" }
+alloy-rpc-types-admin = { git = "https://github.com/Rimeeeeee/alloy.git", branch = "focil-eip7805" }
+alloy-rpc-types-anvil = { git = "https://github.com/Rimeeeeee/alloy.git", branch = "focil-eip7805" }
+alloy-rpc-types-any = { git = "https://github.com/Rimeeeeee/alloy.git", branch = "focil-eip7805" }
+alloy-rpc-types-beacon = { git = "https://github.com/Rimeeeeee/alloy.git", branch = "focil-eip7805" }
+alloy-rpc-types-debug = { git = "https://github.com/Rimeeeeee/alloy.git", branch = "focil-eip7805" }
+alloy-rpc-types-engine = { git = "https://github.com/Rimeeeeee/alloy.git", branch = "focil-eip7805" }
+alloy-rpc-types-eth = { git = "https://github.com/Rimeeeeee/alloy.git", branch = "focil-eip7805" }
+alloy-rpc-types-mev = { git = "https://github.com/Rimeeeeee/alloy.git", branch = "focil-eip7805" }
+alloy-rpc-types-trace = { git = "https://github.com/Rimeeeeee/alloy.git", branch = "focil-eip7805" }
+alloy-rpc-types-txpool = { git = "https://github.com/Rimeeeeee/alloy.git", branch = "focil-eip7805" }
+alloy-serde = { git = "https://github.com/Rimeeeeee/alloy.git", branch = "focil-eip7805" }
+alloy-signer = { git = "https://github.com/Rimeeeeee/alloy.git", branch = "focil-eip7805" }
+alloy-signer-local = { git = "https://github.com/Rimeeeeee/alloy.git", branch = "focil-eip7805" }
+alloy-transport = { git = "https://github.com/Rimeeeeee/alloy.git", branch = "focil-eip7805" }
+alloy-transport-http = { git = "https://github.com/Rimeeeeee/alloy.git", branch = "focil-eip7805" }
+alloy-transport-ipc = { git = "https://github.com/Rimeeeeee/alloy.git", branch = "focil-eip7805" }
+alloy-transport-ws = { git = "https://github.com/Rimeeeeee/alloy.git", branch = "focil-eip7805" }
+alloy-tx-macros = { git = "https://github.com/Rimeeeeee/alloy.git", branch = "focil-eip7805" }
+alloy-hardforks = { git = "https://github.com/alloy-rs/hardforks.git", branch = "main" }

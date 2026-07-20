@@ -132,6 +132,10 @@ impl PayloadAttributes for EthPayloadAttributes {
     fn target_gas_limit(&self) -> Option<u64> {
         self.target_gas_limit
     }
+
+    fn inclusion_list_transactions(&self) -> Option<&[Bytes]> {
+        self.inclusion_list_transactions.as_deref()
+    }
 }
 
 /// Factory trait for creating payload attributes.
@@ -198,15 +202,6 @@ pub fn payload_id(
     parent: &B256,
     attributes: &alloy_rpc_types_engine::PayloadAttributes,
 ) -> PayloadId {
-    payload_id_with_inclusion_list(parent, attributes, None)
-}
-
-/// Generates a payload id that also commits to EIP-7805 inclusion-list transactions.
-pub fn payload_id_with_inclusion_list(
-    parent: &B256,
-    attributes: &alloy_rpc_types_engine::PayloadAttributes,
-    inclusion_list_transactions: Option<&[Bytes]>,
-) -> PayloadId {
     use sha2::Digest;
     let mut hasher = sha2::Sha256::new();
     hasher.update(parent.as_slice());
@@ -231,7 +226,7 @@ pub fn payload_id_with_inclusion_list(
         hasher.update(target_gas_limit.to_be_bytes());
     }
 
-    if let Some(transactions) = inclusion_list_transactions {
+    if let Some(transactions) = attributes.inclusion_list_transactions.as_deref() {
         hasher.update((transactions.len() as u64).to_be_bytes());
         for transaction in transactions {
             hasher.update((transaction.len() as u64).to_be_bytes());
@@ -278,6 +273,7 @@ mod tests {
             parent_beacon_block_root: None,
             slot_number: None,
             target_gas_limit: None,
+            inclusion_list_transactions: None,
         };
 
         // Verify that the generated payload ID matches the expected value
@@ -317,6 +313,7 @@ mod tests {
             parent_beacon_block_root: None,
             slot_number: None,
             target_gas_limit: None,
+            inclusion_list_transactions: None,
         };
 
         // Verify that the generated payload ID matches the expected value
@@ -351,6 +348,7 @@ mod tests {
             ),
             slot_number: None,
             target_gas_limit: None,
+            inclusion_list_transactions: None,
         };
 
         // Verify that the generated payload ID matches the expected value
@@ -376,6 +374,7 @@ mod tests {
             parent_beacon_block_root: Some(B256::from_slice(&[2; 32])),
             slot_number: Some(1),
             target_gas_limit: None,
+            inclusion_list_transactions: None,
         };
 
         let first = payload_id(&parent, &attributes);
@@ -400,11 +399,29 @@ mod tests {
             parent_beacon_block_root: Some(B256::from_slice(&[2; 32])),
             slot_number: Some(1),
             target_gas_limit: Some(30_000_000),
+            inclusion_list_transactions: None,
         };
 
         let first = payload_id(&parent, &attributes);
         attributes.target_gas_limit = Some(60_000_000);
 
         assert_ne!(first, payload_id(&parent, &attributes));
+    }
+
+    #[test]
+    fn test_payload_id_with_inclusion_list() {
+        let parent = B256::repeat_byte(0x11);
+        let attributes = EthPayloadAttributes::default();
+        let with_empty_list = EthPayloadAttributes {
+            inclusion_list_transactions: Some(Vec::new()),
+            ..attributes.clone()
+        };
+        let with_list = EthPayloadAttributes {
+            inclusion_list_transactions: Some(vec![Bytes::from_static(&[0x01])]),
+            ..attributes.clone()
+        };
+
+        assert_ne!(payload_id(&parent, &attributes), payload_id(&parent, &with_empty_list));
+        assert_ne!(payload_id(&parent, &attributes), payload_id(&parent, &with_list));
     }
 }

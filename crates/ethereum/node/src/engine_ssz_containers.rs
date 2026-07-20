@@ -492,6 +492,7 @@ impl From<PayloadAttributesParis> for LegacyPayloadAttributes {
             parent_beacon_block_root: None,
             slot_number: None,
             target_gas_limit: None,
+            inclusion_list_transactions: None,
         }
     }
 }
@@ -522,6 +523,7 @@ impl From<PayloadAttributesShanghai> for LegacyPayloadAttributes {
             parent_beacon_block_root: None,
             slot_number: None,
             target_gas_limit: None,
+            inclusion_list_transactions: None,
         }
     }
 }
@@ -552,6 +554,7 @@ impl From<PayloadAttributesCancun> for LegacyPayloadAttributes {
             parent_beacon_block_root: Some(value.parent_beacon_block_root),
             slot_number: None,
             target_gas_limit: None,
+            inclusion_list_transactions: None,
         }
     }
 }
@@ -585,6 +588,7 @@ impl From<PayloadAttributesAmsterdam> for LegacyPayloadAttributes {
             parent_beacon_block_root: Some(value.parent_beacon_block_root),
             slot_number: Some(value.slot_number),
             target_gas_limit: Some(value.target_gas_limit),
+            inclusion_list_transactions: None,
         }
     }
 }

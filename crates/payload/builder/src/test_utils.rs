@@ -7,9 +7,8 @@ use crate::{
 
 use alloy_consensus::Block;
 use alloy_primitives::U256;
-use alloy_rpc_types::engine::PayloadId;
+use alloy_rpc_types::engine::{PayloadAttributes, PayloadId};
 use reth_chain_state::CanonStateNotification;
-use reth_ethereum_engine_primitives::EthPayloadAttributes;
 use reth_payload_builder_primitives::PayloadBuilderError;
 use reth_payload_primitives::{PayloadKind, PayloadTypes};
 use reth_primitives_traits::{Block as _, RecoveredBlock};
@@ -30,7 +29,7 @@ pub fn test_payload_service<T>() -> (
     PayloadBuilderHandle<T>,
 )
 where
-    T: PayloadTypes<PayloadAttributes = EthPayloadAttributes, BuiltPayload = EthBuiltPayload>
+    T: PayloadTypes<PayloadAttributes = PayloadAttributes, BuiltPayload = EthBuiltPayload>
         + 'static,
 {
     PayloadBuilderService::new(Default::default(), futures_util::stream::empty())
@@ -39,7 +38,7 @@ where
 /// Creates a new [`PayloadBuilderService`] for testing purposes and spawns it in the background.
 pub fn spawn_test_payload_service<T>() -> PayloadBuilderHandle<T>
 where
-    T: PayloadTypes<PayloadAttributes = EthPayloadAttributes, BuiltPayload = EthBuiltPayload>
+    T: PayloadTypes<PayloadAttributes = PayloadAttributes, BuiltPayload = EthBuiltPayload>
         + 'static,
 {
     let (service, handle) = test_payload_service();
@@ -57,7 +56,7 @@ impl PayloadJobGenerator for TestPayloadJobGenerator {
 
     fn new_payload_job(
         &self,
-        input: BuildNewPayload<EthPayloadAttributes>,
+        input: BuildNewPayload<PayloadAttributes>,
         _id: PayloadId,
     ) -> Result<Self::Job, PayloadBuilderError> {
         Ok(TestPayloadJob { attr: input.attributes })
@@ -67,7 +66,7 @@ impl PayloadJobGenerator for TestPayloadJobGenerator {
 /// A [`PayloadJob`] for testing purposes
 #[derive(Debug)]
 pub struct TestPayloadJob {
-    attr: EthPayloadAttributes,
+    attr: PayloadAttributes,
 }
 
 impl Future for TestPayloadJob {
@@ -79,7 +78,7 @@ impl Future for TestPayloadJob {
 }
 
 impl PayloadJob for TestPayloadJob {
-    type PayloadAttributes = EthPayloadAttributes;
+    type PayloadAttributes = alloy_rpc_types::engine::PayloadAttributes;
     type ResolvePayloadFuture =
         futures_util::future::Ready<Result<EthBuiltPayload, PayloadBuilderError>>;
     type BuiltPayload = EthBuiltPayload;
@@ -93,7 +92,7 @@ impl PayloadJob for TestPayloadJob {
         ))
     }
 
-    fn payload_attributes(&self) -> Result<EthPayloadAttributes, PayloadBuilderError> {
+    fn payload_attributes(&self) -> Result<PayloadAttributes, PayloadBuilderError> {
         Ok(self.attr.clone())
     }
 
