@@ -24,8 +24,8 @@ use reth_engine_primitives::{
 use reth_network_api::{CellCustody, NetworkInfo};
 use reth_payload_builder::PayloadStore;
 use reth_payload_primitives::{
-    validate_payload_timestamp, EngineApiMessageVersion, MessageValidationKind,
-    PayloadOrAttributes, PayloadTypes,
+    validate_inclusion_list_size, validate_payload_timestamp, EngineApiMessageVersion,
+    MessageValidationKind, PayloadOrAttributes, PayloadTypes, MAX_INCLUSION_LIST_BYTES,
 };
 use reth_primitives_traits::{AlloyBlockHeader, Block, BlockBody};
 use reth_rpc_api::{EngineApiServer, IntoEngineApiRpcModule};
@@ -47,9 +47,6 @@ const MAX_PAYLOAD_BODIES_LIMIT: u64 = 1024;
 
 /// The upper limit for blobs in `engine_getBlobsVx`.
 const MAX_BLOB_LIMIT: usize = 128;
-
-/// Maximum encoded size of one EIP-7805 inclusion list.
-const MAX_BYTES_PER_INCLUSION_LIST: usize = 8192;
 
 /// The Engine API implementation that grants the Consensus layer access to data and
 /// functions in the Execution layer that are crucial for the consensus process.
@@ -304,6 +301,7 @@ where
         payload: PayloadT::ExecutionData,
         inclusion_list_transactions: Vec<Bytes>,
     ) -> EngineApiResult<PayloadStatusV2> {
+        validate_inclusion_list_size(&inclusion_list_transactions)?;
         let block_hash = payload.block_hash();
         let payload_or_attrs = PayloadOrAttributes::<
             '_,
@@ -482,17 +480,19 @@ where
         payload_attrs: Option<EngineT::PayloadAttributes>,
         custody_columns: Option<B128>,
     ) -> EngineApiResult<ForkchoiceUpdatedV2> {
+        let has_inclusion_list_attributes = payload_attrs.is_some();
         if let Some(custody_columns) = custody_columns {
             self.inner.cell_custody.set(custody_columns);
         }
         let response = self
             .validate_and_execute_forkchoice(EngineApiMessageVersion::V5, state, payload_attrs)
             .await?;
-        let inclusion_list_satisfied = if response.payload_status.is_valid() {
-            Some(self.inclusion_list_satisfied(state.head_block_hash).await?)
-        } else {
-            None
-        };
+        let inclusion_list_satisfied =
+            if response.payload_status.is_valid() && has_inclusion_list_attributes {
+                Some(self.inclusion_list_satisfied(state.head_block_hash).await?)
+            } else {
+                None
+            };
         Ok(ForkchoiceUpdatedV2 {
             payload_status: PayloadStatusV2::new(response.payload_status, inclusion_list_satisfied),
             payload_id: response.payload_id,
@@ -521,9 +521,14 @@ where
             .header(block_hash)
             .map_err(|error| EngineApiError::Internal(Box::new(error)))?
             .ok_or(EngineApiError::UnknownPayload)?;
+        if !self.inner.chain_spec.is_bogota_active_at_timestamp(header.timestamp()) {
+            return Err(EngineApiError::EngineObjectValidationError(
+                reth_payload_primitives::EngineObjectValidationError::UnsupportedFork,
+            ));
+        }
         Ok(self.inner.tx_pool.build_inclusion_list(
             header.base_fee_per_gas().unwrap_or_default(),
-            MAX_BYTES_PER_INCLUSION_LIST,
+            MAX_INCLUSION_LIST_BYTES,
         ))
     }
 
