@@ -81,6 +81,7 @@ impl<ChainSpec> EthReceiptConverter<ChainSpec> {
             build_rpc_receipt: |receipt: Receipt, next_log_index, meta: TransactionMeta| {
                 let mut log_index = next_log_index;
                 receipt
+                    .to_envelope()
                     .map_logs(|log| {
                         let idx = log_index;
                         log_index += 1;

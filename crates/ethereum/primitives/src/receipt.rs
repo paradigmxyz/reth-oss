@@ -1,31 +1,397 @@
-use alloy_consensus::TxType;
-pub use alloy_consensus::{EthereumReceipt, TxTy};
-use alloy_eips::eip2718::Encodable2718;
-use alloy_primitives::B256;
+use alloy_consensus::{
+    Eip2718DecodableReceipt, Eip2718EncodableReceipt, Eip658Value, InMemorySize,
+    Receipt as ConsensusReceipt, ReceiptWithBloom, RlpDecodableReceipt, RlpEncodableReceipt,
+    TxReceipt, TxType,
+};
+pub use alloy_consensus::{EthereumReceipt, ReceiptEnvelope, TxTy};
+use alloy_eips::{
+    eip2718::{Decodable2718, Eip2718Result, Encodable2718, IsTyped2718, Typed2718},
+    eip8141::FrameReceiptPayload,
+};
+use alloy_primitives::{logs_bloom, Bloom, Log, B256};
+use alloy_rlp::{BufMut, Decodable, Encodable, Header};
 use reth_primitives_traits::proofs::ordered_trie_root_with_encoder;
 
-/// Raw ethereum receipt.
-pub type Receipt<T = TxType> = EthereumReceipt<T>;
+/// Ethereum receipt with lossless EIP-8141 frame data and contiguous aggregate logs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Receipt {
+    /// Receipt transaction type.
+    pub tx_type: TxType,
+    /// Whether execution succeeded.
+    pub success: bool,
+    /// Cumulative block gas used after this transaction.
+    pub cumulative_gas_used: u64,
+    /// Logs emitted by the transaction, flattened across successful frames for EIP-8141.
+    pub logs: Vec<Log>,
+    /// Full EIP-8141 receipt payload. Present only for frame transactions.
+    pub frame_receipt: Option<FrameReceiptPayload<Log>>,
+}
+
+impl Default for Receipt {
+    fn default() -> Self {
+        Self {
+            tx_type: TxType::Legacy,
+            success: false,
+            cumulative_gas_used: 0,
+            logs: Vec::new(),
+            frame_receipt: None,
+        }
+    }
+}
+
+impl Receipt {
+    /// Converts a consensus receipt envelope into the Reth storage representation.
+    pub fn from_envelope(envelope: ReceiptEnvelope) -> Self {
+        match envelope {
+            ReceiptEnvelope::Legacy(receipt) => {
+                Self::from_standard(TxType::Legacy, receipt.receipt)
+            }
+            ReceiptEnvelope::Eip2930(receipt) => {
+                Self::from_standard(TxType::Eip2930, receipt.receipt)
+            }
+            ReceiptEnvelope::Eip1559(receipt) => {
+                Self::from_standard(TxType::Eip1559, receipt.receipt)
+            }
+            ReceiptEnvelope::Eip4844(receipt) => {
+                Self::from_standard(TxType::Eip4844, receipt.receipt)
+            }
+            ReceiptEnvelope::Eip7702(receipt) => {
+                Self::from_standard(TxType::Eip7702, receipt.receipt)
+            }
+            ReceiptEnvelope::Eip8141(payload) => {
+                let logs = payload
+                    .frame_receipts
+                    .iter()
+                    .flat_map(|receipt| receipt.logs.iter().cloned())
+                    .collect();
+                Self {
+                    tx_type: TxType::Eip8141,
+                    success: true,
+                    cumulative_gas_used: payload.cumulative_gas_used,
+                    logs,
+                    frame_receipt: Some(payload),
+                }
+            }
+        }
+    }
+
+    fn from_standard(tx_type: TxType, receipt: ConsensusReceipt) -> Self {
+        Self {
+            tx_type,
+            success: receipt.status.coerce_status(),
+            cumulative_gas_used: receipt.cumulative_gas_used,
+            logs: receipt.logs,
+            frame_receipt: None,
+        }
+    }
+
+    /// Converts this receipt into its consensus envelope.
+    pub fn to_envelope(&self) -> ReceiptEnvelope {
+        if self.tx_type == TxType::Eip8141 {
+            let mut payload = self
+                .frame_receipt
+                .clone()
+                .expect("EIP-8141 receipt is missing its frame receipt payload");
+            payload.cumulative_gas_used = self.cumulative_gas_used;
+            return ReceiptEnvelope::Eip8141(payload)
+        }
+
+        assert!(
+            self.frame_receipt.is_none(),
+            "non-EIP-8141 receipt contains a frame receipt payload"
+        );
+        let receipt = ConsensusReceipt {
+            status: Eip658Value::Eip658(self.success),
+            cumulative_gas_used: self.cumulative_gas_used,
+            logs: self.logs.clone(),
+        }
+        .with_bloom();
+        match self.tx_type {
+            TxType::Legacy => ReceiptEnvelope::Legacy(receipt),
+            TxType::Eip2930 => ReceiptEnvelope::Eip2930(receipt),
+            TxType::Eip1559 => ReceiptEnvelope::Eip1559(receipt),
+            TxType::Eip4844 => ReceiptEnvelope::Eip4844(receipt),
+            TxType::Eip7702 => ReceiptEnvelope::Eip7702(receipt),
+            TxType::Eip8141 => unreachable!("handled above"),
+        }
+    }
+
+    /// Returns the EIP-8141 frame receipt payload, if this is a frame transaction receipt.
+    pub const fn as_eip8141(&self) -> Option<&FrameReceiptPayload<Log>> {
+        self.frame_receipt.as_ref()
+    }
+
+    fn rlp_payload_length(&self, bloom: &Bloom) -> usize {
+        self.success.length() +
+            self.cumulative_gas_used.length() +
+            bloom.length() +
+            self.logs.length()
+    }
+
+    fn rlp_receipt_length(&self, bloom: &Bloom) -> usize {
+        let payload_length = self.rlp_payload_length(bloom);
+        Header { list: true, payload_length }.length() + payload_length
+    }
+
+    fn rlp_encode_receipt(&self, bloom: &Bloom, out: &mut dyn BufMut) {
+        Header { list: true, payload_length: self.rlp_payload_length(bloom) }.encode(out);
+        self.success.encode(out);
+        self.cumulative_gas_used.encode(out);
+        bloom.encode(out);
+        self.logs.encode(out);
+    }
+}
+
+impl From<ReceiptEnvelope> for Receipt {
+    fn from(value: ReceiptEnvelope) -> Self {
+        Self::from_envelope(value)
+    }
+}
+
+impl From<Receipt> for ReceiptEnvelope {
+    fn from(value: Receipt) -> Self {
+        value.to_envelope()
+    }
+}
+
+impl TxReceipt for Receipt {
+    type Log = Log;
+
+    fn status_or_post_state(&self) -> Eip658Value {
+        self.success.into()
+    }
+
+    fn status(&self) -> bool {
+        self.success
+    }
+
+    fn bloom(&self) -> Bloom {
+        logs_bloom(self.logs.iter())
+    }
+
+    fn cumulative_gas_used(&self) -> u64 {
+        self.cumulative_gas_used
+    }
+
+    fn logs(&self) -> &[Log] {
+        &self.logs
+    }
+
+    fn into_logs(self) -> Vec<Log> {
+        self.logs
+    }
+}
+
+impl Typed2718 for Receipt {
+    fn ty(&self) -> u8 {
+        self.tx_type as u8
+    }
+}
+
+impl IsTyped2718 for Receipt {
+    fn is_type(type_id: u8) -> bool {
+        <TxType as IsTyped2718>::is_type(type_id)
+    }
+}
+
+impl Encodable2718 for Receipt {
+    fn encode_2718_len(&self) -> usize {
+        self.eip2718_encoded_length_with_bloom(&self.bloom())
+    }
+
+    fn encode_2718(&self, out: &mut dyn BufMut) {
+        self.eip2718_encode_with_bloom(&self.bloom(), out)
+    }
+}
+
+impl Decodable2718 for Receipt {
+    fn typed_decode(ty: u8, buf: &mut &[u8]) -> Eip2718Result<Self> {
+        ReceiptEnvelope::typed_decode(ty, buf).map(Into::into)
+    }
+
+    fn fallback_decode(buf: &mut &[u8]) -> Eip2718Result<Self> {
+        ReceiptEnvelope::fallback_decode(buf).map(Into::into)
+    }
+}
+
+impl Encodable for Receipt {
+    fn encode(&self, out: &mut dyn BufMut) {
+        self.rlp_encode_with_bloom(&self.bloom(), out)
+    }
+
+    fn length(&self) -> usize {
+        self.rlp_encoded_length_with_bloom(&self.bloom())
+    }
+}
+
+impl Decodable for Receipt {
+    fn decode(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
+        ReceiptEnvelope::decode(buf).map(Into::into)
+    }
+}
+
+impl RlpEncodableReceipt for Receipt {
+    fn rlp_encoded_length_with_bloom(&self, bloom: &Bloom) -> usize {
+        let payload_length = self.eip2718_encoded_length_with_bloom(bloom);
+        if self.tx_type == TxType::Legacy {
+            payload_length
+        } else {
+            Header { list: false, payload_length }.length() + payload_length
+        }
+    }
+
+    fn rlp_encode_with_bloom(&self, bloom: &Bloom, out: &mut dyn BufMut) {
+        if self.tx_type != TxType::Legacy {
+            Header { list: false, payload_length: self.eip2718_encoded_length_with_bloom(bloom) }
+                .encode(out);
+        }
+        self.eip2718_encode_with_bloom(bloom, out);
+    }
+}
+
+impl RlpDecodableReceipt for Receipt {
+    fn rlp_decode_with_bloom(buf: &mut &[u8]) -> alloy_rlp::Result<ReceiptWithBloom<Self>> {
+        let ReceiptWithBloom { receipt, logs_bloom } =
+            <ReceiptEnvelope as RlpDecodableReceipt>::rlp_decode_with_bloom(buf)?;
+        Ok(ReceiptWithBloom { receipt: receipt.into(), logs_bloom })
+    }
+}
+
+impl Eip2718EncodableReceipt for Receipt {
+    fn eip2718_encoded_length_with_bloom(&self, bloom: &Bloom) -> usize {
+        let type_len = usize::from(self.tx_type != TxType::Legacy);
+        type_len +
+            if let Some(payload) = &self.frame_receipt {
+                payload.length()
+            } else {
+                self.rlp_receipt_length(bloom)
+            }
+    }
+
+    fn eip2718_encode_with_bloom(&self, bloom: &Bloom, out: &mut dyn BufMut) {
+        if self.tx_type != TxType::Legacy {
+            out.put_u8(self.ty());
+        }
+        if let Some(payload) = &self.frame_receipt {
+            assert_eq!(self.tx_type, TxType::Eip8141);
+            payload.encode(out);
+        } else {
+            assert_ne!(self.tx_type, TxType::Eip8141);
+            self.rlp_encode_receipt(bloom, out);
+        }
+    }
+}
+
+impl Eip2718DecodableReceipt for Receipt {
+    fn typed_decode_with_bloom(ty: u8, buf: &mut &[u8]) -> Eip2718Result<ReceiptWithBloom<Self>> {
+        let ReceiptWithBloom { receipt, logs_bloom } =
+            <ReceiptEnvelope as Eip2718DecodableReceipt>::typed_decode_with_bloom(ty, buf)?;
+        Ok(ReceiptWithBloom { receipt: receipt.into(), logs_bloom })
+    }
+
+    fn fallback_decode_with_bloom(buf: &mut &[u8]) -> Eip2718Result<ReceiptWithBloom<Self>> {
+        let ReceiptWithBloom { receipt, logs_bloom } =
+            <ReceiptEnvelope as Eip2718DecodableReceipt>::fallback_decode_with_bloom(buf)?;
+        Ok(ReceiptWithBloom { receipt: receipt.into(), logs_bloom })
+    }
+}
+
+impl InMemorySize for Receipt {
+    fn size(&self) -> usize {
+        core::mem::size_of::<Self>() +
+            self.logs.iter().map(InMemorySize::size).sum::<usize>() +
+            self.frame_receipt.as_ref().map_or(0, |payload| {
+                payload
+                    .frame_receipts
+                    .iter()
+                    .map(|frame| {
+                        core::mem::size_of_val(frame) +
+                            frame.logs.iter().map(InMemorySize::size).sum::<usize>()
+                    })
+                    .sum::<usize>()
+            })
+    }
+}
+
+#[cfg(feature = "reth-codec")]
+impl reth_codecs::Compact for Receipt {
+    fn to_compact<B>(&self, buf: &mut B) -> usize
+    where
+        B: BufMut + AsMut<[u8]>,
+    {
+        reth_codecs::Compact::to_compact(&self.to_envelope(), buf)
+    }
+
+    fn from_compact(buf: &[u8], len: usize) -> (Self, &[u8]) {
+        let (receipt, buf) = <ReceiptEnvelope as reth_codecs::Compact>::from_compact(buf, len);
+        (receipt.into(), buf)
+    }
+}
+
+#[cfg(feature = "reth-codec")]
+impl reth_codecs::Compress for Receipt {
+    type Compressed = Vec<u8>;
+
+    fn compress_to_buf<B: BufMut + AsMut<[u8]>>(&self, buf: &mut B) {
+        let _ = reth_codecs::Compact::to_compact(self, buf);
+    }
+}
+
+#[cfg(feature = "reth-codec")]
+impl reth_codecs::Decompress for Receipt {
+    fn decompress(value: &[u8]) -> Result<Self, reth_codecs::DecompressError> {
+        let (receipt, _) = reth_codecs::Compact::from_compact(value, value.len());
+        Ok(receipt)
+    }
+}
+
+#[cfg(feature = "serde")]
+impl serde::Serialize for Receipt {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serde::Serialize::serialize(&self.to_envelope(), serializer)
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de> serde::Deserialize<'de> for Receipt {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        <ReceiptEnvelope as serde::Deserialize>::deserialize(deserializer).map(Into::into)
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl<'a> arbitrary::Arbitrary<'a> for Receipt {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+        ReceiptEnvelope::arbitrary(u).map(Into::into)
+    }
+}
 
 #[cfg(feature = "rpc")]
 /// Receipt representation for RPC.
-pub type RpcReceipt<T = TxType> = EthereumReceipt<T, alloy_rpc_types_eth::Log>;
+pub type RpcReceipt = ReceiptEnvelope<alloy_rpc_types_eth::Log>;
 
 /// Calculates the receipt root for a header for the reference type of [`Receipt`].
 ///
 /// NOTE: Prefer `proofs::calculate_receipt_root` if you have log blooms memoized.
-pub fn calculate_receipt_root_no_memo<T: TxTy>(receipts: &[Receipt<T>]) -> B256 {
-    ordered_trie_root_with_encoder(receipts, |r, buf| {
-        alloy_consensus::TxReceipt::with_bloom_ref(r).encode_2718(buf)
-    })
+pub fn calculate_receipt_root_no_memo(receipts: &[Receipt]) -> B256 {
+    ordered_trie_root_with_encoder(receipts, |receipt, buf| receipt.encode_2718(buf))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::TransactionSigned;
-    use alloy_consensus::{ReceiptWithBloom, TxReceipt, TxType};
-    use alloy_eips::eip2718::Encodable2718;
+    use alloy_consensus::{ReceiptWithBloom, TxType};
+    use alloy_eips::{
+        eip2718::{Decodable2718, Encodable2718},
+        eip8141::{FrameReceipt, FrameStatus},
+    };
     use alloy_primitives::{
         address, b256, bloom, bytes, hex_literal::hex, Address, Bloom, Bytes, Log, LogData,
     };
@@ -43,7 +409,7 @@ mod tests {
     #[test]
     #[cfg(feature = "reth-codec")]
     fn test_decode_receipt() {
-        reth_codecs::test_utils::test_decode::<Receipt<TxType>>(&hex!(
+        reth_codecs::test_utils::test_decode::<Receipt>(&hex!(
             "c428b52ffd23fc42696156b10200f034792b6a94c3850215c2fef7aea361a0c31b79d9a32652eefc0d4e2e730036061cff7344b6fc6132b50cda0ed810a991ae58ef013150c12b2522533cb3b3a8b19b7786a8b5ff1d3cdc84225e22b02def168c8858df"
         ));
     }
@@ -69,6 +435,7 @@ mod tests {
                     bytes!("0100ff"),
                 )],
                 success: false,
+                frame_receipt: None,
             },
             logs_bloom: [0; 256].into(),
         };
@@ -101,6 +468,7 @@ mod tests {
                     bytes!("0100ff"),
                 )],
                 success: false,
+                frame_receipt: None,
             },
             logs_bloom: [0; 256].into(),
         };
@@ -131,12 +499,49 @@ mod tests {
                     Bytes::from(vec![1; 0xffffff]),
                 ),
             ],
+            frame_receipt: None,
         };
 
         let mut data = vec![];
         receipt.to_compact(&mut data);
-        let (decoded, _) = Receipt::<TxType>::from_compact(&data[..], data.len());
+        let (decoded, _) = Receipt::from_compact(&data[..], data.len());
         assert_eq!(decoded, receipt);
+    }
+
+    #[test]
+    fn frame_receipt_preserves_payload_and_exposes_logs() {
+        let log = Log::new_unchecked(
+            address!("0x0000000000000000000000000000000000000011"),
+            vec![],
+            bytes!("8141"),
+        );
+        let envelope = ReceiptEnvelope::Eip8141(FrameReceiptPayload {
+            cumulative_gas_used: 42_000,
+            payer: address!("0x0000000000000000000000000000000000000022"),
+            frame_receipts: vec![FrameReceipt {
+                status: FrameStatus::Success,
+                gas_used: 21_000,
+                logs: vec![log.clone()],
+            }],
+        });
+
+        let receipt = Receipt::from_envelope(envelope.clone());
+        assert_eq!(receipt.logs, vec![log]);
+        assert_eq!(receipt.as_eip8141(), envelope.as_eip8141());
+
+        let encoded = receipt.encoded_2718();
+        let decoded = Receipt::decode_2718(&mut encoded.as_slice()).unwrap();
+        assert_eq!(decoded, receipt);
+        assert_eq!(decoded.to_envelope(), envelope);
+
+        #[cfg(feature = "reth-codec")]
+        {
+            let mut compact = Vec::new();
+            receipt.to_compact(&mut compact);
+            let (decoded, remaining) = Receipt::from_compact(&compact, compact.len());
+            assert!(remaining.is_empty());
+            assert_eq!(decoded, receipt);
+        }
     }
 
     #[test]
@@ -147,6 +552,7 @@ mod tests {
                 success: true,
                 cumulative_gas_used: 21000,
                 logs: vec![],
+                frame_receipt: None,
             },
             logs_bloom: Bloom::default(),
         };
@@ -165,6 +571,7 @@ mod tests {
                 success: true,
                 cumulative_gas_used: 21000,
                 logs: vec![],
+                frame_receipt: None,
             },
             logs_bloom: Bloom::default(),
         };
@@ -232,6 +639,7 @@ mod tests {
                 success: true,
                 cumulative_gas_used: 102068,
                 logs,
+                frame_receipt: None,
             },
             logs_bloom: bloom,
         };

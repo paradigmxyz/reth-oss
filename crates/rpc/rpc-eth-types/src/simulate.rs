@@ -559,6 +559,29 @@ where
                     .collect(),
                 status: true,
             },
+            ExecutionResult::FrameTransaction { gas, logs, .. } => SimCallResult {
+                return_data: Bytes::new(),
+                error: None,
+                gas_used: gas.tx_gas_used(),
+                max_used_gas: Some(gas.total_gas_spent().max(gas.floor_gas())),
+                logs: logs
+                    .into_iter()
+                    .map(|log| {
+                        log_index += 1;
+                        alloy_rpc_types_eth::Log {
+                            inner: log,
+                            log_index: Some(log_index - 1),
+                            transaction_index: Some(index as u64),
+                            transaction_hash: Some(*tx.tx_hash()),
+                            block_hash: Some(block.hash()),
+                            block_number: Some(block.header().number()),
+                            block_timestamp: Some(block.header().timestamp()),
+                            ..Default::default()
+                        }
+                    })
+                    .collect(),
+                status: true,
+            },
         };
 
         calls.push(call);

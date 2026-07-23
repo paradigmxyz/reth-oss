@@ -778,6 +778,9 @@ pub enum RpcInvalidTransactionError {
     /// EIP-7702 transaction has invalid fields set.
     #[error("EIP-7702 authorization list has invalid fields")]
     AuthorizationListInvalidFields,
+    /// EIP-8141 transaction has invalid outer fields.
+    #[error("EIP-8141 frame transaction has invalid outer fields")]
+    Eip8141InvalidFields,
     /// Transaction priority fee is below the minimum required priority fee.
     #[error("transaction priority fee below minimum required priority fee {minimum_priority_fee}")]
     PriorityFeeBelowMinimum {
@@ -910,7 +913,9 @@ impl From<InvalidTransaction> for RpcInvalidTransactionError {
             InvalidTransaction::Eip1559NotSupported |
             InvalidTransaction::Eip4844NotSupported |
             InvalidTransaction::Eip7702NotSupported |
+            InvalidTransaction::Eip8141NotSupported |
             InvalidTransaction::Eip7873NotSupported => Self::TxTypeNotSupported,
+            InvalidTransaction::Eip8141InvalidFields => Self::Eip8141InvalidFields,
             InvalidTransaction::Eip7873MissingTarget => {
                 Self::other(internal_rpc_err(err.to_string()))
             }

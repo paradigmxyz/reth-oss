@@ -19,14 +19,15 @@ reth-primitives-traits.workspace = true
 # ethereum
 alloy-eips = { workspace = true, features = ["k256"] }
 alloy-primitives.workspace = true
+alloy-rlp.workspace = true
 alloy-consensus = { workspace = true, features = ["serde"] }
 alloy-rpc-types-eth = { workspace = true, optional = true }
 
 # misc
+arbitrary = { workspace = true, optional = true }
 serde = { workspace = true, optional = true }
 
 [dev-dependencies]
-arbitrary.workspace = true
 proptest.workspace = true
 proptest-arbitrary-interop.workspace = true
 rand.workspace = true
@@ -63,6 +64,7 @@ reth-codec = [
 ]
 arbitrary = [
     "std",
+    "dep:arbitrary",
     "alloy-consensus/arbitrary",
     "alloy-consensus/k256",
     "alloy-primitives/arbitrary",

@@ -21,8 +21,8 @@ use alloy_consensus::{
     BlockHeader,
 };
 use alloy_eips::{
-    eip1559::ETHEREUM_BLOCK_GAS_LIMIT_30M, eip4844::env_settings::EnvKzgSettings,
-    eip7840::BlobParams, BlockId,
+    eip1559::ETHEREUM_BLOCK_GAS_LIMIT_30M, eip2718::EIP8141_TX_TYPE_ID,
+    eip4844::env_settings::EnvKzgSettings, eip7840::BlobParams, BlockId,
 };
 use alloy_primitives::U256;
 use alloy_rlp::Encodable;
@@ -73,6 +73,7 @@ pub type StatefulValidationFn<T> = Arc<
 /// - EIP-1559
 /// - EIP-4844
 /// - EIP-7702
+/// - EIP-8141
 ///
 /// And enforces additional constraints such as:
 /// - Maximum transaction size
@@ -475,9 +476,13 @@ where
             EIP7702_TX_TYPE_ID if !self.eip7702 => {
                 return Err(InvalidTransactionError::Eip7702Disabled.into())
             }
+            // Reject EIP-8141 transactions until Amsterdam activates on this integration branch.
+            EIP8141_TX_TYPE_ID if !self.fork_tracker.is_amsterdam_activated() => {
+                return Err(InvalidTransactionError::TxTypeNotSupported.into())
+            }
             // Accept known transaction types when their respective fork is active
             LEGACY_TX_TYPE_ID | EIP2930_TX_TYPE_ID | EIP1559_TX_TYPE_ID | EIP4844_TX_TYPE_ID |
-            EIP7702_TX_TYPE_ID => {}
+            EIP7702_TX_TYPE_ID | EIP8141_TX_TYPE_ID => {}
 
             ty if !self.other_tx_types.bit(ty as usize) => {
                 return Err(InvalidTransactionError::TxTypeNotSupported.into())
@@ -1500,6 +1505,12 @@ pub fn ensure_intrinsic_gas<T: EthPoolTransaction>(
     transaction: &T,
     fork_tracker: &ForkTracker,
 ) -> Result<(), InvalidPoolTransactionError> {
+    // EIP-8141 exposes a derived gas limit rather than ordinary top-level calldata. Its exact
+    // intrinsic and calldata-floor checks are performed by the frame-aware REVM handler.
+    if transaction.is_eip8141() {
+        return Ok(())
+    }
+
     use revm::primitives::hardfork::SpecId;
     let spec_id = if fork_tracker.is_amsterdam_activated() {
         SpecId::AMSTERDAM
