@@ -143,12 +143,12 @@ impl<N: NodePrimitives> TestBlockBuilder<N> {
             .iter()
             .enumerate()
             .map(|(idx, tx)| {
-                Receipt::from(alloy_consensus::EthereumReceipt {
+                Receipt {
                     tx_type: tx.tx_type(),
                     success: true,
                     cumulative_gas_used: (idx as u64 + 1) * MIN_TRANSACTION_GAS,
                     ..Default::default()
-                })
+                }
                 .into_with_bloom()
             })
             .collect::<Vec<_>>();
@@ -301,13 +301,11 @@ impl<N: NodePrimitives> TestBlockBuilder<N> {
                 .transactions
                 .iter()
                 .enumerate()
-                .map(|(idx, tx)| {
-                    Receipt::from(alloy_consensus::EthereumReceipt {
-                        tx_type: tx.tx_type(),
-                        success: true,
-                        cumulative_gas_used: (idx as u64 + 1) * MIN_TRANSACTION_GAS,
-                        ..Default::default()
-                    })
+                .map(|(idx, tx)| Receipt {
+                    tx_type: tx.tx_type(),
+                    success: true,
+                    cumulative_gas_used: (idx as u64 + 1) * MIN_TRANSACTION_GAS,
+                    ..Default::default()
                 })
                 .collect()
         } else {
@@ -393,13 +391,11 @@ impl<N: NodePrimitives> TestBlockBuilder<N> {
             .transactions
             .iter()
             .enumerate()
-            .map(|(idx, tx)| {
-                Receipt::from(alloy_consensus::EthereumReceipt {
-                    tx_type: tx.tx_type(),
-                    success: true,
-                    cumulative_gas_used: (idx as u64 + 1) * MIN_TRANSACTION_GAS,
-                    ..Default::default()
-                })
+            .map(|(idx, tx)| Receipt {
+                tx_type: tx.tx_type(),
+                success: true,
+                cumulative_gas_used: (idx as u64 + 1) * MIN_TRANSACTION_GAS,
+                ..Default::default()
             })
             .collect::<Vec<_>>();
 

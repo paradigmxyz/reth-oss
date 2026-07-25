@@ -419,7 +419,6 @@ impl MockTransaction {
             TxType::Eip1559 => Self::eip1559(),
             TxType::Eip4844 => Self::eip4844(),
             TxType::Eip7702 => Self::eip7702(),
-            TxType::Eip8141 => panic!("MockTransaction does not support EIP-8141 transactions"),
         }
     }
 
@@ -1094,9 +1093,6 @@ impl TryFrom<Recovered<TransactionSigned>> for MockTransaction {
                 size,
                 cost: U256::from(gas_limit) * U256::from(max_fee_per_gas) + value,
             }),
-            Transaction::Eip8141(_) => {
-                Err(TryFromRecoveredTransactionError::UnsupportedTransactionType(TxType::Eip8141))
-            }
         }
     }
 }
@@ -1207,9 +1203,6 @@ impl TryFrom<Recovered<EthereumTxEnvelope<TxEip4844Variant<BlobTransactionSideca
                     size,
                     cost: U256::from(tx.gas_limit) * U256::from(tx.max_fee_per_gas) + tx.value,
                 })
-            }
-            EthereumTxEnvelope::Eip8141(_) => {
-                Err(TryFromRecoveredTransactionError::UnsupportedTransactionType(TxType::Eip8141))
             }
         }
     }

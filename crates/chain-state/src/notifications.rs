@@ -367,12 +367,12 @@ mod tests {
         block2.set_hash(block2_hash);
 
         // Create a receipt for the transaction in block1.
-        let receipt1 = Receipt::from(alloy_consensus::EthereumReceipt {
+        let receipt1 = Receipt {
             tx_type: TxType::Legacy,
             cumulative_gas_used: 12345,
             logs: vec![],
             success: true,
-        });
+        };
 
         // Wrap the receipt in a `Receipts` structure, as expected in the `ExecutionOutcome`.
         let receipts = vec![vec![receipt1.clone()]];
@@ -430,12 +430,12 @@ mod tests {
         old_block1.set_hash(B256::new([0x01; 32]));
 
         // Create a receipt for a transaction in the reverted block.
-        let old_receipt = Receipt::from(alloy_consensus::EthereumReceipt {
+        let old_receipt = Receipt {
             tx_type: TxType::Legacy,
             cumulative_gas_used: 54321,
             logs: vec![],
             success: false,
-        });
+        };
         let old_receipts = vec![vec![old_receipt.clone()]];
 
         let old_execution_outcome =
@@ -459,12 +459,12 @@ mod tests {
         new_block1.set_hash(B256::new([0x02; 32]));
 
         // Create a receipt for a transaction in the new committed block.
-        let new_receipt = Receipt::from(alloy_consensus::EthereumReceipt {
+        let new_receipt = Receipt {
             tx_type: TxType::Legacy,
             cumulative_gas_used: 12345,
             logs: vec![],
             success: true,
-        });
+        };
         let new_receipts = vec![vec![new_receipt.clone()]];
 
         let new_execution_outcome =

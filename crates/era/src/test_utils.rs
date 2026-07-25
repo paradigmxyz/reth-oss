@@ -62,7 +62,7 @@ pub(crate) fn create_test_receipt(
         });
     }
 
-    Receipt::from(alloy_consensus::EthereumReceipt { tx_type, success, cumulative_gas_used, logs })
+    Receipt { tx_type, success, cumulative_gas_used, logs }
 }
 
 // Helper function to create a list of test receipts with different characteristics
@@ -88,12 +88,7 @@ pub(crate) fn create_test_receipt_with_bloom(
     log_count: usize,
 ) -> ReceiptWithBloom {
     let receipt = create_test_receipt(tx_type, success, cumulative_gas_used, log_count);
-    let receipt = receipt
-        .as_standard()
-        .expect("test helper only constructs standard receipts")
-        .clone()
-        .into();
-    ReceiptWithBloom { receipt, logs_bloom: Default::default() }
+    ReceiptWithBloom { receipt: receipt.into(), logs_bloom: Default::default() }
 }
 
 // Helper function to create a sample block tuple

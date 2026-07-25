@@ -692,7 +692,6 @@ ipnet = "2.11"
 
 [patch.crates-io]
 # EIP-8141 Alloy consensus, networking, RPC, signer, and transport stack.
-alloy-hardforks = { git = "https://github.com/alloy-rs/hardforks", rev = "5aece346b3c549a259de50f47e39373561f17b53" }
 alloy-consensus = { git = "https://github.com/Rimeeeeee/alloy", branch = "feat/eip8141-transaction" }
 alloy-consensus-any = { git = "https://github.com/Rimeeeeee/alloy", branch = "feat/eip8141-transaction" }
 alloy-contract = { git = "https://github.com/Rimeeeeee/alloy", branch = "feat/eip8141-transaction" }
