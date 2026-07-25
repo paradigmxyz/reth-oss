@@ -1095,7 +1095,9 @@ impl TryFrom<Recovered<TransactionSigned>> for MockTransaction {
                 cost: U256::from(gas_limit) * U256::from(max_fee_per_gas) + value,
             }),
             Transaction::Eip8141(_) => {
-                Err(TryFromRecoveredTransactionError::UnsupportedTransactionType(TxType::Eip8141))
+                Err(TryFromRecoveredTransactionError::UnsupportedTransactionType(
+                    TxType::Eip8141.into(),
+                ))
             }
         }
     }
@@ -1209,7 +1211,9 @@ impl TryFrom<Recovered<EthereumTxEnvelope<TxEip4844Variant<BlobTransactionSideca
                 })
             }
             EthereumTxEnvelope::Eip8141(_) => {
-                Err(TryFromRecoveredTransactionError::UnsupportedTransactionType(TxType::Eip8141))
+                Err(TryFromRecoveredTransactionError::UnsupportedTransactionType(
+                    TxType::Eip8141.into(),
+                ))
             }
         }
     }
