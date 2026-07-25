@@ -364,7 +364,7 @@ mod tests {
                         }
                         StaticFileSegment::Receipts => {
                             // Used as ID for validation
-                            receipt.cumulative_gas_used = *next_tx_num;
+                            receipt.set_cumulative_gas_used(*next_tx_num);
                             writer.append_receipt(*next_tx_num, &receipt).unwrap();
                         }
                         StaticFileSegment::TransactionSenders => {

@@ -215,13 +215,13 @@ mod tests {
     async fn test_receipt_root_matches_standard_calculation() {
         // Create some receipts with actual data
         let receipts = vec![
-            Receipt {
+            Receipt::from(alloy_consensus::EthereumReceipt {
                 tx_type: TxType::Legacy,
                 cumulative_gas_used: 21000,
                 success: true,
                 logs: vec![],
-            },
-            Receipt {
+            }),
+            Receipt::from(alloy_consensus::EthereumReceipt {
                 tx_type: TxType::Eip1559,
                 cumulative_gas_used: 42000,
                 success: true,
@@ -229,13 +229,13 @@ mod tests {
                     address: Address::ZERO,
                     data: alloy_primitives::LogData::new_unchecked(vec![B256::ZERO], Bytes::new()),
                 }],
-            },
-            Receipt {
+            }),
+            Receipt::from(alloy_consensus::EthereumReceipt {
                 tx_type: TxType::Eip2930,
                 cumulative_gas_used: 63000,
                 success: false,
                 logs: vec![],
-            },
+            }),
         ];
 
         // Calculate expected values first (before we move receipts)

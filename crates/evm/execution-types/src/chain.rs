@@ -817,20 +817,20 @@ mod tests {
         block2.set_hash(block2_hash);
 
         // Create a random receipt object, receipt1
-        let receipt1 = Receipt {
+        let receipt1 = Receipt::from(alloy_consensus::EthereumReceipt {
             tx_type: TxType::Legacy,
             cumulative_gas_used: 46913,
             logs: vec![],
             success: true,
-        };
+        });
 
         // Create another random receipt object, receipt2
-        let receipt2 = Receipt {
+        let receipt2 = Receipt::from(alloy_consensus::EthereumReceipt {
             tx_type: TxType::Legacy,
             cumulative_gas_used: 1325345,
             logs: vec![],
             success: true,
-        };
+        });
 
         // Create a Receipts object with a vector of receipt vectors
         let receipts = vec![vec![receipt1.clone()], vec![receipt2]];

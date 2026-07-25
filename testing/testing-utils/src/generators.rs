@@ -2,10 +2,13 @@
 
 // TODO(rand): update ::random calls after rand_09 migration
 
-use alloy_consensus::{Header, SignableTransaction, Transaction as _, TxLegacy};
+use alloy_consensus::{
+    EthereumReceipt, Header, SignableTransaction, Transaction as _, TxLegacy, TxType,
+};
 use alloy_eips::{
     eip1898::BlockWithParent,
     eip4895::{Withdrawal, Withdrawals},
+    eip8141::{FrameReceipt, FrameReceiptPayload, FrameStatus},
     NumHash,
 };
 use alloy_primitives::{Address, BlockNumber, Bytes, TxKind, B256, B64, U256};
@@ -456,18 +459,34 @@ pub fn random_receipt<R: Rng>(
 ) -> Receipt {
     let success = rng.random::<bool>();
     let logs_count = logs_count.unwrap_or_else(|| rng.random::<u8>());
+    let cumulative_gas_used = rng.random_range(0..=transaction.gas_limit());
+    let logs = if success {
+        (0..logs_count).map(|_| random_log(rng, None, topics_count)).collect()
+    } else {
+        vec![]
+    };
+
+    if transaction.tx_type() == TxType::Eip8141 {
+        return Receipt::eip8141(FrameReceiptPayload {
+            cumulative_gas_used,
+            payer: Address::ZERO,
+            frame_receipts: vec![FrameReceipt {
+                status: if success { FrameStatus::Success } else { FrameStatus::Failure },
+                gas_used: cumulative_gas_used,
+                logs,
+            }],
+        })
+    }
+
     #[expect(clippy::needless_update)] // side-effect of optimism fields
-    Receipt {
+    EthereumReceipt {
         tx_type: transaction.tx_type(),
         success,
-        cumulative_gas_used: rng.random_range(0..=transaction.gas_limit()),
-        logs: if success {
-            (0..logs_count).map(|_| random_log(rng, None, topics_count)).collect()
-        } else {
-            vec![]
-        },
+        cumulative_gas_used,
+        logs,
         ..Default::default()
     }
+    .into()
 }
 
 /// Generate random log

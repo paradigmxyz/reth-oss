@@ -1354,8 +1354,16 @@ mod tests {
         let block_number = 1u64;
         let header = Header { number: block_number, ..Default::default() };
 
-        let receipt1 = Receipt { cumulative_gas_used: 21000, success: true, ..Default::default() };
-        let receipt2 = Receipt { cumulative_gas_used: 42000, success: true, ..Default::default() };
+        let receipt1 = Receipt::from(alloy_consensus::EthereumReceipt {
+            cumulative_gas_used: 21000,
+            success: true,
+            ..Default::default()
+        });
+        let receipt2 = Receipt::from(alloy_consensus::EthereumReceipt {
+            cumulative_gas_used: 42000,
+            success: true,
+            ..Default::default()
+        });
         let receipts = vec![receipt1, receipt2];
 
         provider.add_header(block_hash, header);
@@ -1389,10 +1397,16 @@ mod tests {
         let header1 = Header { number: block1_number, ..Default::default() };
         let header2 = Header { number: block2_number, ..Default::default() };
 
-        let receipts1 =
-            vec![Receipt { cumulative_gas_used: 21000, success: true, ..Default::default() }];
-        let receipts2 =
-            vec![Receipt { cumulative_gas_used: 42000, success: true, ..Default::default() }];
+        let receipts1 = vec![Receipt::from(alloy_consensus::EthereumReceipt {
+            cumulative_gas_used: 21000,
+            success: true,
+            ..Default::default()
+        })];
+        let receipts2 = vec![Receipt::from(alloy_consensus::EthereumReceipt {
+            cumulative_gas_used: 42000,
+            success: true,
+            ..Default::default()
+        })];
 
         provider.add_header(block1_hash, header1);
         provider.add_header(block2_hash, header2);

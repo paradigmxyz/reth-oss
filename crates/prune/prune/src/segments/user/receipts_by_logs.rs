@@ -280,11 +280,15 @@ mod tests {
             receipts.reserve_exact(block.body().size());
             for (txi, transaction) in block.body().transactions.iter().enumerate() {
                 let mut receipt = random_receipt(&mut rng, transaction, Some(1), None);
-                receipt.logs.push(random_log(
-                    &mut rng,
-                    (txi == (block.transaction_count() - 1)).then_some(deposit_contract_addr),
-                    Some(1),
-                ));
+                receipt
+                    .as_standard_mut()
+                    .expect("random block contains legacy transactions")
+                    .logs
+                    .push(random_log(
+                        &mut rng,
+                        (txi == (block.transaction_count() - 1)).then_some(deposit_contract_addr),
+                        Some(1),
+                    ));
                 receipts.push((receipts.len() as u64, receipt));
             }
         }

@@ -245,13 +245,13 @@ mod test {
             let MockReceipt { tx_type, status, cumulative_gas_used, logs, block_number: number } =
                 exported_receipt;
 
-            let receipt = Receipt {
+            let receipt = Receipt::from(alloy_consensus::EthereumReceipt {
                 tx_type: TxType::try_from(tx_type.to_be_bytes()[0])
                     .map_err(|err| FileClientError::Rlp(err.into(), vec![tx_type]))?,
                 success: status != 0,
                 cumulative_gas_used,
                 logs,
-            };
+            });
 
             Ok(Self { receipt, number })
         }
@@ -373,13 +373,13 @@ mod test {
         };
 
         // feature must not be brought into scope
-        let mut receipt = Receipt {
+        let mut receipt = Receipt::from(alloy_consensus::EthereumReceipt {
             tx_type: TxType::Legacy,
             success: true,
             cumulative_gas_used: 202819,
             logs: vec![],
-        };
-        receipt.logs = vec![log_1, log_2, log_3];
+        });
+        receipt.as_standard_mut().expect("legacy test receipt").logs = vec![log_1, log_2, log_3];
 
         ReceiptWithBlockNumber { receipt, number: 1 }
     }
@@ -411,13 +411,13 @@ mod test {
             .unwrap(),
         };
 
-        let mut receipt = Receipt {
+        let mut receipt = Receipt::from(alloy_consensus::EthereumReceipt {
             tx_type: TxType::Legacy,
             success: true,
             cumulative_gas_used: 116237,
             logs: vec![],
-        };
-        receipt.logs = vec![log_1, log_2];
+        });
+        receipt.as_standard_mut().expect("legacy test receipt").logs = vec![log_1, log_2];
 
         ReceiptWithBlockNumber { receipt, number: 2 }
     }
@@ -449,13 +449,13 @@ mod test {
             .unwrap(),
         };
 
-        let mut receipt = Receipt {
+        let mut receipt = Receipt::from(alloy_consensus::EthereumReceipt {
             tx_type: TxType::Legacy,
             success: true,
             cumulative_gas_used: 116237,
             ..Default::default()
-        };
-        receipt.logs = vec![log_1, log_2];
+        });
+        receipt.as_standard_mut().expect("legacy test receipt").logs = vec![log_1, log_2];
 
         ReceiptWithBlockNumber { receipt, number: 3 }
     }

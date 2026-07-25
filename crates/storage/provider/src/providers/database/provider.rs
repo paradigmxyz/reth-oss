@@ -4956,12 +4956,12 @@ mod tests {
         let write_receipts = |provider_rw: DatabaseProviderRW<_, _>, block: u64| {
             let outcome = ExecutionOutcome {
                 first_block: block,
-                receipts: vec![vec![Receipt {
+                receipts: vec![vec![Receipt::from(alloy_consensus::EthereumReceipt {
                     tx_type: Default::default(),
                     success: true,
                     cumulative_gas_used: block, // identifier to assert against
                     logs: vec![],
-                }]],
+                })]],
                 ..Default::default()
             };
             provider_rw
