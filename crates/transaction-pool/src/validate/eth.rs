@@ -476,8 +476,8 @@ where
             EIP7702_TX_TYPE_ID if !self.eip7702 => {
                 return Err(InvalidTransactionError::Eip7702Disabled.into())
             }
-            // Reject EIP-8141 transactions until Amsterdam activates on this integration branch.
-            EIP8141_TX_TYPE_ID if !self.fork_tracker.is_amsterdam_activated() => {
+            // Reject EIP-8141 transactions until Bogotá activates.
+            EIP8141_TX_TYPE_ID if !self.fork_tracker.is_bogota_activated() => {
                 return Err(InvalidTransactionError::TxTypeNotSupported.into())
             }
             // Accept known transaction types when their respective fork is active
@@ -925,6 +925,10 @@ where
             self.fork_tracker.amsterdam.store(true, std::sync::atomic::Ordering::Relaxed);
         }
 
+        if self.chain_spec().is_bogota_active_at_timestamp(new_tip_block.timestamp()) {
+            self.fork_tracker.bogota.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+
         self.fork_tracker
             .tip_timestamp
             .store(new_tip_block.timestamp(), std::sync::atomic::Ordering::Relaxed);
@@ -1040,6 +1044,8 @@ pub struct EthTransactionValidatorBuilder<Client, Evm> {
     osaka: bool,
     /// Fork indicator whether we are in the Amsterdam hardfork.
     amsterdam: bool,
+    /// Fork indicator whether we are in the Bogotá hardfork.
+    bogota: bool,
     /// Timestamp of the tip block.
     tip_timestamp: u64,
     /// Max blob count at the block's timestamp.
@@ -1132,6 +1138,7 @@ impl<Client, Evm> EthTransactionValidatorBuilder<Client, Evm> {
             prague: chain_spec.is_prague_active_at_timestamp(tip.timestamp()),
             osaka: chain_spec.is_osaka_active_at_timestamp(tip.timestamp()),
             amsterdam: chain_spec.is_amsterdam_active_at_timestamp(tip.timestamp()),
+            bogota: chain_spec.is_bogota_active_at_timestamp(tip.timestamp()),
 
             tip_timestamp: tip.timestamp(),
 
@@ -1220,6 +1227,17 @@ impl<Client, Evm> EthTransactionValidatorBuilder<Client, Evm> {
     /// Set the Amsterdam fork.
     pub const fn set_amsterdam(mut self, amsterdam: bool) -> Self {
         self.amsterdam = amsterdam;
+        self
+    }
+
+    /// Disables the Bogotá fork.
+    pub const fn no_bogota(self) -> Self {
+        self.set_bogota(false)
+    }
+
+    /// Sets the Bogotá fork activation state.
+    pub const fn set_bogota(mut self, bogota: bool) -> Self {
+        self.bogota = bogota;
         self
     }
 
@@ -1358,6 +1376,7 @@ impl<Client, Evm> EthTransactionValidatorBuilder<Client, Evm> {
             prague,
             osaka,
             amsterdam,
+            bogota,
             tip_timestamp,
             eip2718,
             eip1559,
@@ -1385,6 +1404,7 @@ impl<Client, Evm> EthTransactionValidatorBuilder<Client, Evm> {
             prague: AtomicBool::new(prague),
             osaka: AtomicBool::new(osaka),
             amsterdam: AtomicBool::new(amsterdam),
+            bogota: AtomicBool::new(bogota),
             tip_timestamp: AtomicU64::new(tip_timestamp),
             max_blob_count: AtomicU64::new(max_blob_count),
             max_initcode_size: AtomicUsize::new(max_initcode_size),
@@ -1451,6 +1471,8 @@ pub struct ForkTracker {
     pub osaka: AtomicBool,
     /// Tracks if amsterdam is activated at the block's timestamp.
     pub amsterdam: AtomicBool,
+    /// Tracks if Bogotá is activated at the block's timestamp.
+    pub bogota: AtomicBool,
     /// Tracks max blob count per transaction at the block's timestamp.
     pub max_blob_count: AtomicU64,
     /// Tracks the timestamp of the tip block.
@@ -1485,6 +1507,11 @@ impl ForkTracker {
     /// Returns `true` if Amsterdam fork is activated.
     pub fn is_amsterdam_activated(&self) -> bool {
         self.amsterdam.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Returns `true` if Bogotá fork is activated.
+    pub fn is_bogota_activated(&self) -> bool {
+        self.bogota.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Returns the timestamp of the tip block.
@@ -1663,6 +1690,7 @@ mod tests {
             prague: false.into(),
             osaka: false.into(),
             amsterdam: false.into(),
+            bogota: false.into(),
             tip_timestamp: 0.into(),
             max_blob_count: 0.into(),
             max_initcode_size: AtomicUsize::new(MAX_INITCODE_SIZE),
