@@ -220,6 +220,8 @@ mod tests {
                 cumulative_gas_used: 21000,
                 success: true,
                 logs: vec![],
+
+                frame_receipt: None,
             },
             Receipt {
                 tx_type: TxType::Eip1559,
@@ -229,12 +231,16 @@ mod tests {
                     address: Address::ZERO,
                     data: alloy_primitives::LogData::new_unchecked(vec![B256::ZERO], Bytes::new()),
                 }],
+
+                frame_receipt: None,
             },
             Receipt {
                 tx_type: TxType::Eip2930,
                 cumulative_gas_used: 63000,
                 success: false,
                 logs: vec![],
+
+                frame_receipt: None,
             },
         ];
 

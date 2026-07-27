@@ -372,6 +372,8 @@ mod tests {
             cumulative_gas_used: 12345,
             logs: vec![],
             success: true,
+
+            frame_receipt: None,
         };
 
         // Wrap the receipt in a `Receipts` structure, as expected in the `ExecutionOutcome`.
@@ -435,6 +437,8 @@ mod tests {
             cumulative_gas_used: 54321,
             logs: vec![],
             success: false,
+
+            frame_receipt: None,
         };
         let old_receipts = vec![vec![old_receipt.clone()]];
 
@@ -464,6 +468,8 @@ mod tests {
             cumulative_gas_used: 12345,
             logs: vec![],
             success: true,
+
+            frame_receipt: None,
         };
         let new_receipts = vec![vec![new_receipt.clone()]];
 

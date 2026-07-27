@@ -584,6 +584,8 @@ mod tests {
             cumulative_gas_used: 46913,
             logs: vec![],
             success: true,
+
+            frame_receipt: None,
         })]];
 
         // Create a Requests object with a vector of requests
@@ -643,6 +645,8 @@ mod tests {
             cumulative_gas_used: 46913,
             logs: vec![],
             success: true,
+
+            frame_receipt: None,
         })]];
 
         // Define the first block number
@@ -675,6 +679,8 @@ mod tests {
             cumulative_gas_used: 46913,
             logs: vec![Log::<LogData>::default()],
             success: true,
+
+            frame_receipt: None,
         }]];
 
         // Define the first block number
@@ -704,6 +710,8 @@ mod tests {
             cumulative_gas_used: 46913,
             logs: vec![Log::<LogData>::default()],
             success: true,
+
+            frame_receipt: None,
         })]];
 
         // Define the first block number
@@ -729,6 +737,8 @@ mod tests {
                 cumulative_gas_used: 46913,
                 logs: vec![Log::<LogData>::default()],
                 success: true,
+
+                frame_receipt: None,
             })]
         );
     }
@@ -741,6 +751,8 @@ mod tests {
             cumulative_gas_used: 46913,
             logs: vec![Log::<LogData>::default()],
             success: true,
+
+            frame_receipt: None,
         })]];
 
         // Create an empty Receipts object
@@ -787,6 +799,8 @@ mod tests {
             cumulative_gas_used: 46913,
             logs: vec![],
             success: true,
+
+            frame_receipt: None,
         };
 
         // Create a Receipts object with a vector of receipt vectors
@@ -833,6 +847,8 @@ mod tests {
             cumulative_gas_used: 46913,
             logs: vec![],
             success: true,
+
+            frame_receipt: None,
         };
 
         // Create a Receipts object containing the receipt.
@@ -874,6 +890,8 @@ mod tests {
             cumulative_gas_used: 46913,
             logs: vec![],
             success: true,
+
+            frame_receipt: None,
         };
 
         // Create a Receipts object with a vector of receipt vectors

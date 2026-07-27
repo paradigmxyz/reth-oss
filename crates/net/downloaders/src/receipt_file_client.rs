@@ -378,6 +378,7 @@ mod test {
             success: true,
             cumulative_gas_used: 202819,
             logs: vec![],
+            frame_receipt: None,
         };
         receipt.logs = vec![log_1, log_2, log_3];
 
@@ -416,6 +417,7 @@ mod test {
             success: true,
             cumulative_gas_used: 116237,
             logs: vec![],
+            frame_receipt: None,
         };
         receipt.logs = vec![log_1, log_2];
 

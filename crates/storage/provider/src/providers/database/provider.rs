@@ -4961,6 +4961,8 @@ mod tests {
                     success: true,
                     cumulative_gas_used: block, // identifier to assert against
                     logs: vec![],
+
+                    frame_receipt: None,
                 }]],
                 ..Default::default()
             };
