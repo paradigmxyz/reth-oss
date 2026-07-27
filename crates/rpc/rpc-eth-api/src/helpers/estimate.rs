@@ -193,6 +193,7 @@ pub trait EstimateCall: Call {
 
         let gas_refund = match res.result {
             ExecutionResult::Success { gas, .. } => gas.final_refunded(),
+            ExecutionResult::FrameTransaction { gas, .. } => gas.final_refunded(),
             ExecutionResult::Halt { reason, .. } => {
                 // here we don't check for invalid opcode because already executed with highest gas
                 // limit
@@ -342,7 +343,7 @@ pub trait EstimateCall: Call {
         let retry_res = evm.transact(tx_env).map_err(Self::Error::from_evm_err)?;
 
         match retry_res.result {
-            ExecutionResult::Success { .. } => {
+            ExecutionResult::Success { .. } | ExecutionResult::FrameTransaction { .. } => {
                 // Transaction succeeded by manually increasing the gas limit,
                 // which means the caller lacks funds to pay for the tx
                 Err(RpcInvalidTransactionError::BasicOutOfGas(req_gas_limit).into_eth_err())
@@ -371,7 +372,7 @@ pub fn update_estimated_gas_range<Halt>(
     lowest_gas_limit: &mut u64,
 ) -> Result<(), EthApiError> {
     match result {
-        ExecutionResult::Success { .. } => {
+        ExecutionResult::Success { .. } | ExecutionResult::FrameTransaction { .. } => {
             // Cap the highest gas limit with the succeeding gas limit.
             *highest_gas_limit = tx_gas_limit;
         }
