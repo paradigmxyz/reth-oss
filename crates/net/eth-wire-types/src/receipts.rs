@@ -266,6 +266,7 @@ mod tests {
                     receipt: Receipt {
                         tx_type: TxType::Legacy,
                         cumulative_gas_used: 0x1u64,
+                        frame_receipt: None,
                         logs: vec![
                             Log::new_unchecked(
                                 hex!("0000000000000000000000000000000000000011").into(),
@@ -303,6 +304,7 @@ mod tests {
                             receipt: Receipt {
                                 tx_type: TxType::Legacy,
                                 cumulative_gas_used: 0x1u64,
+                                frame_receipt: None,
                                 logs: vec![
                                     Log::new_unchecked(
                                         hex!("0000000000000000000000000000000000000011").into(),
@@ -335,6 +337,7 @@ mod tests {
                 success: true,
                 cumulative_gas_used: 26000,
                 logs: vec![],
+                frame_receipt: None,
             }
         );
 
