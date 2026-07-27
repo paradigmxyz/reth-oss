@@ -6,7 +6,7 @@ use crate::{
         BlockTuple, CompressedBody, CompressedHeader, CompressedReceipts, TotalDifficulty,
     },
 };
-use alloy_consensus::{Header, ReceiptWithBloom};
+use alloy_consensus::{Header, Receipt as ConsensusReceipt, ReceiptWithBloom};
 use alloy_primitives::{Address, BlockNumber, Bytes, Log, LogData, B256, B64, U256};
 use reth_ethereum_primitives::{Receipt, TxType};
 
@@ -88,7 +88,14 @@ pub(crate) fn create_test_receipt_with_bloom(
     log_count: usize,
 ) -> ReceiptWithBloom {
     let receipt = create_test_receipt(tx_type, success, cumulative_gas_used, log_count);
-    ReceiptWithBloom { receipt: receipt.into(), logs_bloom: Default::default() }
+    ReceiptWithBloom {
+        receipt: ConsensusReceipt {
+            status: receipt.success.into(),
+            cumulative_gas_used: receipt.cumulative_gas_used,
+            logs: receipt.logs,
+        },
+        logs_bloom: Default::default(),
+    }
 }
 
 // Helper function to create a sample block tuple

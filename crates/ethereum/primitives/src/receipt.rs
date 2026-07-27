@@ -1,3 +1,4 @@
+use alloc::vec::Vec;
 use alloy_consensus::{
     Eip2718DecodableReceipt, Eip2718EncodableReceipt, Eip658Value, InMemorySize,
     Receipt as ConsensusReceipt, ReceiptWithBloom, RlpDecodableReceipt, RlpEncodableReceipt,
