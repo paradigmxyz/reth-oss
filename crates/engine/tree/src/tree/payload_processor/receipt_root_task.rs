@@ -220,7 +220,6 @@ mod tests {
                 cumulative_gas_used: 21000,
                 success: true,
                 logs: vec![],
-
                 frame_receipt: None,
             },
             Receipt {
@@ -239,7 +238,6 @@ mod tests {
                 cumulative_gas_used: 63000,
                 success: false,
                 logs: vec![],
-
                 frame_receipt: None,
             },
         ];

@@ -63,7 +63,7 @@ impl RpcResponseConverter<alloy_network::Ethereum> for EthRpcConverter {
         &self,
         response: Transaction,
     ) -> Result<Self::Transaction, RpcResponseConverterError> {
-        Ok(response.into_inner().into())
+        Ok(response.into_primitives_receipt().into_inner().into())
     }
 
     fn receipt(
