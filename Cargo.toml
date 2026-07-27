@@ -691,6 +691,7 @@ vergen-git2 = "10.0.1"
 ipnet = "2.11"
 
 [patch.crates-io]
+revm-inspectors = { git = "https://github.com/Soubhik-10/revm-inspectors", branch = "fix-deps" }
 # EIP-8141 Alloy consensus, networking, RPC, signer, and transport stack.
 alloy-hardforks = { git = "https://github.com/alloy-rs/hardforks", rev = "5aece346b3c549a259de50f47e39373561f17b53" }
 alloy-consensus = { git = "https://github.com/Rimeeeeee/alloy", branch = "feat/eip8141-transaction" }

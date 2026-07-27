@@ -10889,9 +10889,8 @@ dependencies = [
 
 [[package]]
 name = "revm-inspectors"
-version = "0.41.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "54e22e1aa328f78e8c3dea6a3a860a3a3c3a77c4a7e775e3fdd3dcbb24a152ac"
+version = "0.41.0"
+source = "git+https://github.com/Soubhik-10/revm-inspectors?branch=fix-deps#573c01eced28c63e84692b20c0b5b164a0f29523"
 dependencies = [
  "alloy-primitives",
  "alloy-rpc-types-eth",
@@ -10905,6 +10904,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+ "time",
 ]
 
 [[package]]
