@@ -428,7 +428,7 @@ reth-zstd-compressors = { version = "0.5.0", default-features = false }
 
 # revm
 revm = { version = "41.0.0", default-features = false }
-revmc = { git = "https://github.com/paradigmxyz/revmc", branch = "main", default-features = false, features = ["llvm-prefer-static"] }
+revmc = { git = "https://github.com/Soubhik-10/revmc", branch = "fix/eip8141-layout", default-features = false, features = ["llvm-prefer-static"] }
 revm-inspectors = "0.41.0"
 
 # eth
