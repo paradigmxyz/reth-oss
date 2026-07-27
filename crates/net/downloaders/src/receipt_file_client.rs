@@ -251,6 +251,7 @@ mod test {
                 success: status != 0,
                 cumulative_gas_used,
                 logs,
+                frame_receipt: None,
             };
 
             Ok(Self { receipt, number })
