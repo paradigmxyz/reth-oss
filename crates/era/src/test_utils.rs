@@ -62,7 +62,7 @@ pub(crate) fn create_test_receipt(
         });
     }
 
-    Receipt { tx_type, success, cumulative_gas_used, logs }
+    Receipt { tx_type, success, cumulative_gas_used, logs, frame_receipt: None }
 }
 
 // Helper function to create a list of test receipts with different characteristics
