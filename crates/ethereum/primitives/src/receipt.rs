@@ -686,7 +686,7 @@ mod tests {
         let envelope: ReceiptEnvelope<alloy_rpc_types_eth::Log> =
             serde_json::from_str(input).unwrap();
 
-        assert_eq!(envelope, receipt.clone());
+        assert_eq!(envelope, receipt);
 
         let json_envelope = serde_json::to_value(&envelope).unwrap();
         let json_receipt = serde_json::to_value(receipt.into_with_bloom()).unwrap();
