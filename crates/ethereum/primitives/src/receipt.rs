@@ -13,31 +13,30 @@ use alloy_primitives::{logs_bloom, Bloom, Log, B256};
 use alloy_rlp::{BufMut, Decodable, Encodable, Header};
 use reth_primitives_traits::proofs::ordered_trie_root_with_encoder;
 
-/// Standard Ethereum receipt data shared by legacy and typed transactions.
-pub type StandardReceipt = alloy_consensus::EthereumReceiptData<TxType, Log>;
-
-/// Lossless EIP-8141 frame receipt data.
+/// Ethereum receipt with lossless EIP-8141 frame data and contiguous aggregate logs.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct FrameReceipt {
-    pub payload: FrameReceiptPayload<Log>,
+pub struct Receipt {
+    /// Receipt transaction type.
+    pub tx_type: TxType,
+    /// Whether execution succeeded.
+    pub success: bool,
+    /// Cumulative block gas used after this transaction.
+    pub cumulative_gas_used: u64,
+    /// Logs emitted by the transaction, flattened across successful frames for EIP-8141.
     pub logs: Vec<Log>,
-}
-
-/// Ethereum receipt, split between standard receipts and EIP-8141 frame receipts.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Receipt {
-    Standard(StandardReceipt),
-    Frame(FrameReceipt),
+    /// Full EIP-8141 receipt payload. Present only for frame transactions.
+    pub frame_receipt: Option<FrameReceiptPayload<Log>>,
 }
 
 impl Default for Receipt {
     fn default() -> Self {
-        Self::Standard(StandardReceipt {
-                tx_type: TxType::Legacy,
-                success: false,
-                cumulative_gas_used: 0,
-                logs: Vec::new(),
-            })
+        Self {
+            tx_type: TxType::Legacy,
+            success: false,
+            cumulative_gas_used: 0,
+            logs: Vec::new(),
+            frame_receipt: None,
+        }
     }
 }
 
@@ -61,80 +60,73 @@ impl Receipt {
                 Self::from_standard(TxType::Eip7702, receipt.receipt)
             }
             ReceiptEnvelope::Eip8141(payload) => {
-                let logs = payload.frame_receipts.iter().flat_map(|receipt| receipt.logs.iter().cloned()).collect();
-                Self::Frame(FrameReceipt { payload, logs })
+                let logs = payload
+                    .frame_receipts
+                    .iter()
+                    .flat_map(|receipt| receipt.logs.iter().cloned())
+                    .collect();
+                Self {
+                    tx_type: TxType::Eip8141,
+                    success: true,
+                    cumulative_gas_used: payload.cumulative_gas_used,
+                    logs,
+                    frame_receipt: Some(payload),
+                }
             }
         }
     }
 
     fn from_standard(tx_type: TxType, receipt: ConsensusReceipt) -> Self {
-        Self::Standard(StandardReceipt {
+        Self {
             tx_type,
             success: receipt.status.coerce_status(),
             cumulative_gas_used: receipt.cumulative_gas_used,
             logs: receipt.logs,
-        })
+            frame_receipt: None,
+        }
     }
 
     /// Converts this receipt into its consensus envelope.
     pub fn to_envelope(&self) -> ReceiptEnvelope {
-        let Self::Standard(data) = self else {
-            let Self::Frame(frame) = self else { unreachable!() };
-            return ReceiptEnvelope::Eip8141(frame.payload.clone())
-        };
+        if self.tx_type == TxType::Eip8141 {
+            let mut payload = self
+                .frame_receipt
+                .clone()
+                .expect("EIP-8141 receipt is missing its frame receipt payload");
+            payload.cumulative_gas_used = self.cumulative_gas_used;
+            return ReceiptEnvelope::Eip8141(payload)
+        }
+
+        assert!(
+            self.frame_receipt.is_none(),
+            "non-EIP-8141 receipt contains a frame receipt payload"
+        );
         let receipt = ConsensusReceipt {
-            status: Eip658Value::Eip658(data.success),
-            cumulative_gas_used: data.cumulative_gas_used,
-            logs: data.logs.clone(),
-        }.with_bloom();
-        match data.tx_type {
+            status: Eip658Value::Eip658(self.success),
+            cumulative_gas_used: self.cumulative_gas_used,
+            logs: self.logs.clone(),
+        }
+        .with_bloom();
+        match self.tx_type {
             TxType::Legacy => ReceiptEnvelope::Legacy(receipt),
             TxType::Eip2930 => ReceiptEnvelope::Eip2930(receipt),
             TxType::Eip1559 => ReceiptEnvelope::Eip1559(receipt),
             TxType::Eip4844 => ReceiptEnvelope::Eip4844(receipt),
             TxType::Eip7702 => ReceiptEnvelope::Eip7702(receipt),
-            TxType::Eip8141 => unreachable!("frame receipt handled above"),
+            TxType::Eip8141 => unreachable!("handled above"),
         }
     }
 
     /// Returns the EIP-8141 frame receipt payload, if this is a frame transaction receipt.
     pub const fn as_eip8141(&self) -> Option<&FrameReceiptPayload<Log>> {
-        match self { Self::Frame(frame) => Some(&frame.payload), Self::Standard(_) => None }
-    }
-
-    pub const fn tx_type(&self) -> TxType {
-        match self {
-            Self::Standard(receipt) => receipt.tx_type,
-            Self::Frame(_) => TxType::Eip8141,
-        }
-    }
-
-    pub const fn success(&self) -> bool {
-        match self {
-            Self::Standard(receipt) => receipt.success,
-            Self::Frame(_) => true,
-        }
-    }
-
-    pub const fn cumulative_gas_used(&self) -> u64 {
-        match self {
-            Self::Standard(receipt) => receipt.cumulative_gas_used,
-            Self::Frame(frame) => frame.payload.cumulative_gas_used,
-        }
-    }
-
-    pub fn logs(&self) -> &[Log] {
-        match self {
-            Self::Standard(receipt) => &receipt.logs,
-            Self::Frame(frame) => &frame.logs,
-        }
+        self.frame_receipt.as_ref()
     }
 
     fn rlp_payload_length(&self, bloom: &Bloom) -> usize {
-        self.success().length() +
-            self.cumulative_gas_used().length() +
+        self.success.length() +
+            self.cumulative_gas_used.length() +
             bloom.length() +
-            self.logs().to_vec().length()
+            self.logs.length()
     }
 
     fn rlp_receipt_length(&self, bloom: &Bloom) -> usize {
@@ -144,10 +136,10 @@ impl Receipt {
 
     fn rlp_encode_receipt(&self, bloom: &Bloom, out: &mut dyn BufMut) {
         Header { list: true, payload_length: self.rlp_payload_length(bloom) }.encode(out);
-        self.success().encode(out);
-        self.cumulative_gas_used().encode(out);
+        self.success.encode(out);
+        self.cumulative_gas_used.encode(out);
         bloom.encode(out);
-        self.logs().to_vec().encode(out);
+        self.logs.encode(out);
     }
 }
 
@@ -167,33 +159,33 @@ impl TxReceipt for Receipt {
     type Log = Log;
 
     fn status_or_post_state(&self) -> Eip658Value {
-        self.success().into()
+        self.success.into()
     }
 
     fn status(&self) -> bool {
-        self.success()
+        self.success
     }
 
     fn bloom(&self) -> Bloom {
-        logs_bloom(self.logs().iter())
+        logs_bloom(self.logs.iter())
     }
 
     fn cumulative_gas_used(&self) -> u64 {
-        self.cumulative_gas_used()
+        self.cumulative_gas_used
     }
 
     fn logs(&self) -> &[Log] {
-        self.logs()
+        &self.logs
     }
 
     fn into_logs(self) -> Vec<Log> {
-        self.logs().to_vec()
+        self.logs
     }
 }
 
 impl Typed2718 for Receipt {
     fn ty(&self) -> u8 {
-        self.tx_type() as u8
+        self.tx_type as u8
     }
 }
 
@@ -242,7 +234,7 @@ impl Decodable for Receipt {
 impl RlpEncodableReceipt for Receipt {
     fn rlp_encoded_length_with_bloom(&self, bloom: &Bloom) -> usize {
         let payload_length = self.eip2718_encoded_length_with_bloom(bloom);
-        if self.tx_type() == TxType::Legacy {
+        if self.tx_type == TxType::Legacy {
             payload_length
         } else {
             Header { list: false, payload_length }.length() + payload_length
@@ -250,7 +242,7 @@ impl RlpEncodableReceipt for Receipt {
     }
 
     fn rlp_encode_with_bloom(&self, bloom: &Bloom, out: &mut dyn BufMut) {
-        if self.tx_type() != TxType::Legacy {
+        if self.tx_type != TxType::Legacy {
             Header { list: false, payload_length: self.eip2718_encoded_length_with_bloom(bloom) }
                 .encode(out);
         }
@@ -268,15 +260,26 @@ impl RlpDecodableReceipt for Receipt {
 
 impl Eip2718EncodableReceipt for Receipt {
     fn eip2718_encoded_length_with_bloom(&self, bloom: &Bloom) -> usize {
-        let type_len = usize::from(self.tx_type() != TxType::Legacy);
-        type_len + if let Self::Frame(frame) = self { frame.payload.length() } else { self.rlp_receipt_length(bloom) }
+        let type_len = usize::from(self.tx_type != TxType::Legacy);
+        type_len +
+            if let Some(payload) = &self.frame_receipt {
+                payload.length()
+            } else {
+                self.rlp_receipt_length(bloom)
+            }
     }
 
     fn eip2718_encode_with_bloom(&self, bloom: &Bloom, out: &mut dyn BufMut) {
-        if self.tx_type() != TxType::Legacy {
+        if self.tx_type != TxType::Legacy {
             out.put_u8(self.ty());
         }
-        if let Self::Frame(frame) = self { frame.payload.encode(out) } else { self.rlp_encode_receipt(bloom, out) }
+        if let Some(payload) = &self.frame_receipt {
+            assert_eq!(self.tx_type, TxType::Eip8141);
+            payload.encode(out);
+        } else {
+            assert_ne!(self.tx_type, TxType::Eip8141);
+            self.rlp_encode_receipt(bloom, out);
+        }
     }
 }
 
@@ -297,10 +300,10 @@ impl Eip2718DecodableReceipt for Receipt {
 impl InMemorySize for Receipt {
     fn size(&self) -> usize {
         core::mem::size_of::<Self>() +
-            self.logs().iter().map(InMemorySize::size).sum::<usize>() +
-            self.as_eip8141().map_or(0, |payload| {
-                core::mem::size_of_val(payload) +
-                    payload.frame_receipts
+            self.logs.iter().map(InMemorySize::size).sum::<usize>() +
+            self.frame_receipt.as_ref().map_or(0, |payload| {
+                payload
+                    .frame_receipts
                     .iter()
                     .map(|frame| {
                         core::mem::size_of_val(frame) +
