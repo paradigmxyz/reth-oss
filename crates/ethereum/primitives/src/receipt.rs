@@ -47,7 +47,7 @@ impl Default for Receipt {
 
 impl Receipt {
     /// Constructs a standard receipt variant.
-    pub fn standard(
+    pub const fn standard(
         tx_type: TxType,
         success: bool,
         cumulative_gas_used: u64,
@@ -148,7 +148,7 @@ impl Receipt {
     }
 
     /// Updates the cumulative gas used by this receipt.
-    pub fn set_cumulative_gas_used(&mut self, cumulative_gas_used: u64) {
+    pub const fn set_cumulative_gas_used(&mut self, cumulative_gas_used: u64) {
         match self {
             Self::Standard(receipt) => receipt.cumulative_gas_used = cumulative_gas_used,
             Self::Frame(frame) => frame.payload.cumulative_gas_used = cumulative_gas_used,
