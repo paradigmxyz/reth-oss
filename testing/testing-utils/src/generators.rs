@@ -11,7 +11,7 @@ use alloy_eips::{
 use alloy_primitives::{Address, BlockNumber, Bytes, TxKind, B256, B64, U256};
 pub use rand::Rng;
 use rand::{distr::uniform::SampleRange, rngs::StdRng, SeedableRng};
-use reth_ethereum_primitives::{Block, BlockBody, Receipt, Transaction, TransactionSigned};
+use reth_ethereum_primitives::{Block, BlockBody, Receipt, StandardReceipt, Transaction, TransactionSigned};
 use reth_primitives_traits::{
     crypto::secp256k1::sign_message, proofs, Account, Block as _, Log, SealedBlock, SealedHeader,
     StorageEntry,
@@ -456,8 +456,7 @@ pub fn random_receipt<R: Rng>(
 ) -> Receipt {
     let success = rng.random::<bool>();
     let logs_count = logs_count.unwrap_or_else(|| rng.random::<u8>());
-    #[expect(clippy::needless_update)] // side-effect of optimism fields
-    Receipt {
+    Receipt::Standard(StandardReceipt {
         tx_type: transaction.tx_type(),
         success,
         cumulative_gas_used: rng.random_range(0..=transaction.gas_limit()),
@@ -466,8 +465,7 @@ pub fn random_receipt<R: Rng>(
         } else {
             vec![]
         },
-        ..Default::default()
-    }
+    })
 }
 
 /// Generate random log
