@@ -9735,6 +9735,7 @@ dependencies = [
  "reth-db",
  "reth-db-api",
  "reth-errors",
+ "reth-ethereum-primitives",
  "reth-exex-types",
  "reth-metrics",
  "reth-primitives-traits",
