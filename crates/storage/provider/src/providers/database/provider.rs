@@ -4956,13 +4956,12 @@ mod tests {
         let write_receipts = |provider_rw: DatabaseProviderRW<_, _>, block: u64| {
             let outcome = ExecutionOutcome {
                 first_block: block,
-                receipts: vec![vec![Receipt {
-                    tx_type: Default::default(),
-                    success: true,
-                    cumulative_gas_used: block, // identifier to assert against
-                    logs: vec![],
-                    frame_receipt: None,
-                }]],
+                receipts: vec![vec![Receipt::standard(
+                    Default::default(),
+                    true,
+                    block, // identifier to assert against
+                    vec![],
+                )]],
                 ..Default::default()
             };
             provider_rw

@@ -202,17 +202,16 @@ fn block1(
             .revert_account_info(number, account2, Some(None))
             .state_storage(account1, HashMap::from_iter([(slot, (U256::ZERO, U256::from(10)))]))
             .build(),
-        vec![vec![Receipt {
-            tx_type: TxType::Eip2930,
-            success: true,
-            cumulative_gas_used: 300,
-            logs: vec![Log::new_unchecked(
+        vec![vec![Receipt::standard(
+            TxType::Eip2930,
+            true,
+            300,
+            vec![Log::new_unchecked(
                 Address::new([0x60; 20]),
                 vec![B256::with_last_byte(1), B256::with_last_byte(2)],
                 Bytes::default(),
             )],
-            frame_receipt: None,
-        }]],
+        )]],
         number,
         Vec::new(),
     );
@@ -257,17 +256,16 @@ fn block2(
             )
             .revert_storage(number, account, Vec::from([(slot, U256::from(10))]))
             .build(),
-        vec![vec![Receipt {
-            tx_type: TxType::Eip1559,
-            success: false,
-            cumulative_gas_used: 400,
-            logs: vec![Log::new_unchecked(
+        vec![vec![Receipt::standard(
+            TxType::Eip1559,
+            false,
+            400,
+            vec![Log::new_unchecked(
                 Address::new([0x61; 20]),
                 vec![B256::with_last_byte(3), B256::with_last_byte(4)],
                 Bytes::default(),
             )],
-            frame_receipt: None,
-        }]],
+        )]],
         number,
         Vec::new(),
     );
@@ -321,17 +319,16 @@ fn block3(
     }
     let execution_outcome = ExecutionOutcome::new(
         bundle_state_builder.build(),
-        vec![vec![Receipt {
-            tx_type: TxType::Eip1559,
-            success: true,
-            cumulative_gas_used: 400,
-            logs: vec![Log::new_unchecked(
+        vec![vec![Receipt::standard(
+            TxType::Eip1559,
+            true,
+            400,
+            vec![Log::new_unchecked(
                 Address::new([0x61; 20]),
                 vec![B256::with_last_byte(3), B256::with_last_byte(4)],
                 Bytes::default(),
             )],
-            frame_receipt: None,
-        }]],
+        )]],
         number,
         Vec::new(),
     );
@@ -405,17 +402,16 @@ fn block4(
     }
     let execution_outcome = ExecutionOutcome::new(
         bundle_state_builder.build(),
-        vec![vec![Receipt {
-            tx_type: TxType::Eip1559,
-            success: true,
-            cumulative_gas_used: 400,
-            logs: vec![Log::new_unchecked(
+        vec![vec![Receipt::standard(
+            TxType::Eip1559,
+            true,
+            400,
+            vec![Log::new_unchecked(
                 Address::new([0x61; 20]),
                 vec![B256::with_last_byte(3), B256::with_last_byte(4)],
                 Bytes::default(),
             )],
-            frame_receipt: None,
-        }]],
+        )]],
         number,
         Vec::new(),
     );
@@ -486,17 +482,16 @@ fn block5(
     }
     let execution_outcome = ExecutionOutcome::new(
         bundle_state_builder.build(),
-        vec![vec![Receipt {
-            tx_type: TxType::Eip1559,
-            success: true,
-            cumulative_gas_used: 400,
-            logs: vec![Log::new_unchecked(
+        vec![vec![Receipt::standard(
+            TxType::Eip1559,
+            true,
+            400,
+            vec![Log::new_unchecked(
                 Address::new([0x61; 20]),
                 vec![B256::with_last_byte(3), B256::with_last_byte(4)],
                 Bytes::default(),
             )],
-            frame_receipt: None,
-        }]],
+        )]],
         number,
         Vec::new(),
     );

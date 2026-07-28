@@ -326,16 +326,8 @@ async fn test_eth68_get_receipts() {
 
         // Create some test receipts
         let receipts = vec![
-            reth_ethereum_primitives::Receipt {
-                cumulative_gas_used: 21000,
-                success: true,
-                ..Default::default()
-            },
-            reth_ethereum_primitives::Receipt {
-                cumulative_gas_used: 42000,
-                success: false,
-                ..Default::default()
-            },
+            reth_ethereum_primitives::Receipt::standard(Default::default(), true, 21000, vec![]),
+            reth_ethereum_primitives::Receipt::standard(Default::default(), false, 42000, vec![]),
         ];
 
         mock_provider.add_header(block_hash, header.clone());
@@ -500,16 +492,8 @@ async fn test_eth69_get_receipts() {
 
         // Create some test receipts
         let receipts = vec![
-            reth_ethereum_primitives::Receipt {
-                cumulative_gas_used: 21000,
-                success: true,
-                ..Default::default()
-            },
-            reth_ethereum_primitives::Receipt {
-                cumulative_gas_used: 42000,
-                success: false,
-                ..Default::default()
-            },
+            reth_ethereum_primitives::Receipt::standard(Default::default(), true, 21000, vec![]),
+            reth_ethereum_primitives::Receipt::standard(Default::default(), false, 42000, vec![]),
         ];
 
         mock_provider.add_header(block_hash, header.clone());

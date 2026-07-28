@@ -245,14 +245,9 @@ mod test {
             let MockReceipt { tx_type, status, cumulative_gas_used, logs, block_number: number } =
                 exported_receipt;
 
-            let receipt = Receipt {
-                tx_type: TxType::try_from(tx_type.to_be_bytes()[0])
-                    .map_err(|err| FileClientError::Rlp(err.into(), vec![tx_type]))?,
-                success: status != 0,
-                cumulative_gas_used,
-                logs,
-                frame_receipt: None,
-            };
+            let tx_type = TxType::try_from(tx_type.to_be_bytes()[0])
+                .map_err(|err| FileClientError::Rlp(err.into(), vec![tx_type]))?;
+            let receipt = Receipt::standard(tx_type, status != 0, cumulative_gas_used, logs);
 
             Ok(Self { receipt, number })
         }
@@ -374,14 +369,7 @@ mod test {
         };
 
         // feature must not be brought into scope
-        let mut receipt = Receipt {
-            tx_type: TxType::Legacy,
-            success: true,
-            cumulative_gas_used: 202819,
-            logs: vec![],
-            frame_receipt: None,
-        };
-        receipt.logs = vec![log_1, log_2, log_3];
+        let receipt = Receipt::standard(TxType::Legacy, true, 202819, vec![log_1, log_2, log_3]);
 
         ReceiptWithBlockNumber { receipt, number: 1 }
     }
@@ -413,14 +401,7 @@ mod test {
             .unwrap(),
         };
 
-        let mut receipt = Receipt {
-            tx_type: TxType::Legacy,
-            success: true,
-            cumulative_gas_used: 116237,
-            logs: vec![],
-            frame_receipt: None,
-        };
-        receipt.logs = vec![log_1, log_2];
+        let receipt = Receipt::standard(TxType::Legacy, true, 116237, vec![log_1, log_2]);
 
         ReceiptWithBlockNumber { receipt, number: 2 }
     }
@@ -452,13 +433,7 @@ mod test {
             .unwrap(),
         };
 
-        let mut receipt = Receipt {
-            tx_type: TxType::Legacy,
-            success: true,
-            cumulative_gas_used: 116237,
-            ..Default::default()
-        };
-        receipt.logs = vec![log_1, log_2];
+        let receipt = Receipt::standard(TxType::Legacy, true, 116237, vec![log_1, log_2]);
 
         ReceiptWithBlockNumber { receipt, number: 3 }
     }

@@ -1470,30 +1470,12 @@ mod tests {
         let expected_block_hash_2 = FixedBytes::from([2u8; 32]);
 
         // create mock receipts to test receipt handling
-        let mock_receipt_1 = reth_ethereum_primitives::Receipt {
-            tx_type: TxType::Legacy,
-            cumulative_gas_used: 100_000,
-            logs: vec![],
-            success: true,
-
-            frame_receipt: None,
-        };
-        let mock_receipt_2 = reth_ethereum_primitives::Receipt {
-            tx_type: TxType::Eip1559,
-            cumulative_gas_used: 200_000,
-            logs: vec![],
-            success: true,
-
-            frame_receipt: None,
-        };
-        let mock_receipt_3 = reth_ethereum_primitives::Receipt {
-            tx_type: TxType::Eip2930,
-            cumulative_gas_used: 150_000,
-            logs: vec![],
-            success: false, // Different success status
-
-            frame_receipt: None,
-        };
+        let mock_receipt_1 =
+            reth_ethereum_primitives::Receipt::standard(TxType::Legacy, true, 100_000, vec![]);
+        let mock_receipt_2 =
+            reth_ethereum_primitives::Receipt::standard(TxType::Eip1559, true, 200_000, vec![]);
+        let mock_receipt_3 =
+            reth_ethereum_primitives::Receipt::standard(TxType::Eip2930, false, 150_000, vec![]);
 
         let mock_result_1 = ReceiptBlockResult {
             receipts: Arc::new(vec![mock_receipt_1.clone(), mock_receipt_2.clone()]),
@@ -1614,30 +1596,24 @@ mod tests {
             data: alloy_primitives::LogData::new_unchecked(vec![], alloy_primitives::Bytes::new()),
         };
 
-        let receipt_100_1 = reth_ethereum_primitives::Receipt {
-            tx_type: TxType::Legacy,
-            cumulative_gas_used: 21_000,
-            logs: vec![mock_log.clone()],
-            success: true,
-
-            frame_receipt: None,
-        };
-        let receipt_100_2 = reth_ethereum_primitives::Receipt {
-            tx_type: TxType::Eip1559,
-            cumulative_gas_used: 42_000,
-            logs: vec![mock_log.clone()],
-            success: true,
-
-            frame_receipt: None,
-        };
-        let receipt_101_1 = reth_ethereum_primitives::Receipt {
-            tx_type: TxType::Eip2930,
-            cumulative_gas_used: 30_000,
-            logs: vec![mock_log.clone()],
-            success: false,
-
-            frame_receipt: None,
-        };
+        let receipt_100_1 = reth_ethereum_primitives::Receipt::standard(
+            TxType::Legacy,
+            true,
+            21_000,
+            vec![mock_log.clone()],
+        );
+        let receipt_100_2 = reth_ethereum_primitives::Receipt::standard(
+            TxType::Eip1559,
+            true,
+            42_000,
+            vec![mock_log.clone()],
+        );
+        let receipt_101_1 = reth_ethereum_primitives::Receipt::standard(
+            TxType::Eip2930,
+            false,
+            30_000,
+            vec![mock_log.clone()],
+        );
 
         provider.add_receipts(100, vec![receipt_100_1.clone(), receipt_100_2.clone()]);
         provider.add_receipts(101, vec![receipt_101_1.clone()]);
@@ -1724,14 +1700,8 @@ mod tests {
         provider.add_header(block_hash_101, header_101.clone());
 
         // Add mock receipts so headers are actually processed
-        let mock_receipt = reth_ethereum_primitives::Receipt {
-            tx_type: TxType::Legacy,
-            cumulative_gas_used: 21_000,
-            logs: vec![],
-            success: true,
-
-            frame_receipt: None,
-        };
+        let mock_receipt =
+            reth_ethereum_primitives::Receipt::standard(TxType::Legacy, true, 21_000, vec![]);
         provider.add_receipts(100, vec![mock_receipt.clone()]);
         provider.add_receipts(101, vec![mock_receipt.clone()]);
 
@@ -1793,14 +1763,12 @@ mod tests {
             data: alloy_primitives::LogData::new_unchecked(vec![], alloy_primitives::Bytes::new()),
         };
 
-        let mock_receipt = reth_ethereum_primitives::Receipt {
-            tx_type: TxType::Legacy,
-            cumulative_gas_used: 21_000,
-            logs: vec![mock_log],
-            success: true,
-
-            frame_receipt: None,
-        };
+        let mock_receipt = reth_ethereum_primitives::Receipt::standard(
+            TxType::Legacy,
+            true,
+            21_000,
+            vec![mock_log],
+        );
 
         let provider = MockEthProvider::default();
         provider.add_header(test_hash, test_header.header().clone());
@@ -1877,14 +1845,12 @@ mod tests {
             data: alloy_primitives::LogData::new_unchecked(vec![], alloy_primitives::Bytes::new()),
         };
 
-        let receipt = reth_ethereum_primitives::Receipt {
-            tx_type: TxType::Legacy,
-            cumulative_gas_used: 21_000,
-            logs: vec![mock_log],
-            success: true,
-
-            frame_receipt: None,
-        };
+        let receipt = reth_ethereum_primitives::Receipt::standard(
+            TxType::Legacy,
+            true,
+            21_000,
+            vec![mock_log],
+        );
 
         let mut prev_hash = alloy_primitives::B256::default();
         for (idx, block_number) in (100u64..=102).enumerate() {
@@ -1992,14 +1958,12 @@ mod tests {
             data: alloy_primitives::LogData::new_unchecked(vec![], alloy_primitives::Bytes::new()),
         };
 
-        let receipt = reth_ethereum_primitives::Receipt {
-            tx_type: TxType::Legacy,
-            cumulative_gas_used: 21_000,
-            logs: vec![mock_log],
-            success: true,
-
-            frame_receipt: None,
-        };
+        let receipt = reth_ethereum_primitives::Receipt::standard(
+            TxType::Legacy,
+            true,
+            21_000,
+            vec![mock_log],
+        );
 
         provider.add_receipts(100, vec![receipt.clone()]);
         provider.add_receipts(101, vec![]);

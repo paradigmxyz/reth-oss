@@ -11,7 +11,9 @@ use alloy_eips::{
 use alloy_primitives::{Address, BlockNumber, Bytes, TxKind, B256, B64, U256};
 pub use rand::Rng;
 use rand::{distr::uniform::SampleRange, rngs::StdRng, SeedableRng};
-use reth_ethereum_primitives::{Block, BlockBody, Receipt, StandardReceipt, Transaction, TransactionSigned};
+use reth_ethereum_primitives::{
+    Block, BlockBody, Receipt, StandardReceipt, Transaction, TransactionSigned,
+};
 use reth_primitives_traits::{
     crypto::secp256k1::sign_message, proofs, Account, Block as _, Log, SealedBlock, SealedHeader,
     StorageEntry,

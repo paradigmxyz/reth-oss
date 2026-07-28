@@ -19,31 +19,40 @@ pub type StandardReceipt = alloy_consensus::EthereumReceiptData<TxType, Log>;
 /// Lossless EIP-8141 frame receipt data.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FrameReceipt {
+    /// The lossless EIP-8141 receipt payload.
     pub payload: FrameReceiptPayload<Log>,
+    /// Logs emitted by all frames, flattened for the receipt interfaces.
     pub logs: Vec<Log>,
 }
 
 /// Ethereum receipt, split between standard receipts and EIP-8141 frame receipts.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Receipt {
+    /// Receipt for a legacy or typed transaction other than EIP-8141.
     Standard(StandardReceipt),
+    /// Receipt for an EIP-8141 frame transaction.
     Frame(FrameReceipt),
 }
 
 impl Default for Receipt {
     fn default() -> Self {
         Self::Standard(StandardReceipt {
-                tx_type: TxType::Legacy,
-                success: false,
-                cumulative_gas_used: 0,
-                logs: Vec::new(),
-            })
+            tx_type: TxType::Legacy,
+            success: false,
+            cumulative_gas_used: 0,
+            logs: Vec::new(),
+        })
     }
 }
 
 impl Receipt {
     /// Constructs a standard receipt variant.
-    pub fn standard(tx_type: TxType, success: bool, cumulative_gas_used: u64, logs: Vec<Log>) -> Self {
+    pub fn standard(
+        tx_type: TxType,
+        success: bool,
+        cumulative_gas_used: u64,
+        logs: Vec<Log>,
+    ) -> Self {
         Self::Standard(StandardReceipt { tx_type, success, cumulative_gas_used, logs })
     }
     /// Converts a consensus receipt envelope into the Reth storage representation.
@@ -65,7 +74,11 @@ impl Receipt {
                 Self::from_standard(TxType::Eip7702, receipt.receipt)
             }
             ReceiptEnvelope::Eip8141(payload) => {
-                let logs = payload.frame_receipts.iter().flat_map(|receipt| receipt.logs.iter().cloned()).collect();
+                let logs = payload
+                    .frame_receipts
+                    .iter()
+                    .flat_map(|receipt| receipt.logs.iter().cloned())
+                    .collect();
                 Self::Frame(FrameReceipt { payload, logs })
             }
         }
@@ -90,7 +103,8 @@ impl Receipt {
             status: Eip658Value::Eip658(data.success),
             cumulative_gas_used: data.cumulative_gas_used,
             logs: data.logs.clone(),
-        }.with_bloom();
+        }
+        .with_bloom();
         match data.tx_type {
             TxType::Legacy => ReceiptEnvelope::Legacy(receipt),
             TxType::Eip2930 => ReceiptEnvelope::Eip2930(receipt),
@@ -103,9 +117,13 @@ impl Receipt {
 
     /// Returns the EIP-8141 frame receipt payload, if this is a frame transaction receipt.
     pub const fn as_eip8141(&self) -> Option<&FrameReceiptPayload<Log>> {
-        match self { Self::Frame(frame) => Some(&frame.payload), Self::Standard(_) => None }
+        match self {
+            Self::Frame(frame) => Some(&frame.payload),
+            Self::Standard(_) => None,
+        }
     }
 
+    /// Returns the transaction type associated with this receipt.
     pub const fn tx_type(&self) -> TxType {
         match self {
             Self::Standard(receipt) => receipt.tx_type,
@@ -113,6 +131,7 @@ impl Receipt {
         }
     }
 
+    /// Returns whether execution succeeded.
     pub const fn success(&self) -> bool {
         match self {
             Self::Standard(receipt) => receipt.success,
@@ -120,6 +139,7 @@ impl Receipt {
         }
     }
 
+    /// Returns the cumulative gas used by the transaction.
     pub const fn cumulative_gas_used(&self) -> u64 {
         match self {
             Self::Standard(receipt) => receipt.cumulative_gas_used,
@@ -127,6 +147,7 @@ impl Receipt {
         }
     }
 
+    /// Returns all logs emitted by the transaction.
     pub fn logs(&self) -> &[Log] {
         match self {
             Self::Standard(receipt) => &receipt.logs,
@@ -273,14 +294,23 @@ impl RlpDecodableReceipt for Receipt {
 impl Eip2718EncodableReceipt for Receipt {
     fn eip2718_encoded_length_with_bloom(&self, bloom: &Bloom) -> usize {
         let type_len = usize::from(self.tx_type() != TxType::Legacy);
-        type_len + if let Self::Frame(frame) = self { frame.payload.length() } else { self.rlp_receipt_length(bloom) }
+        type_len +
+            if let Self::Frame(frame) = self {
+                frame.payload.length()
+            } else {
+                self.rlp_receipt_length(bloom)
+            }
     }
 
     fn eip2718_encode_with_bloom(&self, bloom: &Bloom, out: &mut dyn BufMut) {
         if self.tx_type() != TxType::Legacy {
             out.put_u8(self.ty());
         }
-        if let Self::Frame(frame) = self { frame.payload.encode(out) } else { self.rlp_encode_receipt(bloom, out) }
+        if let Self::Frame(frame) = self {
+            frame.payload.encode(out)
+        } else {
+            self.rlp_encode_receipt(bloom, out)
+        }
     }
 }
 
@@ -304,13 +334,14 @@ impl InMemorySize for Receipt {
             self.logs().iter().map(InMemorySize::size).sum::<usize>() +
             self.as_eip8141().map_or(0, |payload| {
                 core::mem::size_of_val(payload) +
-                    payload.frame_receipts
-                    .iter()
-                    .map(|frame| {
-                        core::mem::size_of_val(frame) +
-                            frame.logs.iter().map(InMemorySize::size).sum::<usize>()
-                    })
-                    .sum::<usize>()
+                    payload
+                        .frame_receipts
+                        .iter()
+                        .map(|frame| {
+                            core::mem::size_of_val(frame) +
+                                frame.logs.iter().map(InMemorySize::size).sum::<usize>()
+                        })
+                        .sum::<usize>()
             })
     }
 }
@@ -394,10 +425,13 @@ mod tests {
         eip2718::{Decodable2718, Encodable2718},
         eip8141::{FrameReceipt, FrameStatus},
     };
+    #[cfg(feature = "reth-codec")]
+    use alloy_primitives::Bytes;
     use alloy_primitives::{
-        address, b256, bloom, bytes, hex_literal::hex, Address, Bloom, Bytes, Log, LogData,
+        address, b256, bloom, bytes, hex_literal::hex, Address, Bloom, Log, LogData,
     };
     use alloy_rlp::{Decodable, Encodable};
+    #[cfg(feature = "reth-codec")]
     use reth_codecs::Compact;
     use reth_primitives_traits::proofs::{
         calculate_receipt_root, calculate_transaction_root, calculate_withdrawals_root,
@@ -425,10 +459,11 @@ mod tests {
 
         let mut data = Vec::with_capacity(expected.length());
         let receipt = ReceiptWithBloom {
-            receipt: Receipt {
-                tx_type: TxType::Legacy,
-                cumulative_gas_used: 0x1u64,
-                logs: vec![Log::new_unchecked(
+            receipt: Receipt::standard(
+                TxType::Legacy,
+                false,
+                0x1u64,
+                vec![Log::new_unchecked(
                     address!("0x0000000000000000000000000000000000000011"),
                     vec![
                         b256!("0x000000000000000000000000000000000000000000000000000000000000dead"),
@@ -436,9 +471,7 @@ mod tests {
                     ],
                     bytes!("0100ff"),
                 )],
-                success: false,
-                frame_receipt: None,
-            },
+            ),
             logs_bloom: [0; 256].into(),
         };
 
@@ -458,10 +491,11 @@ mod tests {
 
         // EIP658Receipt
         let expected = ReceiptWithBloom {
-            receipt: Receipt {
-                tx_type: TxType::Legacy,
-                cumulative_gas_used: 0x1u64,
-                logs: vec![Log::new_unchecked(
+            receipt: Receipt::standard(
+                TxType::Legacy,
+                false,
+                0x1u64,
+                vec![Log::new_unchecked(
                     address!("0x0000000000000000000000000000000000000011"),
                     vec![
                         b256!("0x000000000000000000000000000000000000000000000000000000000000dead"),
@@ -469,9 +503,7 @@ mod tests {
                     ],
                     bytes!("0100ff"),
                 )],
-                success: false,
-                frame_receipt: None,
-            },
+            ),
             logs_bloom: [0; 256].into(),
         };
 
@@ -480,12 +512,13 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "reth-codec")]
     fn gigantic_receipt() {
-        let receipt = Receipt {
-            cumulative_gas_used: 16747627,
-            success: true,
-            tx_type: TxType::Legacy,
-            logs: vec![
+        let receipt = Receipt::standard(
+            TxType::Legacy,
+            true,
+            16747627,
+            vec![
                 Log::new_unchecked(
                     address!("0x4bf56695415f725e43c3e04354b604bcfb6dfb6e"),
                     vec![b256!(
@@ -501,8 +534,7 @@ mod tests {
                     Bytes::from(vec![1; 0xffffff]),
                 ),
             ],
-            frame_receipt: None,
-        };
+        );
 
         let mut data = vec![];
         receipt.to_compact(&mut data);
@@ -528,7 +560,7 @@ mod tests {
         });
 
         let receipt = Receipt::from_envelope(envelope.clone());
-        assert_eq!(receipt.logs, vec![log]);
+        assert_eq!(receipt.logs(), &[log]);
         assert_eq!(receipt.as_eip8141(), envelope.as_eip8141());
 
         let encoded = receipt.encoded_2718();
@@ -549,13 +581,7 @@ mod tests {
     #[test]
     fn test_encode_2718_length() {
         let receipt = ReceiptWithBloom {
-            receipt: Receipt {
-                tx_type: TxType::Eip1559,
-                success: true,
-                cumulative_gas_used: 21000,
-                logs: vec![],
-                frame_receipt: None,
-            },
+            receipt: Receipt::standard(TxType::Eip1559, true, 21000, vec![]),
             logs_bloom: Bloom::default(),
         };
 
@@ -568,13 +594,7 @@ mod tests {
 
         // Test for legacy receipt as well
         let legacy_receipt = ReceiptWithBloom {
-            receipt: Receipt {
-                tx_type: TxType::Legacy,
-                success: true,
-                cumulative_gas_used: 21000,
-                logs: vec![],
-                frame_receipt: None,
-            },
+            receipt: Receipt::standard(TxType::Legacy, true, 21000, vec![]),
             logs_bloom: Bloom::default(),
         };
 
@@ -636,13 +656,7 @@ mod tests {
             "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001"
         );
         let receipt = ReceiptWithBloom {
-            receipt: Receipt {
-                tx_type: TxType::Eip2930,
-                success: true,
-                cumulative_gas_used: 102068,
-                logs,
-                frame_receipt: None,
-            },
+            receipt: Receipt::standard(TxType::Eip2930, true, 102068, logs),
             logs_bloom: bloom,
         };
         let receipt = vec![receipt];
