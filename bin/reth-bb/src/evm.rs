@@ -341,7 +341,7 @@ where
         self.accumulated_requests.extend(result.requests);
 
         let last_receipt_cumulative =
-            result.receipts.last().map(|r| r.cumulative_gas_used).unwrap_or(0);
+            result.receipts.last().map(|r| r.cumulative_gas_used()).unwrap_or(0);
         let seg_block_number = prev_segment.evm_env.block_env.number.saturating_to::<u64>();
         debug!(
             target: "engine::bb::evm",
@@ -435,7 +435,7 @@ where
         if offset > 0 &&
             let Some(receipt) = self.inner_mut().receipts.last_mut()
         {
-            receipt.cumulative_gas_used += offset;
+            receipt.set_cumulative_gas_used(receipt.cumulative_gas_used() + offset);
         }
 
         self.plan.tx_counter += 1;
@@ -477,7 +477,7 @@ where
         result.blob_gas_used += self.blob_gas_used_offset;
 
         let last_receipt_cumulative =
-            result.receipts.last().map(|r| r.cumulative_gas_used).unwrap_or(0);
+            result.receipts.last().map(|r| r.cumulative_gas_used()).unwrap_or(0);
         debug!(
             target: "engine::bb::evm",
             last_segment_gas,
