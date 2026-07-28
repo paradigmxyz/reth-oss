@@ -7897,7 +7897,7 @@ dependencies = [
 [[package]]
 name = "reth-codecs"
 version = "0.5.2"
-source = "git+https://github.com/Soubhik-10/reth-core?branch=feat%2Feip8141-receipt-codec#2254931f40e7d3c2f584464beea0442725baac78"
+source = "git+https://github.com/Soubhik-10/reth-core?branch=feat%2Feip8141-receipt-codec#8c0b4120730304ce29dd4d16506a81df0963f4ea"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -7928,7 +7928,7 @@ dependencies = [
 [[package]]
 name = "reth-codecs-derive"
 version = "0.5.2"
-source = "git+https://github.com/Soubhik-10/reth-core?branch=feat%2Feip8141-receipt-codec#2254931f40e7d3c2f584464beea0442725baac78"
+source = "git+https://github.com/Soubhik-10/reth-core?branch=feat%2Feip8141-receipt-codec#8c0b4120730304ce29dd4d16506a81df0963f4ea"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -10700,7 +10700,7 @@ dependencies = [
 [[package]]
 name = "reth-zstd-compressors"
 version = "0.5.2"
-source = "git+https://github.com/Soubhik-10/reth-core?branch=feat%2Feip8141-receipt-codec#2254931f40e7d3c2f584464beea0442725baac78"
+source = "git+https://github.com/Soubhik-10/reth-core?branch=feat%2Feip8141-receipt-codec#8c0b4120730304ce29dd4d16506a81df0963f4ea"
 dependencies = [
  "zstd",
 ]
