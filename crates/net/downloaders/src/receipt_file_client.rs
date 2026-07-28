@@ -293,11 +293,11 @@ mod test {
     fn mock_receipt_1() -> MockReceipt {
         let receipt = receipt_block_1();
         MockReceipt {
-            tx_type: receipt.receipt.tx_type as u8,
-            status: receipt.receipt.success as u64,
+            tx_type: receipt.receipt.tx_type() as u8,
+            status: receipt.receipt.success() as u64,
 
-            cumulative_gas_used: receipt.receipt.cumulative_gas_used,
-            logs: receipt.receipt.logs,
+            cumulative_gas_used: receipt.receipt.cumulative_gas_used(),
+            logs: receipt.receipt.logs().to_vec(),
             block_number: 1,
         }
     }
@@ -305,11 +305,11 @@ mod test {
     fn mock_receipt_2() -> MockReceipt {
         let receipt = receipt_block_2();
         MockReceipt {
-            tx_type: receipt.receipt.tx_type as u8,
-            status: receipt.receipt.success as u64,
+            tx_type: receipt.receipt.tx_type() as u8,
+            status: receipt.receipt.success() as u64,
 
-            cumulative_gas_used: receipt.receipt.cumulative_gas_used,
-            logs: receipt.receipt.logs,
+            cumulative_gas_used: receipt.receipt.cumulative_gas_used(),
+            logs: receipt.receipt.logs().to_vec(),
             block_number: 2,
         }
     }
@@ -317,11 +317,11 @@ mod test {
     fn mock_receipt_3() -> MockReceipt {
         let receipt = receipt_block_3();
         MockReceipt {
-            tx_type: receipt.receipt.tx_type as u8,
-            status: receipt.receipt.success as u64,
+            tx_type: receipt.receipt.tx_type() as u8,
+            status: receipt.receipt.success() as u64,
 
-            cumulative_gas_used: receipt.receipt.cumulative_gas_used,
-            logs: receipt.receipt.logs,
+            cumulative_gas_used: receipt.receipt.cumulative_gas_used(),
+            logs: receipt.receipt.logs().to_vec(),
             block_number: 3,
         }
     }

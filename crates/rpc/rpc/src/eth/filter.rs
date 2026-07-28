@@ -1512,18 +1512,18 @@ mod tests {
 
         // verify receipts
         assert_eq!(receipt_result1.receipts.len(), 2);
-        assert_eq!(receipt_result1.receipts[0].tx_type, mock_receipt_1.tx_type);
+        assert_eq!(receipt_result1.receipts[0].tx_type(), mock_receipt_1.tx_type());
         assert_eq!(
-            receipt_result1.receipts[0].cumulative_gas_used,
-            mock_receipt_1.cumulative_gas_used
+            receipt_result1.receipts[0].cumulative_gas_used(),
+            mock_receipt_1.cumulative_gas_used()
         );
-        assert_eq!(receipt_result1.receipts[0].success, mock_receipt_1.success);
-        assert_eq!(receipt_result1.receipts[1].tx_type, mock_receipt_2.tx_type);
+        assert_eq!(receipt_result1.receipts[0].success(), mock_receipt_1.success());
+        assert_eq!(receipt_result1.receipts[1].tx_type(), mock_receipt_2.tx_type());
         assert_eq!(
-            receipt_result1.receipts[1].cumulative_gas_used,
-            mock_receipt_2.cumulative_gas_used
+            receipt_result1.receipts[1].cumulative_gas_used(),
+            mock_receipt_2.cumulative_gas_used()
         );
-        assert_eq!(receipt_result1.receipts[1].success, mock_receipt_2.success);
+        assert_eq!(receipt_result1.receipts[1].success(), mock_receipt_2.success());
 
         // second call should return the second queued result
         let result2 = range_mode.next().await;
@@ -1534,12 +1534,12 @@ mod tests {
 
         // verify receipts
         assert_eq!(receipt_result2.receipts.len(), 1);
-        assert_eq!(receipt_result2.receipts[0].tx_type, mock_receipt_3.tx_type);
+        assert_eq!(receipt_result2.receipts[0].tx_type(), mock_receipt_3.tx_type());
         assert_eq!(
-            receipt_result2.receipts[0].cumulative_gas_used,
-            mock_receipt_3.cumulative_gas_used
+            receipt_result2.receipts[0].cumulative_gas_used(),
+            mock_receipt_3.cumulative_gas_used()
         );
-        assert_eq!(receipt_result2.receipts[0].success, mock_receipt_3.success);
+        assert_eq!(receipt_result2.receipts[0].success(), mock_receipt_3.success());
 
         // queue should now be empty
         assert!(range_mode.next.is_empty());
@@ -1648,19 +1648,19 @@ mod tests {
         assert_eq!(receipt_result.receipts.len(), 2);
 
         // verify receipts
-        assert_eq!(receipt_result.receipts[0].tx_type, receipt_100_1.tx_type);
+        assert_eq!(receipt_result.receipts[0].tx_type(), receipt_100_1.tx_type());
         assert_eq!(
-            receipt_result.receipts[0].cumulative_gas_used,
-            receipt_100_1.cumulative_gas_used
+            receipt_result.receipts[0].cumulative_gas_used(),
+            receipt_100_1.cumulative_gas_used()
         );
-        assert_eq!(receipt_result.receipts[0].success, receipt_100_1.success);
+        assert_eq!(receipt_result.receipts[0].success(), receipt_100_1.success());
 
-        assert_eq!(receipt_result.receipts[1].tx_type, receipt_100_2.tx_type);
+        assert_eq!(receipt_result.receipts[1].tx_type(), receipt_100_2.tx_type());
         assert_eq!(
-            receipt_result.receipts[1].cumulative_gas_used,
-            receipt_100_2.cumulative_gas_used
+            receipt_result.receipts[1].cumulative_gas_used(),
+            receipt_100_2.cumulative_gas_used()
         );
-        assert_eq!(receipt_result.receipts[1].success, receipt_100_2.success);
+        assert_eq!(receipt_result.receipts[1].success(), receipt_100_2.success());
 
         // second call should return the second block with receipts
         let result2 = range_mode.next().await;
@@ -1672,12 +1672,12 @@ mod tests {
         assert_eq!(receipt_result2.receipts.len(), 1);
 
         // verify receipts
-        assert_eq!(receipt_result2.receipts[0].tx_type, receipt_101_1.tx_type);
+        assert_eq!(receipt_result2.receipts[0].tx_type(), receipt_101_1.tx_type());
         assert_eq!(
-            receipt_result2.receipts[0].cumulative_gas_used,
-            receipt_101_1.cumulative_gas_used
+            receipt_result2.receipts[0].cumulative_gas_used(),
+            receipt_101_1.cumulative_gas_used()
         );
-        assert_eq!(receipt_result2.receipts[0].success, receipt_101_1.success);
+        assert_eq!(receipt_result2.receipts[0].success(), receipt_101_1.success());
 
         // third call should return None since no more blocks with receipts
         let result3 = range_mode.next().await;
@@ -1789,12 +1789,12 @@ mod tests {
         assert_eq!(receipt_block_result.header.hash(), test_hash);
         assert_eq!(receipt_block_result.header.number, test_block_number);
         assert_eq!(receipt_block_result.receipts.len(), 1);
-        assert_eq!(receipt_block_result.receipts[0].tx_type, mock_receipt.tx_type);
+        assert_eq!(receipt_block_result.receipts[0].tx_type(), mock_receipt.tx_type());
         assert_eq!(
-            receipt_block_result.receipts[0].cumulative_gas_used,
-            mock_receipt.cumulative_gas_used
+            receipt_block_result.receipts[0].cumulative_gas_used(),
+            mock_receipt.cumulative_gas_used()
         );
-        assert_eq!(receipt_block_result.receipts[0].success, mock_receipt.success);
+        assert_eq!(receipt_block_result.receipts[0].success(), mock_receipt.success());
 
         // iterator should be exhausted
         let result2 = cached_mode.next().await;

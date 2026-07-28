@@ -5071,7 +5071,7 @@ mod tests {
 
                 let receipt = provider.receipt(num).unwrap();
                 if has_receipt {
-                    assert!(receipt.is_some_and(|r| r.cumulative_gas_used == num));
+                    assert!(receipt.is_some_and(|r| r.cumulative_gas_used() == num));
                 } else {
                     assert!(receipt.is_none());
                 }

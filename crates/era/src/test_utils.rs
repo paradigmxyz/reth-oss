@@ -90,9 +90,9 @@ pub(crate) fn create_test_receipt_with_bloom(
     let receipt = create_test_receipt(tx_type, success, cumulative_gas_used, log_count);
     ReceiptWithBloom {
         receipt: ConsensusReceipt {
-            status: receipt.success.into(),
-            cumulative_gas_used: receipt.cumulative_gas_used,
-            logs: receipt.logs,
+            status: receipt.success().into(),
+            cumulative_gas_used: receipt.cumulative_gas_used(),
+            logs: receipt.logs().to_vec(),
         },
         logs_bloom: Default::default(),
     }

@@ -147,6 +147,14 @@ impl Receipt {
         }
     }
 
+    /// Updates the cumulative gas used by this receipt.
+    pub fn set_cumulative_gas_used(&mut self, cumulative_gas_used: u64) {
+        match self {
+            Self::Standard(receipt) => receipt.cumulative_gas_used = cumulative_gas_used,
+            Self::Frame(frame) => frame.payload.cumulative_gas_used = cumulative_gas_used,
+        }
+    }
+
     /// Returns all logs emitted by the transaction.
     pub fn logs(&self) -> &[Log] {
         match self {
