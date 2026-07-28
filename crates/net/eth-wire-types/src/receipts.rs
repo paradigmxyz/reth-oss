@@ -202,7 +202,7 @@ mod tests {
     #[test]
     fn roundtrip_eip1559() {
         let receipts = Receipts(vec![vec![ReceiptWithBloom {
-            receipt: Receipt { tx_type: TxType::Eip1559, ..Default::default() },
+            receipt: Receipt::standard(TxType::Eip1559, false, 0, vec![]),
             logs_bloom: Default::default(),
         }]]);
 
@@ -263,11 +263,7 @@ mod tests {
             request_id: 1111,
             message: Receipts(vec![vec![
                 ReceiptWithBloom {
-                    receipt: Receipt {
-                        tx_type: TxType::Legacy,
-                        cumulative_gas_used: 0x1u64,
-                        frame_receipt: None,
-                        logs: vec![
+                    receipt: Receipt::standard(TxType::Legacy, false, 0x1u64, vec![
                             Log::new_unchecked(
                                 hex!("0000000000000000000000000000000000000011").into(),
                                 vec![
@@ -276,9 +272,7 @@ mod tests {
                                 ],
                                 hex!("0100ff")[..].into(),
                             ),
-                        ],
-                        success: false,
-                    },
+                        ]),
                     logs_bloom: hex!("00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000").into(),
                 },
             ]]),
@@ -301,11 +295,7 @@ mod tests {
                 message: Receipts(vec![
                     vec![
                         ReceiptWithBloom {
-                            receipt: Receipt {
-                                tx_type: TxType::Legacy,
-                                cumulative_gas_used: 0x1u64,
-                                frame_receipt: None,
-                                logs: vec![
+                            receipt: Receipt::standard(TxType::Legacy, false, 0x1u64, vec![
                                     Log::new_unchecked(
                                         hex!("0000000000000000000000000000000000000011").into(),
                                         vec![
@@ -314,9 +304,7 @@ mod tests {
                                         ],
                                         hex!("0100ff")[..].into(),
                                     ),
-                                ],
-                                success: false,
-                            },
+                                ]),
                             logs_bloom: hex!("00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000").into(),
                         },
                     ],
@@ -332,13 +320,7 @@ mod tests {
         let request = RequestPair::<Receipts69>::decode(&mut &data[..]).unwrap();
         assert_eq!(
             request.message.0[0][0],
-            Receipt {
-                tx_type: TxType::Eip1559,
-                success: true,
-                cumulative_gas_used: 26000,
-                logs: vec![],
-                frame_receipt: None,
-            }
+            Receipt::standard(TxType::Eip1559, true, 26000, vec![])
         );
 
         let encoded = alloy_rlp::encode(&request);
