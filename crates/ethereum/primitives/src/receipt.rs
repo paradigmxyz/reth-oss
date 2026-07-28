@@ -42,6 +42,10 @@ impl Default for Receipt {
 }
 
 impl Receipt {
+    /// Constructs a standard receipt variant.
+    pub fn standard(tx_type: TxType, success: bool, cumulative_gas_used: u64, logs: Vec<Log>) -> Self {
+        Self::Standard(StandardReceipt { tx_type, success, cumulative_gas_used, logs })
+    }
     /// Converts a consensus receipt envelope into the Reth storage representation.
     pub fn from_envelope(envelope: ReceiptEnvelope) -> Self {
         match envelope {

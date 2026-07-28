@@ -579,14 +579,7 @@ mod tests {
         );
 
         // Create a Receipts object with a vector of receipt vectors
-        let receipts = vec![vec![Some(reth_ethereum_primitives::Receipt {
-            tx_type: TxType::Legacy,
-            cumulative_gas_used: 46913,
-            logs: vec![],
-            success: true,
-
-            frame_receipt: None,
-        })]];
+        let receipts = vec![vec![Some(reth_ethereum_primitives::Receipt::standard(TxType::Legacy, true, 46913, vec![]))]];
 
         // Create a Requests object with a vector of requests
         let requests = vec![Requests::new(vec![bytes!("dead"), bytes!("beef"), bytes!("beebee")])];
@@ -640,14 +633,7 @@ mod tests {
     #[test]
     fn test_block_number_to_index() {
         // Create a Receipts object with a vector of receipt vectors
-        let receipts = vec![vec![Some(reth_ethereum_primitives::Receipt {
-            tx_type: TxType::Legacy,
-            cumulative_gas_used: 46913,
-            logs: vec![],
-            success: true,
-
-            frame_receipt: None,
-        })]];
+        let receipts = vec![vec![Some(reth_ethereum_primitives::Receipt::standard(TxType::Legacy, true, 46913, vec![]))]];
 
         // Define the first block number
         let first_block = 123;
@@ -674,14 +660,7 @@ mod tests {
     #[test]
     fn test_get_logs() {
         // Create a Receipts object with a vector of receipt vectors
-        let receipts = vec![vec![reth_ethereum_primitives::Receipt {
-            tx_type: TxType::Legacy,
-            cumulative_gas_used: 46913,
-            logs: vec![Log::<LogData>::default()],
-            success: true,
-
-            frame_receipt: None,
-        }]];
+        let receipts = vec![vec![reth_ethereum_primitives::Receipt::standard(TxType::Legacy, true, 46913, vec![Log::<LogData>::default()])]];
 
         // Define the first block number
         let first_block = 123;
@@ -705,14 +684,7 @@ mod tests {
     #[test]
     fn test_receipts_by_block() {
         // Create a Receipts object with a vector of receipt vectors
-        let receipts = vec![vec![Some(reth_ethereum_primitives::Receipt {
-            tx_type: TxType::Legacy,
-            cumulative_gas_used: 46913,
-            logs: vec![Log::<LogData>::default()],
-            success: true,
-
-            frame_receipt: None,
-        })]];
+        let receipts = vec![vec![Some(reth_ethereum_primitives::Receipt::standard(TxType::Legacy, true, 46913, vec![Log::<LogData>::default()]))]];
 
         // Define the first block number
         let first_block = 123;
@@ -732,28 +704,14 @@ mod tests {
         // Assert that the receipts for block number 123 match the expected receipts
         assert_eq!(
             receipts_by_block,
-            vec![&Some(reth_ethereum_primitives::Receipt {
-                tx_type: TxType::Legacy,
-                cumulative_gas_used: 46913,
-                logs: vec![Log::<LogData>::default()],
-                success: true,
-
-                frame_receipt: None,
-            })]
+            vec![&Some(reth_ethereum_primitives::Receipt::standard(TxType::Legacy, true, 46913, vec![Log::<LogData>::default()]))]
         );
     }
 
     #[test]
     fn test_receipts_len() {
         // Create a Receipts object with a vector of receipt vectors
-        let receipts = vec![vec![Some(reth_ethereum_primitives::Receipt {
-            tx_type: TxType::Legacy,
-            cumulative_gas_used: 46913,
-            logs: vec![Log::<LogData>::default()],
-            success: true,
-
-            frame_receipt: None,
-        })]];
+        let receipts = vec![vec![Some(reth_ethereum_primitives::Receipt::standard(TxType::Legacy, true, 46913, vec![Log::<LogData>::default()]))]];
 
         // Create an empty Receipts object
         let receipts_empty = vec![];
@@ -794,14 +752,7 @@ mod tests {
     #[test]
     fn test_revert_to() {
         // Create a random receipt object
-        let receipt = reth_ethereum_primitives::Receipt {
-            tx_type: TxType::Legacy,
-            cumulative_gas_used: 46913,
-            logs: vec![],
-            success: true,
-
-            frame_receipt: None,
-        };
+        let receipt = reth_ethereum_primitives::Receipt::standard(TxType::Legacy, true, 46913, vec![]);
 
         // Create a Receipts object with a vector of receipt vectors
         let receipts = vec![vec![Some(receipt.clone())], vec![Some(receipt.clone())]];
@@ -842,14 +793,7 @@ mod tests {
     #[test]
     fn test_extend_execution_outcome() {
         // Create a Receipt object with specific attributes.
-        let receipt = reth_ethereum_primitives::Receipt {
-            tx_type: TxType::Legacy,
-            cumulative_gas_used: 46913,
-            logs: vec![],
-            success: true,
-
-            frame_receipt: None,
-        };
+        let receipt = reth_ethereum_primitives::Receipt::standard(TxType::Legacy, true, 46913, vec![]);
 
         // Create a Receipts object containing the receipt.
         let receipts = vec![vec![Some(receipt.clone())]];
@@ -885,14 +829,7 @@ mod tests {
     #[test]
     fn test_split_at_execution_outcome() {
         // Create a random receipt object
-        let receipt = reth_ethereum_primitives::Receipt {
-            tx_type: TxType::Legacy,
-            cumulative_gas_used: 46913,
-            logs: vec![],
-            success: true,
-
-            frame_receipt: None,
-        };
+        let receipt = reth_ethereum_primitives::Receipt::standard(TxType::Legacy, true, 46913, vec![]);
 
         // Create a Receipts object with a vector of receipt vectors
         let receipts = vec![
