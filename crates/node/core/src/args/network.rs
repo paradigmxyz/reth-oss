@@ -8,6 +8,7 @@ use std::{
     ops::Not,
     path::PathBuf,
     sync::OnceLock,
+    time::Duration,
 };
 
 use crate::version::version_metadata;
@@ -1054,6 +1055,7 @@ impl DiscoveryArgs {
                 discv5_addr_ipv6
                     .map(|addr| SocketAddrV6::new(addr, discv5_port_ipv6.unwrap_or(*port), 0, 0)),
             ));
+        discv5_config_builder.ping_interval(Duration::from_secs(30));
 
         if has_discv5_addr_args || self.disable_nat {
             // disable native enr update if addresses manually set or nat disabled
