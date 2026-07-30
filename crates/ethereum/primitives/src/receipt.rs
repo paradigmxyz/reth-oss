@@ -32,7 +32,7 @@ impl Default for Receipt {
 }
 
 impl Receipt {
-    fn from_inner(inner: EthereumReceipt<TxType, Log>) -> Self {
+    const fn from_inner(inner: EthereumReceipt<TxType, Log>) -> Self {
         Self { inner }
     }
 

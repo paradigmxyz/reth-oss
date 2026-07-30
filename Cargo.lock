@@ -7909,7 +7909,7 @@ dependencies = [
  "modular-bitfield",
  "parity-scale-codec",
  "reth-codecs-derive 0.5.2 (git+https://github.com/Soubhik-10/reth-core?branch=feat%2Feip8141-receipt-codec)",
- "reth-zstd-compressors 0.5.2 (git+https://github.com/Soubhik-10/reth-core?branch=feat%2Feip8141-receipt-codec)",
+ "reth-zstd-compressors",
  "serde",
  "visibility",
 ]
@@ -8759,7 +8759,6 @@ dependencies = [
  "rand 0.9.5",
  "reth-codecs",
  "reth-primitives-traits",
- "reth-zstd-compressors 0.5.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "serde",
  "serde_json",
  "serde_with",
@@ -10687,15 +10686,6 @@ dependencies = [
  "smallvec",
  "strum 0.27.2",
  "tracing",
-]
-
-[[package]]
-name = "reth-zstd-compressors"
-version = "0.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e1bd4ae4f54a2ba813eef082910bc646bd31cab8ed134308fa71f1068331fb84"
-dependencies = [
- "zstd",
 ]
 
 [[package]]
