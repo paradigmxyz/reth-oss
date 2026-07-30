@@ -686,7 +686,7 @@ pub async fn lookup(
     discv5: &discv5::Discv5,
     metrics: &DiscoveredPeersMetrics,
 ) {
-    metrics.set_total_sessions(discv5.metrics().active_sessions);
+    metrics.set_total_sessions(discv5::Discv5::metrics().active_sessions);
     metrics.set_total_kbucket_peers(
         discv5.with_kbuckets(|kbuckets| kbuckets.read().iter_ref().count()),
     );
