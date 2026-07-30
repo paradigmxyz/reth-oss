@@ -118,8 +118,14 @@ jobs:
           - sim: devp2p
             limit: discv5
             include:
+              - Ping
               # failures tracked at https://github.com/paradigmxyz/reth/issues/14825
               - PingLargeRequestID
+              - PingMultiIP
+              - HandshakeResend
+              - TalkRequest
+              - FindnodeZeroDistance
+              - FindnodeResults
           - sim: ethereum/engine
             limit: engine-exchange-capabilities
           - sim: ethereum/engine
@@ -301,8 +307,14 @@ jobs:
           - sim: devp2p
             limit: discv5
             include:
+              - Ping
               # failures tracked at https://github.com/paradigmxyz/reth/issues/14825
               - PingLargeRequestID
+              - PingMultiIP
+              - HandshakeResend
+              - TalkRequest
+              - FindnodeZeroDistance
+              - FindnodeResults
           - sim: ethereum/engine
             limit: engine-exchange-capabilities
           - sim: ethereum/engine
