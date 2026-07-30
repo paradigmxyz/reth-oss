@@ -9,7 +9,7 @@ use alloy_consensus::{transaction::TxHashRef, BlockHeader, Transaction as _};
 use alloy_eips::eip2718::WithEncoded;
 use alloy_evm::{
     block::TxResult,
-    precompiles::{DynPrecompile, PrecompilesMap},
+    precompiles::{DynPrecompile, Precompile, PrecompilesMap},
 };
 use alloy_network::{NetworkTransactionBuilder, TransactionBuilder};
 use alloy_primitives::{Log, LogData, B256};
@@ -39,7 +39,7 @@ use revm::{
 use revm_inspectors::transfer::{
     TransferInspector, TransferOperation, TRANSFER_EVENT_TOPIC, TRANSFER_LOG_EMITTER,
 };
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 /// Fallback seconds added between simulated block timestamps when neither the user nor the chain
 /// hint provides a value.
@@ -314,15 +314,26 @@ pub fn apply_precompile_overrides(
         for (dest, precompile) in extracted {
             // Dynamic lookups are only consulted for addresses absent from the main map.
             precompiles.apply_precompile(&dest, |_| None);
-            moved_precompiles.insert(dest, precompile);
+            moved_precompiles.insert(dest, Arc::new(precompile));
         }
 
         precompiles.set_precompile_lookup(move |address: &Address| -> Option<DynPrecompile> {
-            moved_precompiles.get(address).cloned()
+            moved_precompiles
+                .get(address)
+                .map(|precompile| shared_precompile(Arc::clone(precompile)))
         });
     }
 
     Ok(())
+}
+
+fn shared_precompile(precompile: Arc<DynPrecompile>) -> DynPrecompile {
+    let id = precompile.precompile_id().clone();
+    if precompile.supports_caching() {
+        DynPrecompile::new(id, move |input| precompile.call(input))
+    } else {
+        DynPrecompile::new_stateful(id, move |input| precompile.call(input))
+    }
 }
 
 /// Appends newly observed ETH transfers to the cloned simulation result as RPC-only logs.
@@ -371,7 +382,7 @@ fn transfer_to_log(transfer: &TransferOperation) -> Log {
 ///
 /// [`TransactionRequest`]: alloy_rpc_types_eth::TransactionRequest
 #[expect(clippy::type_complexity)]
-pub fn execute_transactions<S, T>(
+pub fn execute_transactions<S, T, F>(
     mut builder: S,
     state_provider: impl StateProvider,
     calls: Vec<RpcTxReq<T::Network>>,
@@ -379,7 +390,7 @@ pub fn execute_transactions<S, T>(
     chain_id: u64,
     compute_state_root: bool,
     converter: &T,
-    trace_transfers: bool,
+    mut process_result: F,
 ) -> Result<
     (
         BlockBuilderOutcome<S::Primitives>,
@@ -389,8 +400,11 @@ pub fn execute_transactions<S, T>(
 >
 where
     S: BlockBuilder<Executor: BlockExecutor<Evm: Evm<DB: Database<Error: Into<EthApiError>>>>>,
-    <S::Executor as BlockExecutor>::Evm: Evm<Inspector = TransferInspector>,
     T: RpcConvert<Primitives = S::Primitives>,
+    F: FnMut(
+        &<<S::Executor as BlockExecutor>::Evm as Evm>::Inspector,
+        &mut ExecutionResult<<<S::Executor as BlockExecutor>::Evm as Evm>::HaltReason>,
+    ),
 {
     builder.apply_pre_execution_changes()?;
 
@@ -401,7 +415,6 @@ where
     let block_gas_limit = builder.evm().block().gas_limit();
     let is_amsterdam = builder.evm().cfg_env().enable_amsterdam_eip8037;
     let tx_gas_limit_cap = builder.evm().cfg_env().tx_gas_limit_cap.unwrap_or(u64::MAX);
-    let mut next_simulated_log = 0;
     for mut call in calls {
         let block_gas_remaining = if is_amsterdam {
             block_gas_limit
@@ -459,8 +472,8 @@ where
             results.push(result.result().result.clone())
         })?;
 
-        if trace_transfers && let Some(result) = results.last_mut() {
-            append_transfer_logs(builder.evm().inspector(), result, &mut next_simulated_log);
+        if let Some(result) = results.last_mut() {
+            process_result(builder.evm().inspector(), result);
         }
 
         let gas_used = gas_output.tx_gas_used();
