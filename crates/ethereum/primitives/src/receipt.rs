@@ -1,8 +1,7 @@
 use alloc::vec::Vec;
 use alloy_consensus::{
-    Eip2718DecodableReceipt, Eip2718EncodableReceipt, Eip658Value, InMemorySize,
-    Receipt as ConsensusReceipt, ReceiptWithBloom, RlpDecodableReceipt, RlpEncodableReceipt,
-    TxReceipt, TxType,
+    Eip2718DecodableReceipt, Eip2718EncodableReceipt, Eip658Value, InMemorySize, ReceiptWithBloom,
+    RlpDecodableReceipt, RlpEncodableReceipt, TxReceipt, TxType,
 };
 pub use alloy_consensus::{EthereumReceipt, ReceiptEnvelope, TxTy};
 use alloy_eips::{
@@ -16,36 +15,27 @@ use reth_primitives_traits::proofs::ordered_trie_root_with_encoder;
 /// Standard Ethereum receipt data shared by legacy and typed transactions.
 pub type StandardReceipt = alloy_consensus::EthereumReceiptData<TxType, Log>;
 
-/// Lossless EIP-8141 frame receipt data.
+/// Reth's storage receipt wrapper around Alloy's consensus receipt enum.
+///
+/// The additional flattened frame log vector is derived data required by the
+/// `TxReceipt` interface and Reth's storage/indexing paths. The consensus
+/// representation remains owned by Alloy.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct FrameReceipt {
-    /// The lossless EIP-8141 receipt payload.
-    pub payload: FrameReceiptPayload<Log>,
-    /// Logs emitted by all frames, flattened for the receipt interfaces.
-    pub logs: Vec<Log>,
-}
-
-/// Ethereum receipt, split between standard receipts and EIP-8141 frame receipts.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Receipt {
-    /// Receipt for a legacy or typed transaction other than EIP-8141.
-    Standard(StandardReceipt),
-    /// Receipt for an EIP-8141 frame transaction.
-    Frame(FrameReceipt),
+pub struct Receipt {
+    inner: EthereumReceipt<TxType, Log>,
 }
 
 impl Default for Receipt {
     fn default() -> Self {
-        Self::Standard(StandardReceipt {
-            tx_type: TxType::Legacy,
-            success: false,
-            cumulative_gas_used: 0,
-            logs: Vec::new(),
-        })
+        Self::from_inner(EthereumReceipt::default())
     }
 }
 
 impl Receipt {
+    fn from_inner(inner: EthereumReceipt<TxType, Log>) -> Self {
+        Self { inner }
+    }
+
     /// Constructs a standard receipt variant.
     pub const fn standard(
         tx_type: TxType,
@@ -53,113 +43,75 @@ impl Receipt {
         cumulative_gas_used: u64,
         logs: Vec<Log>,
     ) -> Self {
-        Self::Standard(StandardReceipt { tx_type, success, cumulative_gas_used, logs })
+        Self {
+            inner: EthereumReceipt::Standard(StandardReceipt {
+                tx_type,
+                success,
+                cumulative_gas_used,
+                logs,
+            }),
+        }
     }
     /// Converts a consensus receipt envelope into the Reth storage representation.
     pub fn from_envelope(envelope: ReceiptEnvelope) -> Self {
-        match envelope {
-            ReceiptEnvelope::Legacy(receipt) => {
-                Self::from_standard(TxType::Legacy, receipt.receipt)
-            }
-            ReceiptEnvelope::Eip2930(receipt) => {
-                Self::from_standard(TxType::Eip2930, receipt.receipt)
-            }
-            ReceiptEnvelope::Eip1559(receipt) => {
-                Self::from_standard(TxType::Eip1559, receipt.receipt)
-            }
-            ReceiptEnvelope::Eip4844(receipt) => {
-                Self::from_standard(TxType::Eip4844, receipt.receipt)
-            }
-            ReceiptEnvelope::Eip7702(receipt) => {
-                Self::from_standard(TxType::Eip7702, receipt.receipt)
-            }
-            ReceiptEnvelope::Eip8141(payload) => {
-                let logs = payload
-                    .frame_receipts
-                    .iter()
-                    .flat_map(|receipt| receipt.logs.iter().cloned())
-                    .collect();
-                Self::Frame(FrameReceipt { payload, logs })
-            }
-        }
-    }
-
-    fn from_standard(tx_type: TxType, receipt: ConsensusReceipt) -> Self {
-        Self::Standard(StandardReceipt {
-            tx_type,
-            success: receipt.status.coerce_status(),
-            cumulative_gas_used: receipt.cumulative_gas_used,
-            logs: receipt.logs,
-        })
+        Self::from_inner(envelope.into())
     }
 
     /// Converts this receipt into its consensus envelope.
     pub fn to_envelope(&self) -> ReceiptEnvelope {
-        let Self::Standard(data) = self else {
-            let Self::Frame(frame) = self else { unreachable!() };
-            return ReceiptEnvelope::Eip8141(frame.payload.clone())
-        };
-        let receipt = ConsensusReceipt {
-            status: Eip658Value::Eip658(data.success),
-            cumulative_gas_used: data.cumulative_gas_used,
-            logs: data.logs.clone(),
-        }
-        .with_bloom();
-        match data.tx_type {
-            TxType::Legacy => ReceiptEnvelope::Legacy(receipt),
-            TxType::Eip2930 => ReceiptEnvelope::Eip2930(receipt),
-            TxType::Eip1559 => ReceiptEnvelope::Eip1559(receipt),
-            TxType::Eip4844 => ReceiptEnvelope::Eip4844(receipt),
-            TxType::Eip7702 => ReceiptEnvelope::Eip7702(receipt),
-            TxType::Eip8141 => unreachable!("frame receipt handled above"),
+        match &self.inner {
+            EthereumReceipt::Standard(data) => data.clone().into(),
+            EthereumReceipt::Frame { payload, .. } => ReceiptEnvelope::Eip8141(payload.clone()),
         }
     }
 
     /// Returns the EIP-8141 frame receipt payload, if this is a frame transaction receipt.
     pub const fn as_eip8141(&self) -> Option<&FrameReceiptPayload<Log>> {
         match self {
-            Self::Frame(frame) => Some(&frame.payload),
-            Self::Standard(_) => None,
+            Self { inner: EthereumReceipt::Frame { payload, .. }, .. } => Some(payload),
+            Self { inner: EthereumReceipt::Standard(_), .. } => None,
         }
     }
 
     /// Returns the transaction type associated with this receipt.
     pub const fn tx_type(&self) -> TxType {
-        match self {
-            Self::Standard(receipt) => receipt.tx_type,
-            Self::Frame(_) => TxType::Eip8141,
+        match &self.inner {
+            EthereumReceipt::Standard(receipt) => receipt.tx_type,
+            EthereumReceipt::Frame { .. } => TxType::Eip8141,
         }
     }
 
     /// Returns whether execution succeeded.
     pub const fn success(&self) -> bool {
-        match self {
-            Self::Standard(receipt) => receipt.success,
-            Self::Frame(_) => true,
+        match &self.inner {
+            EthereumReceipt::Standard(receipt) => receipt.success,
+            EthereumReceipt::Frame { .. } => true,
         }
     }
 
     /// Returns the cumulative gas used by the transaction.
     pub const fn cumulative_gas_used(&self) -> u64 {
-        match self {
-            Self::Standard(receipt) => receipt.cumulative_gas_used,
-            Self::Frame(frame) => frame.payload.cumulative_gas_used,
+        match &self.inner {
+            EthereumReceipt::Standard(receipt) => receipt.cumulative_gas_used,
+            EthereumReceipt::Frame { payload, .. } => payload.cumulative_gas_used,
         }
     }
 
     /// Updates the cumulative gas used by this receipt.
     pub const fn set_cumulative_gas_used(&mut self, cumulative_gas_used: u64) {
-        match self {
-            Self::Standard(receipt) => receipt.cumulative_gas_used = cumulative_gas_used,
-            Self::Frame(frame) => frame.payload.cumulative_gas_used = cumulative_gas_used,
+        match &mut self.inner {
+            EthereumReceipt::Standard(receipt) => receipt.cumulative_gas_used = cumulative_gas_used,
+            EthereumReceipt::Frame { payload, .. } => {
+                payload.cumulative_gas_used = cumulative_gas_used
+            }
         }
     }
 
     /// Returns all logs emitted by the transaction.
     pub fn logs(&self) -> &[Log] {
-        match self {
-            Self::Standard(receipt) => &receipt.logs,
-            Self::Frame(frame) => &frame.logs,
+        match &self.inner {
+            EthereumReceipt::Standard(receipt) => &receipt.logs,
+            EthereumReceipt::Frame { .. } => self.inner.logs(),
         }
     }
 
@@ -303,8 +255,8 @@ impl Eip2718EncodableReceipt for Receipt {
     fn eip2718_encoded_length_with_bloom(&self, bloom: &Bloom) -> usize {
         let type_len = usize::from(self.tx_type() != TxType::Legacy);
         type_len +
-            if let Self::Frame(frame) = self {
-                frame.payload.length()
+            if let Some(payload) = self.as_eip8141() {
+                payload.length()
             } else {
                 self.rlp_receipt_length(bloom)
             }
@@ -314,8 +266,8 @@ impl Eip2718EncodableReceipt for Receipt {
         if self.tx_type() != TxType::Legacy {
             out.put_u8(self.ty());
         }
-        if let Self::Frame(frame) = self {
-            frame.payload.encode(out)
+        if let Some(payload) = self.as_eip8141() {
+            payload.encode(out)
         } else {
             self.rlp_encode_receipt(bloom, out)
         }
