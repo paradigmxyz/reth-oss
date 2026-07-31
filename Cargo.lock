@@ -3062,7 +3062,7 @@ dependencies = [
 [[package]]
 name = "discv5"
 version = "0.11.0"
-source = "git+https://github.com/Soubhik-10/discv5?rev=29dcb88#29dcb88075967e760cee01770d64f948f9d3bd3f"
+source = "git+https://github.com/Soubhik-10/discv5?rev=4acb752#4acb75297b40058d6db108bd1136fdab57995c3a"
 dependencies = [
  "aes",
  "aes-gcm",
