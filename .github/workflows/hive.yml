@@ -4,8 +4,7 @@ name: hive
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "0 0 * * *"
+  pull_request:
 
 env:
   CARGO_TERM_COLOR: always
@@ -28,7 +27,7 @@ jobs:
     secrets: inherit
 
   prepare-hive:
-    if: github.repository == 'paradigmxyz/reth'
+    if: github.repository == 'paradigmxyz/reth' || github.repository == 'paradigmxyz/reth-oss'
     timeout-minutes: 45
     runs-on: ${{ github.repository == 'paradigmxyz/reth' && 'depot-ubuntu-latest-16' || 'ubuntu-latest' }}
     permissions:
@@ -118,8 +117,14 @@ jobs:
           - sim: devp2p
             limit: discv5
             include:
+              - Ping
               # failures tracked at https://github.com/paradigmxyz/reth/issues/14825
               - PingLargeRequestID
+              - PingMultiIP
+              - HandshakeResend
+              - TalkRequest
+              - FindnodeZeroDistance
+              - FindnodeResults
           - sim: ethereum/engine
             limit: engine-exchange-capabilities
           - sim: ethereum/engine
@@ -301,8 +306,14 @@ jobs:
           - sim: devp2p
             limit: discv5
             include:
+              - Ping
               # failures tracked at https://github.com/paradigmxyz/reth/issues/14825
               - PingLargeRequestID
+              - PingMultiIP
+              - HandshakeResend
+              - TalkRequest
+              - FindnodeZeroDistance
+              - FindnodeResults
           - sim: ethereum/engine
             limit: engine-exchange-capabilities
           - sim: ethereum/engine
