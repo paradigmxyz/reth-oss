@@ -6,6 +6,13 @@ use serde_json::{json, Value};
 use similar::TextDiff;
 use std::{fs, path::Path, time::Duration};
 
+#[cfg(feature = "embedded")]
+use futures_util::future::BoxFuture;
+#[cfg(feature = "embedded")]
+use reth_e2e_test_utils::testsuite::{actions::Action, Environment};
+#[cfg(feature = "embedded")]
+use reth_node_api::EngineTypes;
+
 /// A method entry in the Geth RPC manifest.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Method {
@@ -69,6 +76,38 @@ pub struct Options {
     pub include_dangerous: bool,
     /// Optional JSON report path.
     pub report: Option<std::path::PathBuf>,
+}
+
+/// Embedded-node action that compares Geth with the Reth node in the test environment.
+#[cfg(feature = "embedded")]
+#[derive(Debug)]
+pub struct RunGethDifferentialTests {
+    /// Geth RPC endpoint.
+    pub geth_url: String,
+    /// Manifest path.
+    pub manifest: std::path::PathBuf,
+    /// Runner options.
+    pub options: Options,
+}
+
+#[cfg(feature = "embedded")]
+impl RunGethDifferentialTests {
+    /// Creates the differential action.
+    pub const fn new(geth_url: String, manifest: std::path::PathBuf, options: Options) -> Self {
+        Self { geth_url, manifest, options }
+    }
+}
+
+#[cfg(feature = "embedded")]
+impl<Engine: EngineTypes> Action<Engine> for RunGethDifferentialTests {
+    fn execute<'a>(&'a mut self, env: &'a mut Environment<Engine>) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            let reth_url = env.node_clients[env.active_node_idx].rpc_url().to_string();
+            self.options.geth_url.clone_from(&self.geth_url);
+            self.options.reth_url = reth_url;
+            run(&self.manifest, self.options.clone()).await
+        })
+    }
 }
 
 #[derive(Debug, serde::Serialize)]

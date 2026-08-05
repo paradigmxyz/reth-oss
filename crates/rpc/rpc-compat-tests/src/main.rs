@@ -44,6 +44,8 @@ enum Command {
 
 #[derive(Debug, Clone, Args)]
 struct GethArgs {
+    #[command(flatten)]
+    fixture: FixtureArgs,
     /// TOML manifest containing the Geth RPC methods.
     #[arg(long, default_value = "crates/rpc/rpc-compat-tests/geth-rpc.toml")]
     manifest: PathBuf,
@@ -204,20 +206,31 @@ async fn main() -> Result<()> {
             }
         }
         Command::Geth(args) => {
-            reth_rpc_compat_tests::geth::run(
-                &args.manifest,
-                reth_rpc_compat_tests::geth::Options {
-                    geth_url: args.geth_url,
-                    reth_url: args.reth_url,
-                    include: args.include,
-                    exclude: args.exclude,
-                    timeout: std::time::Duration::from_secs(args.timeout_secs),
-                    fail_fast: args.fail_fast,
-                    include_dangerous: args.include_dangerous,
-                    report: args.report,
-                },
-            )
-            .await?;
+            let options = reth_rpc_compat_tests::geth::Options {
+                geth_url: args.geth_url.clone(),
+                reth_url: args.reth_url.clone(),
+                include: args.include,
+                exclude: args.exclude,
+                timeout: std::time::Duration::from_secs(args.timeout_secs),
+                fail_fast: args.fail_fast,
+                include_dangerous: args.include_dangerous,
+                report: args.report,
+            };
+            #[cfg(feature = "embedded")]
+            {
+                let fixture = resolve_fixture(&config, &base, &args.fixture).await?;
+                reth_rpc_compat_tests::run_embedded_geth(
+                    fixture,
+                    args.geth_url,
+                    args.manifest,
+                    options,
+                )
+                .await?;
+            }
+            #[cfg(not(feature = "embedded"))]
+            {
+                reth_rpc_compat_tests::geth::run(&args.manifest, options).await?;
+            }
         }
         Command::ListUnexpected(args) => print_unexpected(args)?,
     }

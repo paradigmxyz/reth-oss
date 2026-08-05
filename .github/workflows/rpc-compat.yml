@@ -2,6 +2,12 @@ name: rpc-compat
 
 on:
   workflow_dispatch:
+    inputs:
+      geth_suite:
+        description: Run the Geth/Reth differential RPC suite
+        required: false
+        default: false
+        type: boolean
   pull_request:
   merge_group:
   push:
@@ -69,4 +75,73 @@ jobs:
         with:
           name: rpc-compat-reports
           path: target/rpc-compat
+          if-no-files-found: warn
+
+  geth-differential:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.geth_suite }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - name: Install Geth
+        shell: bash
+        run: |
+          go install github.com/ethereum/go-ethereum/cmd/geth@v1.16.5
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - name: Resolve and fetch fixture
+        id: fixture
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          revision="$(
+            cargo run --locked -p reth-rpc-compat-tests --bin reth-rpc-compat --no-default-features -- fetch
+          )"
+          echo "revision=$revision" >> "$GITHUB_OUTPUT"
+      - name: Start Geth from fixture chain
+        shell: bash
+        env:
+          REVISION: ${{ steps.fixture.outputs.revision }}
+        run: |
+          set -euo pipefail
+          fixture=".cache/rpc-compat/${REVISION}/tests"
+          datadir="$RUNNER_TEMP/geth-rpc-compat"
+          geth --datadir "$datadir" init "$fixture/genesis.json"
+          geth --datadir "$datadir" import "$fixture/chain.rlp"
+          geth --datadir "$datadir" \
+            --http --http.addr 127.0.0.1 --http.port 8545 \
+            --http.api eth,net,web3,debug,txpool,admin,rpc \
+            --http.vhosts '*' --nodiscover --maxpeers 0 --verbosity 0 \
+            > "$RUNNER_TEMP/geth-rpc-compat.log" 2>&1 &
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent \
+              -H 'content-type: application/json' \
+              --data '{"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}' \
+              http://127.0.0.1:8545 > /dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          cat "$RUNNER_TEMP/geth-rpc-compat.log"
+          exit 1
+      - name: Run Geth/Reth differential suite
+        run: |
+          cargo run --locked -p reth-rpc-compat-tests --features embedded -- geth \
+            --geth-url http://127.0.0.1:8545 \
+            --offline \
+            --report target/rpc-compat/geth.json
+      - name: Upload Geth report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rpc-compat-geth-report
+          path: |
+            target/rpc-compat/geth.json
+            ${{ runner.temp }}/geth-rpc-compat.log
           if-no-files-found: warn

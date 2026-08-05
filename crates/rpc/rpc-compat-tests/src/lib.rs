@@ -59,3 +59,37 @@ pub async fn run_embedded(
         .run::<EthereumNode>()
         .await
 }
+
+/// Launches embedded Reth and compares its RPC responses with a running Geth endpoint.
+#[cfg(feature = "embedded")]
+pub async fn run_embedded_geth(
+    fixture: fixture::Fixture,
+    geth_url: String,
+    manifest: std::path::PathBuf,
+    options: geth::Options,
+) -> Result<()> {
+    DefaultRpcServerArgs::default()
+        .with_rpc_compute_state_root_for_eth_simulate(true)
+        .try_init()
+        .map_err(|_| eyre!("RPC server defaults were initialized before the compatibility runner"))?;
+    let genesis_path = fixture.tests.join("genesis.json");
+    let genesis: Genesis = serde_json::from_str(&fs::read_to_string(&genesis_path)?)
+        .wrap_err_with(|| format!("failed to parse {}", genesis_path.display()))?;
+    let chain_spec = Arc::new(ChainSpec::from(genesis));
+    let fcu = fixture.tests.join("headfcu.json");
+    let chain = fixture.tests.join("chain.rlp");
+
+    TestBuilder::new()
+        .with_setup_and_import(
+            Setup::<EthEngineTypes>::default()
+                .with_chain_spec(chain_spec)
+                .with_network(NetworkSetup::single_node()),
+            chain,
+        )
+        .with_action(UpdateBlockInfo::default())
+        .with_action(runner::InitializeFixture::new(fcu.to_string_lossy()))
+        .with_action(MakeCanonical::new())
+        .with_action(geth::RunGethDifferentialTests::new(geth_url, manifest, options))
+        .run::<EthereumNode>()
+        .await
+}
