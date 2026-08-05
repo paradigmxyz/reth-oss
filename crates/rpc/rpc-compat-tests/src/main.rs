@@ -73,6 +73,12 @@ struct GethArgs {
     /// Optional JSON report path.
     #[arg(long)]
     report: Option<PathBuf>,
+    /// Control colored output.
+    #[arg(long, value_enum, default_value = "auto")]
+    color: OutputColor,
+    /// Emit collapsible `GitHub` Actions groups for mismatches.
+    #[arg(long)]
+    github_groups: bool,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -215,6 +221,14 @@ async fn main() -> Result<()> {
                 fail_fast: args.fail_fast,
                 include_dangerous: args.include_dangerous,
                 report: args.report,
+                color: match args.color {
+                    OutputColor::Auto => {
+                        std::io::stdout().is_terminal() || std::env::var_os("CI").is_some()
+                    }
+                    OutputColor::Always => true,
+                    OutputColor::Never => false,
+                },
+                github_groups: args.github_groups,
             };
             #[cfg(feature = "embedded")]
             {

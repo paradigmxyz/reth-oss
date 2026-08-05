@@ -77,6 +77,8 @@ jobs:
           cargo run --locked -p reth-rpc-compat-tests --features embedded -- geth \
             --geth-url http://127.0.0.1:8545 \
             --offline \
+            --color always \
+            --github-groups \
             --report target/rpc-compat/geth.json
       - name: Upload Geth report
         if: always()

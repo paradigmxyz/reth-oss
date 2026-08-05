@@ -313,6 +313,358 @@ params = ["enode://invalid@127.0.0.1:30303"]
 comparison = "outcome"
 dangerous = true
 
+# Methods added in recent Geth releases and operational debug coverage.
+[[method]]
+id = "eth_getHeaderByNumber"
+method = "eth_getHeaderByNumber"
+params = ["latest"]
+comparison = "outcome"
+
+[[method]]
+id = "eth_getHeaderByHash"
+method = "eth_getHeaderByHash"
+params = ["0x0000000000000000000000000000000000000000000000000000000000000000"]
+comparison = "outcome"
+
+[[method]]
+id = "eth_subscribe"
+method = "eth_subscribe"
+enabled = false
+
+[[method]]
+id = "eth_unsubscribe"
+method = "eth_unsubscribe"
+enabled = false
+
+[[method]]
+id = "txpool_contentFrom"
+method = "txpool_contentFrom"
+params = ["0x0000000000000000000000000000000000000000"]
+comparison = "outcome"
+
+[[method]]
+id = "admin_exportChain"
+method = "admin_exportChain"
+params = ["/tmp/reth-rpc-compat-export.rlp"]
+comparison = "outcome"
+dangerous = true
+
+[[method]]
+id = "admin_importChain"
+method = "admin_importChain"
+params = ["/tmp/reth-rpc-compat-export.rlp"]
+comparison = "outcome"
+dangerous = true
+
+[[method]]
+id = "admin_peerEvents"
+method = "admin_peerEvents"
+comparison = "outcome"
+
+[[method]]
+id = "personal_deriveAccount"
+method = "personal_deriveAccount"
+params = ["0x0000000000000000000000000000000000000000000000000000000000000000", ""]
+comparison = "outcome"
+dangerous = true
+
+[[method]]
+id = "personal_ecRecover"
+method = "personal_ecRecover"
+params = ["message", "0x0000000000000000000000000000000000000000000000000000000000000000"]
+comparison = "outcome"
+
+[[method]]
+id = "personal_openWallet"
+method = "personal_openWallet"
+params = ["keystore://missing", ""]
+comparison = "outcome"
+dangerous = true
+
+[[method]]
+id = "personal_sendTransaction"
+method = "personal_sendTransaction"
+params = [{}, "0x0000000000000000000000000000000000000000"]
+comparison = "outcome"
+dangerous = true
+
+[[method]]
+id = "personal_unpair"
+method = "personal_unpair"
+params = ["0x0000000000000000000000000000000000000000000000000000000000000000"]
+comparison = "outcome"
+dangerous = true
+
+[[method]]
+id = "personal_initializeWallet"
+method = "personal_initializeWallet"
+params = ["0x0000000000000000000000000000000000000000"]
+comparison = "outcome"
+dangerous = true
+
+[[method]]
+id = "debug_accountRange"
+method = "debug_accountRange"
+params = ["latest", "0x0000000000000000000000000000000000000000", 1]
+comparison = "outcome"
+
+[[method]]
+id = "debug_backtraceAt"
+method = "debug_backtraceAt"
+params = ["missing.go:1"]
+comparison = "outcome"
+
+[[method]]
+id = "debug_chaindbCompact"
+method = "debug_chaindbCompact"
+comparison = "outcome"
+dangerous = true
+
+[[method]]
+id = "debug_chaindbProperty"
+method = "debug_chaindbProperty"
+params = ["leveldb.stats"]
+comparison = "outcome"
+
+[[method]]
+id = "debug_dbAncient"
+method = "debug_dbAncient"
+params = ["headers", 0]
+comparison = "outcome"
+
+[[method]]
+id = "debug_dbAncients"
+method = "debug_dbAncients"
+params = ["headers", 0, 1]
+comparison = "outcome"
+
+[[method]]
+id = "debug_dbGet"
+method = "debug_dbGet"
+params = ["0x0000000000000000000000000000000000000000000000000000000000000000"]
+comparison = "outcome"
+
+[[method]]
+id = "debug_freeOSMemory"
+method = "debug_freeOSMemory"
+comparison = "outcome"
+dangerous = true
+
+[[method]]
+id = "debug_freezeClient"
+method = "debug_freezeClient"
+params = ["/tmp/reth-rpc-compat-freeze"]
+comparison = "outcome"
+dangerous = true
+
+[[method]]
+id = "debug_gcStats"
+method = "debug_gcStats"
+comparison = "outcome"
+
+[[method]]
+id = "debug_getAccessibleState"
+method = "debug_getAccessibleState"
+params = ["latest", "latest"]
+comparison = "outcome"
+
+[[method]]
+id = "debug_getBadBlocks"
+method = "debug_getBadBlocks"
+comparison = "outcome"
+
+[[method]]
+id = "debug_getModifiedAccountsByHash"
+method = "debug_getModifiedAccountsByHash"
+params = ["0x0000000000000000000000000000000000000000000000000000000000000000"]
+comparison = "outcome"
+
+[[method]]
+id = "debug_getModifiedAccountsByNumber"
+method = "debug_getModifiedAccountsByNumber"
+params = ["latest"]
+comparison = "outcome"
+
+[[method]]
+id = "debug_intermediateRoots"
+method = "debug_intermediateRoots"
+params = ["latest"]
+comparison = "outcome"
+
+[[method]]
+id = "debug_memStats"
+method = "debug_memStats"
+comparison = "outcome"
+
+[[method]]
+id = "debug_stacks"
+method = "debug_stacks"
+comparison = "outcome"
+
+[[method]]
+id = "debug_setBlockProfileRate"
+method = "debug_setBlockProfileRate"
+params = [0]
+comparison = "outcome"
+dangerous = true
+
+[[method]]
+id = "debug_setGCPercent"
+method = "debug_setGCPercent"
+params = [100]
+comparison = "outcome"
+dangerous = true
+
+[[method]]
+id = "debug_setHead"
+method = "debug_setHead"
+params = ["latest"]
+comparison = "outcome"
+dangerous = true
+
+[[method]]
+id = "debug_setMutexProfileFraction"
+method = "debug_setMutexProfileFraction"
+params = [0]
+comparison = "outcome"
+dangerous = true
+
+[[method]]
+id = "debug_setTrieFlushInterval"
+method = "debug_setTrieFlushInterval"
+params = ["1s"]
+comparison = "outcome"
+dangerous = true
+
+[[method]]
+id = "debug_traceChain"
+method = "debug_traceChain"
+params = ["latest", "latest", {}]
+comparison = "outcome"
+
+[[method]]
+id = "debug_traceBlockFromFile"
+method = "debug_traceBlockFromFile"
+params = ["/tmp/missing.rlp", {}]
+comparison = "outcome"
+
+[[method]]
+id = "debug_verbosity"
+method = "debug_verbosity"
+params = [3]
+comparison = "outcome"
+dangerous = true
+
+[[method]]
+id = "debug_vmodule"
+method = "debug_vmodule"
+params = ["*"]
+comparison = "outcome"
+dangerous = true
+
+[[method]]
+id = "debug_writeMutexProfile"
+method = "debug_writeMutexProfile"
+params = ["/tmp/reth-rpc-compat-mutex.pprof"]
+comparison = "outcome"
+dangerous = true
+
+# Client-specific namespaces are inventory-only until the corresponding
+# protocol/service is enabled on both nodes.
+[[method]]
+id = "clique_getSnapshot"
+method = "clique_getSnapshot"
+enabled = false
+
+[[method]]
+id = "clique_getSnapshotAtHash"
+method = "clique_getSnapshotAtHash"
+enabled = false
+
+[[method]]
+id = "clique_getSigners"
+method = "clique_getSigners"
+enabled = false
+
+[[method]]
+id = "clique_getSignersAtHash"
+method = "clique_getSignersAtHash"
+enabled = false
+
+[[method]]
+id = "clique_proposals"
+method = "clique_proposals"
+enabled = false
+
+[[method]]
+id = "clique_propose"
+method = "clique_propose"
+enabled = false
+dangerous = true
+
+[[method]]
+id = "clique_discard"
+method = "clique_discard"
+enabled = false
+dangerous = true
+
+[[method]]
+id = "miner_start"
+method = "miner_start"
+enabled = false
+dangerous = true
+
+[[method]]
+id = "miner_stop"
+method = "miner_stop"
+enabled = false
+dangerous = true
+
+[[method]]
+id = "miner_setExtra"
+method = "miner_setExtra"
+enabled = false
+dangerous = true
+
+[[method]]
+id = "miner_setGasPrice"
+method = "miner_setGasPrice"
+enabled = false
+dangerous = true
+
+[[method]]
+id = "miner_setEtherbase"
+method = "miner_setEtherbase"
+enabled = false
+dangerous = true
+
+[[method]]
+id = "miner_getHashrate"
+method = "miner_getHashrate"
+enabled = false
+
+[[method]]
+id = "les_serverInfo"
+method = "les_serverInfo"
+enabled = false
+
+[[method]]
+id = "les_clientInfo"
+method = "les_clientInfo"
+enabled = false
+
+[[method]]
+id = "les_addPeer"
+method = "les_addPeer"
+enabled = false
+dangerous = true
+
+[[method]]
+id = "les_removePeer"
+method = "les_removePeer"
+enabled = false
+dangerous = true
+
 [[method]]
 id = "admin_addTrustedPeer"
 method = "admin_addTrustedPeer"
