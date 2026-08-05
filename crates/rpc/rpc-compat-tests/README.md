@@ -94,3 +94,11 @@ normalized JSON; `outcome` methods compare result-versus-error behavior, and `er
 compare only JSON-RPC error codes. Operational or mutating methods are excluded unless
 `--include-dangerous` is selected. Every mismatch is printed and the command continues unless
 `--fail-fast` is selected.
+
+With the `embedded` feature, the command starts the Reth test node itself from the cached execution-
+apis chain, so CI only needs to provide Geth:
+
+```console
+cargo run -p reth-rpc-compat-tests --features embedded -- geth \
+  --geth-url http://127.0.0.1:8545 --offline
+```
