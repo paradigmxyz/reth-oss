@@ -36,8 +36,41 @@ enum Command {
     Check(RunArgs),
     /// Launch embedded Reth and run selected tests.
     Run(RunArgs),
+    /// Compare a Geth endpoint with a Reth endpoint using the full RPC manifest.
+    Geth(GethArgs),
     /// Summarize a completed JSON report and list unexpected test IDs.
     ListUnexpected(ListUnexpectedArgs),
+}
+
+#[derive(Debug, Clone, Args)]
+struct GethArgs {
+    /// TOML manifest containing the Geth RPC methods.
+    #[arg(long, default_value = "crates/rpc/rpc-compat-tests/geth-rpc.toml")]
+    manifest: PathBuf,
+    /// Geth HTTP JSON-RPC endpoint.
+    #[arg(long, default_value = "http://127.0.0.1:8545")]
+    geth_url: String,
+    /// Reth HTTP JSON-RPC endpoint.
+    #[arg(long, default_value = "http://127.0.0.1:8546")]
+    reth_url: String,
+    /// Add a method inclusion pattern.
+    #[arg(long)]
+    include: Vec<String>,
+    /// Add a method exclusion pattern.
+    #[arg(long)]
+    exclude: Vec<String>,
+    /// Per-request timeout in seconds.
+    #[arg(long, default_value_t = 10)]
+    timeout_secs: u64,
+    /// Stop after the first mismatch.
+    #[arg(long)]
+    fail_fast: bool,
+    /// Include mutating and operational Geth methods.
+    #[arg(long)]
+    include_dangerous: bool,
+    /// Optional JSON report path.
+    #[arg(long)]
+    report: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -169,6 +202,22 @@ async fn main() -> Result<()> {
                 let _ = args;
                 return Err(eyre::eyre!("the run command requires the `embedded` feature"));
             }
+        }
+        Command::Geth(args) => {
+            reth_rpc_compat_tests::geth::run(
+                &args.manifest,
+                reth_rpc_compat_tests::geth::Options {
+                    geth_url: args.geth_url,
+                    reth_url: args.reth_url,
+                    include: args.include,
+                    exclude: args.exclude,
+                    timeout: std::time::Duration::from_secs(args.timeout_secs),
+                    fail_fast: args.fail_fast,
+                    include_dangerous: args.include_dangerous,
+                    report: args.report,
+                },
+            )
+            .await?;
         }
         Command::ListUnexpected(args) => print_unexpected(args)?,
     }

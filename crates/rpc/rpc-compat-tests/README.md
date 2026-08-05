@@ -74,3 +74,23 @@ process returns a failing status for unexpected failures. The dedicated `rpc-com
 end-to-end execution; the crate is not registered as a normal `e2e_testsuite` target. Set
 `github_token_env` in `[fixture]` to the name of an API-token environment variable when authenticated
 GitHub revision lookup is desired.
+
+## Geth differential suite
+
+The `geth` command compares the methods in `geth-rpc.toml` against two already-running HTTP RPC
+endpoints. This is separate from the execution-apis fixtures because Geth-specific methods,
+stateful calls, and client-local APIs need a shared dev chain and different comparison policies.
+
+```console
+cargo run -p reth-rpc-compat-tests --no-default-features -- geth \
+  --geth-url http://127.0.0.1:8545 \
+  --reth-url http://127.0.0.1:8546 \
+  --report target/rpc-compat/geth.json
+```
+
+Both nodes must be isolated and initialized with equivalent state. Use `--include` and `--exclude`
+to select methods, for example `--include 'eth_*' --exclude 'eth_subscribe'`. Exact methods compare
+normalized JSON; `outcome` methods compare result-versus-error behavior, and `error-code` methods
+compare only JSON-RPC error codes. Operational or mutating methods are excluded unless
+`--include-dangerous` is selected. Every mismatch is printed and the command continues unless
+`--fail-fast` is selected.

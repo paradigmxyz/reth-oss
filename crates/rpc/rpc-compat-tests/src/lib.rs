@@ -22,6 +22,7 @@ use std::{fs, sync::Arc};
 pub mod case;
 pub mod config;
 pub mod fixture;
+pub mod geth;
 pub mod matcher;
 pub mod report;
 #[cfg(feature = "embedded")]
