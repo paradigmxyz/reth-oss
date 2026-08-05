@@ -1,10 +1,10 @@
 //! Reth-owned sparse blob sidecar representation.
 
 use alloy_eips::{
-    eip4844::Bytes48,
+    eip4844::{kzg_to_versioned_hash, BlobCellsAndProofsV1, Bytes48},
     eip7594::{Cell, CELLS_PER_EXT_BLOB},
 };
-use alloy_primitives::B128;
+use alloy_primitives::{B128, B256};
 
 /// A sparse EIP-7594 sidecar.
 ///
@@ -129,6 +129,76 @@ impl SparseBlobSidecar {
         Ok(inserted)
     }
 
+    /// Merges all cells present in another sparse sidecar.
+    ///
+    /// The metadata must match exactly. Unlike [`Self::merge_cells`], this preserves cells that
+    /// are available for only one blob when the incoming sidecar has a non-common mask.
+    pub fn merge_from(&mut self, other: &Self) -> Result<usize, SparseBlobSidecarError> {
+        if self.commitments != other.commitments || self.cell_proofs != other.cell_proofs {
+            return Err(SparseBlobSidecarError::MetadataMismatch);
+        }
+
+        let mut inserted = 0;
+        for (index, incoming) in other.cells.iter().enumerate() {
+            let Some(incoming) = incoming else { continue };
+            if let Some(existing) = &self.cells[index] {
+                if existing != incoming {
+                    return Err(SparseBlobSidecarError::ConflictingCell(index));
+                }
+            } else {
+                self.cells[index] = Some(*incoming);
+                inserted += 1;
+            }
+        }
+        Ok(inserted)
+    }
+
+    /// Returns whether this sidecar contains a blob matching the versioned hash.
+    pub fn contains_versioned_hash(&self, versioned_hash: B256) -> bool {
+        self.commitments
+            .iter()
+            .any(|commitment| kzg_to_versioned_hash(commitment.as_slice()) == versioned_hash)
+    }
+
+    /// Returns requested cells and proofs for matching versioned hashes.
+    ///
+    /// Missing cells are represented as `None`, which is the shape required by
+    /// `engine_getBlobsV4`.
+    pub fn match_versioned_hashes_cells(
+        &self,
+        versioned_hashes: &[B256],
+        cell_mask: B128,
+    ) -> Vec<(usize, BlobCellsAndProofsV1)> {
+        let indices = cell_indices(cell_mask);
+        let mut matches = Vec::new();
+
+        for (blob_index, commitment) in self.commitments.iter().enumerate() {
+            let versioned_hash = kzg_to_versioned_hash(commitment.as_slice());
+            for (matched_index, requested_hash) in versioned_hashes.iter().enumerate() {
+                if versioned_hash != *requested_hash {
+                    continue;
+                }
+
+                let start = blob_index * CELLS_PER_EXT_BLOB;
+                matches.push((
+                    matched_index,
+                    BlobCellsAndProofsV1 {
+                        blob_cells: indices
+                            .iter()
+                            .map(|&index| self.cells[start + index])
+                            .collect(),
+                        proofs: indices
+                            .iter()
+                            .map(|&index| self.cell_proofs.get(start + index).copied())
+                            .collect(),
+                    },
+                ));
+            }
+        }
+
+        matches
+    }
+
     /// Returns the requested cells in blob-major, cell-index order if all are available.
     pub fn cells_for_mask(&self, cell_mask: B128) -> Option<Vec<Cell>> {
         let indices = cell_indices(cell_mask);
@@ -171,6 +241,9 @@ pub enum SparseBlobSidecarError {
     /// A cell already stored at this index conflicted with a newly received cell.
     #[error("conflicting cell at flattened index {0}")]
     ConflictingCell(usize),
+    /// The commitments or proofs did not match the existing sidecar.
+    #[error("sparse sidecar metadata does not match")]
+    MetadataMismatch,
 }
 
 fn expected_cell_count(blobs: usize) -> Result<usize, SparseBlobSidecarError> {

@@ -1,7 +1,7 @@
 //! Storage for blob data of EIP4844 transactions.
 
 use alloy_eips::{
-    eip4844::{BlobAndProofV1, BlobAndProofV2, BlobCellsAndProofsV1},
+    eip4844::{kzg_to_versioned_hash, BlobAndProofV1, BlobAndProofV2, BlobCellsAndProofsV1},
     eip7594::{BlobCellMask, BlobTransactionSidecarVariant, Cell},
 };
 use alloy_primitives::{TxHash, B128, B256};
@@ -12,6 +12,7 @@ pub use noop::NoopBlobStore;
 pub use sparse::{SparseBlobSidecar, SparseBlobSidecarError};
 use std::{
     fmt,
+    mem::size_of,
     sync::{
         atomic::{AtomicU64, AtomicUsize, Ordering},
         Arc,
@@ -137,6 +138,33 @@ pub enum PooledBlobSidecarData {
     Sparse(SparseBlobSidecar),
 }
 
+impl PooledBlobSidecarData {
+    /// Returns a memory-size estimate for the stored sidecar data.
+    pub fn size(&self) -> usize {
+        match self {
+            Self::Complete(sidecar) => sidecar.size(),
+            Self::Sparse(sidecar) => {
+                size_of::<Self>() +
+                    sidecar.commitments.len() * size_of::<alloy_eips::eip4844::Bytes48>() +
+                    sidecar.cell_proofs.len() * size_of::<alloy_eips::eip4844::Bytes48>() +
+                    sidecar.cells.len() * size_of::<Option<Cell>>()
+            }
+        }
+    }
+
+    /// Returns all blob versioned hashes represented by this sidecar.
+    pub fn versioned_hashes(&self) -> Vec<B256> {
+        match self {
+            Self::Complete(sidecar) => sidecar.versioned_hashes().collect(),
+            Self::Sparse(sidecar) => sidecar
+                .commitments
+                .iter()
+                .map(|commitment| kzg_to_versioned_hash(commitment.as_slice()))
+                .collect(),
+        }
+    }
+}
+
 /// A blob sidecar paired with its shared cell availability.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PooledBlobSidecar {
@@ -233,6 +261,23 @@ impl PooledBlobSidecar {
         let inserted = sidecar.merge_cells(cell_mask, cells)?;
         self.availability.merge(sidecar.cell_mask());
         Ok(inserted)
+    }
+
+    /// Merges a sparse sidecar into this entry.
+    pub fn merge_sparse(
+        &mut self,
+        incoming: &SparseBlobSidecar,
+    ) -> Result<usize, PooledBlobSidecarError> {
+        let PooledBlobSidecarData::Sparse(existing) = &mut self.sidecar else { return Ok(0) };
+
+        let inserted = existing.merge_from(incoming)?;
+        self.availability.merge(existing.cell_mask());
+        Ok(inserted)
+    }
+
+    /// Returns an estimate of the storage used by this sidecar.
+    pub fn size(&self) -> usize {
+        self.sidecar.size()
     }
 
     /// Returns the shared cell availability.
@@ -380,6 +425,12 @@ pub trait BlobStore: fmt::Debug + Send + Sync + 'static {
         indices_bitarray: B128,
     ) -> Result<Option<Vec<Cell>>, BlobStoreError>;
 
+    /// Returns the common cell availability mask for a transaction, if it is stored.
+    fn get_availability(&self, tx_hash: TxHash) -> Result<Option<BlobCellMask>, BlobStoreError> {
+        let _ = tx_hash;
+        Ok(None)
+    }
+
     /// Data size of all transactions in the blob store.
     fn data_size_hint(&self) -> Option<usize>;
 
@@ -396,6 +447,9 @@ pub enum BlobStoreError {
     /// The operation requires a complete sidecar but received sparse data.
     #[error("blob sidecar for transaction {0:?} is incomplete")]
     IncompleteSidecar(B256),
+    /// Failed to merge a sparse sidecar.
+    #[error(transparent)]
+    Sidecar(#[from] PooledBlobSidecarError),
     /// Failed to decode the stored blob data.
     #[error("failed to decode blob data: {0}")]
     DecodeError(#[from] alloy_rlp::Error),
