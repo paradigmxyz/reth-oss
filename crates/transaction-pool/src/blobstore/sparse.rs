@@ -8,47 +8,53 @@ use alloy_primitives::{B128, B256};
 
 /// A sparse EIP-7594 sidecar.
 ///
-/// The cell vectors are flattened in blob-major, cell-index order. For `n` blobs, the layout is
-/// `[blob_0_cell_0..blob_0_cell_127, blob_1_cell_0..]`. Commitments and cell proofs remain
-/// present even when blob cells are missing. This lets the networking layer accumulate cells
-/// without manufacturing zero-filled blob data that could be mistaken for a real blob.
+/// The cells and proofs are flattened in blob-major order, but only for the cell indices set in
+/// [`Self::custody`]. For `n` blobs and custody mask `{0, 3}`, the layout is
+/// `[blob_0_cell_0, blob_0_cell_3, blob_1_cell_0, blob_1_cell_3]`.
+///
+/// This mirrors Geth's cell sidecar representation: custody describes the common set of cells
+/// held for every blob, while the vectors contain only those cells. Missing cells therefore do
+/// not require allocating `Option<Cell>` slots or manufacturing zero-filled blob data.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SparseBlobSidecar {
     /// One commitment per blob.
     pub commitments: Vec<Bytes48>,
-    /// One cell proof per blob and cell, in the same flattened layout as [`Self::cells`].
+    /// One proof per stored cell, in the same flattened layout as [`Self::cells`].
     pub cell_proofs: Vec<Bytes48>,
-    /// Received cells. `None` means that the cell has not been received yet.
-    pub cells: Vec<Option<Cell>>,
+    /// Received cells in blob-major order, filtered by [`Self::custody`].
+    pub cells: Vec<Cell>,
+    /// Common cell custody mask for every blob in this sidecar.
+    pub custody: B128,
 }
 
 impl SparseBlobSidecar {
-    /// Creates an empty sparse sidecar with the given commitments and cell proofs.
-    pub fn empty(
-        commitments: Vec<Bytes48>,
-        cell_proofs: Vec<Bytes48>,
-    ) -> Result<Self, SparseBlobSidecarError> {
-        let cells = vec![None; expected_cell_count(commitments.len())?];
-        Self::try_new(commitments, cell_proofs, cells)
+    /// Creates an empty sparse sidecar with the given commitments.
+    pub fn empty(commitments: Vec<Bytes48>) -> Self {
+        Self { commitments, cell_proofs: Vec::new(), cells: Vec::new(), custody: B128::from(0u128) }
     }
 
-    /// Creates a sparse sidecar from its complete metadata and any received cells.
+    /// Creates a sparse sidecar from commitments, cells, proofs, and a common custody mask.
+    ///
+    /// Cells and proofs must be ordered blob-major and contain exactly one entry for each set
+    /// custody bit in each blob.
     pub fn try_new(
         commitments: Vec<Bytes48>,
         cell_proofs: Vec<Bytes48>,
-        cells: Vec<Option<Cell>>,
+        cells: Vec<Cell>,
+        custody: B128,
     ) -> Result<Self, SparseBlobSidecarError> {
-        let expected = expected_cell_count(commitments.len())?;
+        let expected = expected_cell_count(commitments.len(), custody)?;
         if cell_proofs.len() != expected || cells.len() != expected {
             return Err(SparseBlobSidecarError::InvalidLayout {
                 blobs: commitments.len(),
                 cell_proofs: cell_proofs.len(),
                 cells: cells.len(),
+                custody,
                 expected,
             });
         }
 
-        Ok(Self { commitments, cell_proofs, cells })
+        Ok(Self { commitments, cell_proofs, cells, custody })
     }
 
     /// Returns the number of blobs represented by this sidecar.
@@ -57,99 +63,79 @@ impl SparseBlobSidecar {
     }
 
     /// Returns the common cell mask available for every blob in this sidecar.
-    ///
-    /// eth/72 announces one mask for all blob transactions in a message. The intersection is
-    /// therefore the safe mask to advertise when different blobs have different received cells.
     pub fn cell_mask(&self) -> B128 {
-        if self.commitments.is_empty() {
-            return B128::from(0u128)
-        }
-
-        let mut mask = u128::MAX;
-        for blob_index in 0..self.blob_count() {
-            let start = blob_index * CELLS_PER_EXT_BLOB;
-            let blob_mask = self.cells[start..start + CELLS_PER_EXT_BLOB]
-                .iter()
-                .enumerate()
-                .fold(0u128, |mask, (cell_index, cell)| {
-                    mask | (u128::from(cell.is_some()) << cell_index)
-                });
-            mask &= blob_mask;
-        }
-        B128::from(mask)
+        self.custody
     }
 
     /// Returns whether every cell for every blob has been received.
     pub fn is_complete(&self) -> bool {
-        !self.commitments.is_empty() && self.cells.iter().all(Option::is_some)
+        !self.commitments.is_empty() && self.custody == B128::from(u128::MAX)
     }
 
-    /// Merges cells selected by `cell_mask` into the sidecar.
+    /// Merges cells and proofs selected by `cell_mask` into the sidecar.
     ///
-    /// Cells must be ordered by blob first and cell index second, matching the `Cells` response
-    /// shape. The operation is all-or-nothing: a malformed count or conflicting cell is rejected
-    /// before the sidecar is modified.
+    /// Cells and proofs must be ordered by blob first and cell index second, matching the
+    /// compact Geth-style representation. The operation is all-or-nothing.
     pub fn merge_cells(
         &mut self,
         cell_mask: B128,
         cells: Vec<Cell>,
+        cell_proofs: Vec<Bytes48>,
     ) -> Result<usize, SparseBlobSidecarError> {
-        let indices = cell_indices(cell_mask);
-        let expected = indices.len().saturating_mul(self.blob_count());
-        if cells.len() != expected {
-            return Err(SparseBlobSidecarError::CellCountMismatch { expected, actual: cells.len() })
-        }
-
-        let mut updates = Vec::with_capacity(expected);
-        let mut offset = 0;
-        for blob_index in 0..self.blob_count() {
-            let start = blob_index * CELLS_PER_EXT_BLOB;
-            for &cell_index in &indices {
-                let index = start + cell_index;
-                updates.push((index, cells[offset]));
-                offset += 1;
-            }
-        }
-
-        for &(index, ref cell) in &updates {
-            if let Some(existing) = &self.cells[index] &&
-                existing != cell
-            {
-                return Err(SparseBlobSidecarError::ConflictingCell(index));
-            }
-        }
-
-        let mut inserted = 0;
-        for (index, cell) in updates {
-            if self.cells[index].is_none() {
-                inserted += 1;
-                self.cells[index] = Some(cell);
-            }
-        }
-        Ok(inserted)
+        let incoming = Self::try_new(self.commitments.clone(), cell_proofs, cells, cell_mask)?;
+        self.merge_from(&incoming)
     }
 
     /// Merges all cells present in another sparse sidecar.
     ///
-    /// The metadata must match exactly. Unlike [`Self::merge_cells`], this preserves cells that
-    /// are available for only one blob when the incoming sidecar has a non-common mask.
+    /// The commitments must match exactly. The two sidecars may have different custody masks; the
+    /// result stores the union and keeps the compact blob-major ordering.
     pub fn merge_from(&mut self, other: &Self) -> Result<usize, SparseBlobSidecarError> {
-        if self.commitments != other.commitments || self.cell_proofs != other.cell_proofs {
+        if self.commitments != other.commitments {
             return Err(SparseBlobSidecarError::MetadataMismatch);
         }
 
+        let merged_custody = B128::from(u128::from(self.custody) | u128::from(other.custody));
+        let merged_indices = cell_indices(merged_custody);
+        let cells_per_blob = merged_indices.len();
+        let mut merged_cells = Vec::with_capacity(cells_per_blob.saturating_mul(self.blob_count()));
+        let mut merged_proofs = Vec::with_capacity(merged_cells.capacity());
         let mut inserted = 0;
-        for (index, incoming) in other.cells.iter().enumerate() {
-            let Some(incoming) = incoming else { continue };
-            if let Some(existing) = &self.cells[index] {
-                if existing != incoming {
-                    return Err(SparseBlobSidecarError::ConflictingCell(index));
+
+        for blob_index in 0..self.blob_count() {
+            for &cell_index in &merged_indices {
+                let existing = self.cell_and_proof(blob_index, cell_index);
+                let incoming = other.cell_and_proof(blob_index, cell_index);
+                let was_present = existing.is_some();
+
+                match (existing, incoming) {
+                    (
+                        Some((existing_cell, existing_proof)),
+                        Some((incoming_cell, incoming_proof)),
+                    ) => {
+                        if existing_cell != incoming_cell || existing_proof != incoming_proof {
+                            return Err(SparseBlobSidecarError::ConflictingCell(
+                                blob_index * CELLS_PER_EXT_BLOB + cell_index,
+                            ));
+                        }
+                        merged_cells.push(existing_cell);
+                        merged_proofs.push(existing_proof);
+                    }
+                    (Some((cell, proof)), None) | (None, Some((cell, proof))) => {
+                        if !was_present {
+                            inserted += 1;
+                        }
+                        merged_cells.push(cell);
+                        merged_proofs.push(proof);
+                    }
+                    (None, None) => unreachable!("merged custody must contain the cell"),
                 }
-            } else {
-                self.cells[index] = Some(*incoming);
-                inserted += 1;
             }
         }
+
+        self.cells = merged_cells;
+        self.cell_proofs = merged_proofs;
+        self.custody = merged_custody;
         Ok(inserted)
     }
 
@@ -179,17 +165,20 @@ impl SparseBlobSidecar {
                     continue;
                 }
 
-                let start = blob_index * CELLS_PER_EXT_BLOB;
                 matches.push((
                     matched_index,
                     BlobCellsAndProofsV1 {
                         blob_cells: indices
                             .iter()
-                            .map(|&index| self.cells[start + index])
+                            .map(|&index| {
+                                self.cell_and_proof(blob_index, index).map(|(cell, _)| cell)
+                            })
                             .collect(),
                         proofs: indices
                             .iter()
-                            .map(|&index| self.cell_proofs.get(start + index).copied())
+                            .map(|&index| {
+                                self.cell_and_proof(blob_index, index).map(|(_, proof)| proof)
+                            })
                             .collect(),
                     },
                 ));
@@ -204,21 +193,33 @@ impl SparseBlobSidecar {
         let indices = cell_indices(cell_mask);
         let mut result = Vec::with_capacity(indices.len().saturating_mul(self.blob_count()));
         for blob_index in 0..self.blob_count() {
-            let start = blob_index * CELLS_PER_EXT_BLOB;
             for cell_index in &indices {
-                result.push(self.cells[start + cell_index]?);
+                result.push(self.cell_and_proof(blob_index, *cell_index)?.0);
             }
         }
         Some(result)
+    }
+
+    /// Returns a stored cell and proof for a blob/cell pair.
+    fn cell_and_proof(&self, blob_index: usize, cell_index: usize) -> Option<(Cell, Bytes48)> {
+        if u128::from(self.custody) & (1u128 << cell_index) == 0 {
+            return None;
+        }
+
+        let indices = cell_indices(self.custody);
+        let cells_per_blob = indices.len();
+        let offset =
+            blob_index * cells_per_blob + indices.iter().position(|&index| index == cell_index)?;
+        Some((self.cells[offset], self.cell_proofs[offset]))
     }
 }
 
 /// Errors produced while constructing or merging sparse sidecars.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum SparseBlobSidecarError {
-    /// The metadata or cell vectors do not have the required blob-major layout.
+    /// The metadata or cell vectors do not have the required compact blob-major layout.
     #[error(
-        "invalid sparse sidecar layout: {blobs} blobs require {expected} cell proofs and cells, got {cell_proofs} proofs and {cells} cells"
+        "invalid sparse sidecar layout: {blobs} blobs and custody {custody:?} require {expected} cell proofs and cells, got {cell_proofs} proofs and {cells} cells"
     )]
     InvalidLayout {
         /// Number of commitments/blobs.
@@ -227,32 +228,41 @@ pub enum SparseBlobSidecarError {
         cell_proofs: usize,
         /// Number of supplied cells.
         cells: usize,
+        /// Common custody mask.
+        custody: B128,
         /// Expected number of proofs and cells.
         expected: usize,
     },
-    /// The response did not contain exactly one cell for every requested blob/index pair.
-    #[error("invalid sparse cell count: expected {expected}, got {actual}")]
+    /// A cell or proof vector did not contain exactly one entry for every requested pair.
+    #[error(
+        "invalid sparse cell count: expected {expected} cells and proofs, got {cells} cells and {proofs} proofs"
+    )]
     CellCountMismatch {
-        /// Expected number of cells.
+        /// Expected number of cells and proofs.
         expected: usize,
         /// Actual number of cells.
-        actual: usize,
+        cells: usize,
+        /// Actual number of proofs.
+        proofs: usize,
     },
-    /// A cell already stored at this index conflicted with a newly received cell.
+    /// A cell already stored at this index conflicted with a newly received cell or proof.
     #[error("conflicting cell at flattened index {0}")]
     ConflictingCell(usize),
-    /// The commitments or proofs did not match the existing sidecar.
+    /// The commitments did not match the existing sidecar.
     #[error("sparse sidecar metadata does not match")]
     MetadataMismatch,
 }
 
-fn expected_cell_count(blobs: usize) -> Result<usize, SparseBlobSidecarError> {
-    blobs.checked_mul(CELLS_PER_EXT_BLOB).ok_or(SparseBlobSidecarError::InvalidLayout {
-        blobs,
-        cell_proofs: 0,
-        cells: 0,
-        expected: usize::MAX,
-    })
+fn expected_cell_count(blobs: usize, custody: B128) -> Result<usize, SparseBlobSidecarError> {
+    blobs.checked_mul(u128::from(custody).count_ones() as usize).ok_or(
+        SparseBlobSidecarError::InvalidLayout {
+            blobs,
+            cell_proofs: 0,
+            cells: 0,
+            custody,
+            expected: usize::MAX,
+        },
+    )
 }
 
 fn cell_indices(mask: B128) -> Vec<usize> {
@@ -265,11 +275,7 @@ mod tests {
     use super::*;
 
     fn sidecar(blob_count: usize) -> SparseBlobSidecar {
-        SparseBlobSidecar::empty(
-            vec![Bytes48::default(); blob_count],
-            vec![Bytes48::default(); blob_count * CELLS_PER_EXT_BLOB],
-        )
-        .unwrap()
+        SparseBlobSidecar::empty(vec![Bytes48::default(); blob_count])
     }
 
     #[test]
@@ -283,11 +289,14 @@ mod tests {
             Cell::repeat_byte(4),
         ];
 
-        assert_eq!(sidecar.merge_cells(mask, cells).unwrap(), 4);
-        assert_eq!(sidecar.cells[0], Some(Cell::repeat_byte(1)));
-        assert_eq!(sidecar.cells[3], Some(Cell::repeat_byte(2)));
-        assert_eq!(sidecar.cells[CELLS_PER_EXT_BLOB], Some(Cell::repeat_byte(3)));
-        assert_eq!(sidecar.cells[CELLS_PER_EXT_BLOB + 3], Some(Cell::repeat_byte(4)));
+        assert_eq!(
+            sidecar
+                .merge_cells(mask, cells.clone(), vec![Bytes48::default(); cells.len()])
+                .unwrap(),
+            4
+        );
+        assert_eq!(sidecar.cells, cells);
+        assert_eq!(sidecar.custody, B128::from(0b1001u128));
         assert_eq!(sidecar.cell_mask(), B128::from(0b1001u128));
     }
 
@@ -295,11 +304,13 @@ mod tests {
     fn cell_merge_rejects_conflicts_without_partial_updates() {
         let mut sidecar = sidecar(1);
         let mask = B128::from(1u128);
-        sidecar.merge_cells(mask, vec![Cell::repeat_byte(1)]).unwrap();
+        sidecar.merge_cells(mask, vec![Cell::repeat_byte(1)], vec![Bytes48::default()]).unwrap();
 
-        let err = sidecar.merge_cells(mask, vec![Cell::repeat_byte(2)]).unwrap_err();
+        let err = sidecar
+            .merge_cells(mask, vec![Cell::repeat_byte(2)], vec![Bytes48::default()])
+            .unwrap_err();
         assert_eq!(err, SparseBlobSidecarError::ConflictingCell(0));
-        assert_eq!(sidecar.cells[0], Some(Cell::repeat_byte(1)));
+        assert_eq!(sidecar.cells[0], Cell::repeat_byte(1));
     }
 
     #[test]
@@ -308,7 +319,13 @@ mod tests {
         let mask = B128::from(0b11u128);
         assert!(sidecar.cells_for_mask(mask).is_none());
 
-        sidecar.merge_cells(mask, vec![Cell::repeat_byte(1), Cell::repeat_byte(2)]).unwrap();
+        sidecar
+            .merge_cells(
+                mask,
+                vec![Cell::repeat_byte(1), Cell::repeat_byte(2)],
+                vec![Bytes48::default(); 2],
+            )
+            .unwrap();
         assert_eq!(
             sidecar.cells_for_mask(mask),
             Some(vec![Cell::repeat_byte(1), Cell::repeat_byte(2)])

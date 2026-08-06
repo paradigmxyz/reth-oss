@@ -778,9 +778,9 @@ impl DiskFileBlobStoreInner {
     }
 }
 
-/// Prefix used for the prototype's sparse sidecar files. Complete sidecars retain the existing
-/// raw Alloy-RLP encoding, while this tag lets the reader distinguish sparse metadata/cell files.
-const SPARSE_MAGIC: [u8; 4] = *b"RSP1";
+/// Prefix used for sparse sidecar files. Complete sidecars retain the existing raw Alloy-RLP
+/// encoding, while this tag lets the reader distinguish sparse metadata/cell files.
+const SPARSE_MAGIC: [u8; 4] = *b"RSP2";
 
 fn encode_pooled(tx: B256, data: &PooledBlobSidecar) -> Result<Vec<u8>, BlobStoreError> {
     match data.data() {
@@ -801,6 +801,7 @@ fn encode_sparse(tx: B256, sidecar: &SparseBlobSidecar) -> Result<Vec<u8>, DiskF
     push_sparse_len(&mut encoded, tx, "commitments", sidecar.commitments.len())?;
     push_sparse_len(&mut encoded, tx, "cell proofs", sidecar.cell_proofs.len())?;
     push_sparse_len(&mut encoded, tx, "cells", sidecar.cells.len())?;
+    encoded.extend_from_slice(&u128::from(sidecar.custody).to_le_bytes());
     for commitment in &sidecar.commitments {
         encoded.extend_from_slice(commitment.as_slice());
     }
@@ -808,13 +809,7 @@ fn encode_sparse(tx: B256, sidecar: &SparseBlobSidecar) -> Result<Vec<u8>, DiskF
         encoded.extend_from_slice(proof.as_slice());
     }
     for cell in &sidecar.cells {
-        match cell {
-            Some(cell) => {
-                encoded.push(1);
-                encoded.extend_from_slice(cell.as_ref());
-            }
-            None => encoded.push(0),
-        }
+        encoded.extend_from_slice(cell.as_ref());
     }
     Ok(encoded)
 }
@@ -842,6 +837,11 @@ fn decode_pooled(tx: B256, encoded: &[u8]) -> Result<PooledBlobSidecar, BlobStor
     let commitments_len = read_sparse_len(tx, encoded, &mut offset, "commitments")?;
     let proofs_len = read_sparse_len(tx, encoded, &mut offset, "cell proofs")?;
     let cells_len = read_sparse_len(tx, encoded, &mut offset, "cells")?;
+    let custody = B128::from(u128::from_le_bytes(
+        take_sparse_bytes(tx, encoded, &mut offset, 16, "custody")?
+            .try_into()
+            .expect("sparse custody is sixteen bytes"),
+    ));
 
     let mut commitments = Vec::with_capacity(commitments_len);
     for _ in 0..commitments_len {
@@ -861,24 +861,17 @@ fn decode_pooled(tx: B256, encoded: &[u8]) -> Result<PooledBlobSidecar, BlobStor
 
     let mut cells = Vec::with_capacity(cells_len);
     for _ in 0..cells_len {
-        let present = take_sparse_bytes(tx, encoded, &mut offset, 1, "cell marker")?[0];
-        match present {
-            0 => cells.push(None),
-            1 => {
-                let bytes = take_sparse_bytes(tx, encoded, &mut offset, BYTES_PER_CELL, "cell")?;
-                let cell = Cell::try_from(bytes)
-                    .map_err(|_| sparse_decode_error(tx, "invalid cell length"))?;
-                cells.push(Some(cell));
-            }
-            _ => return Err(sparse_decode_error(tx, "invalid cell marker")),
-        }
+        let bytes = take_sparse_bytes(tx, encoded, &mut offset, BYTES_PER_CELL, "cell")?;
+        let cell =
+            Cell::try_from(bytes).map_err(|_| sparse_decode_error(tx, "invalid cell length"))?;
+        cells.push(cell);
     }
 
     if offset != encoded.len() {
         return Err(sparse_decode_error(tx, "trailing bytes"));
     }
 
-    SparseBlobSidecar::try_new(commitments, cell_proofs, cells)
+    SparseBlobSidecar::try_new(commitments, cell_proofs, cells, custody)
         .map(PooledBlobSidecar::from_sparse)
         .map_err(|err| sparse_decode_error(tx, err.to_string()))
 }

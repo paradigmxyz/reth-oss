@@ -147,7 +147,8 @@ impl PooledBlobSidecarData {
                 size_of::<Self>() +
                     sidecar.commitments.len() * size_of::<alloy_eips::eip4844::Bytes48>() +
                     sidecar.cell_proofs.len() * size_of::<alloy_eips::eip4844::Bytes48>() +
-                    sidecar.cells.len() * size_of::<Option<Cell>>()
+                    sidecar.cells.len() * size_of::<Cell>() +
+                    size_of::<B128>()
             }
         }
     }
@@ -253,12 +254,13 @@ impl PooledBlobSidecar {
         &mut self,
         cell_mask: B128,
         cells: Vec<Cell>,
+        cell_proofs: Vec<alloy_eips::eip4844::Bytes48>,
     ) -> Result<usize, PooledBlobSidecarError> {
         let PooledBlobSidecarData::Sparse(sidecar) = &mut self.sidecar else {
             return Err(PooledBlobSidecarError::NotSparse)
         };
 
-        let inserted = sidecar.merge_cells(cell_mask, cells)?;
+        let inserted = sidecar.merge_cells(cell_mask, cells, cell_proofs)?;
         self.availability.merge(sidecar.cell_mask());
         Ok(inserted)
     }
