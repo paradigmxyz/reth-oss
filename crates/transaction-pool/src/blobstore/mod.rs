@@ -254,13 +254,12 @@ impl PooledBlobSidecar {
         &mut self,
         cell_mask: B128,
         cells: Vec<Cell>,
-        cell_proofs: Vec<alloy_eips::eip4844::Bytes48>,
     ) -> Result<usize, PooledBlobSidecarError> {
         let PooledBlobSidecarData::Sparse(sidecar) = &mut self.sidecar else {
             return Err(PooledBlobSidecarError::NotSparse)
         };
 
-        let inserted = sidecar.merge_cells(cell_mask, cells, cell_proofs)?;
+        let inserted = sidecar.merge_cells(cell_mask, cells)?;
         self.availability.merge(sidecar.cell_mask());
         Ok(inserted)
     }

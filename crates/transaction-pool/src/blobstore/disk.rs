@@ -1038,6 +1038,30 @@ mod tests {
     }
 
     #[test]
+    fn disk_preserves_full_proofs_for_sparse_sidecars() {
+        let (store, _dir) = tmp_store();
+        let tx_hash = TxHash::random();
+        let commitments = vec![Bytes48::from([1u8; 48])];
+        let cell_proofs = (0..CELLS_PER_EXT_BLOB)
+            .map(|index| Bytes48::from([index as u8; 48]))
+            .collect::<Vec<_>>();
+        let custody = B128::from((1u128 << 0) | (1u128 << 7));
+        let sidecar = SparseBlobSidecar::try_new(
+            commitments,
+            cell_proofs,
+            vec![Cell::repeat_byte(1), Cell::repeat_byte(2)],
+            custody,
+        )
+        .unwrap();
+
+        store.insert(tx_hash, PooledBlobSidecar::from_sparse(sidecar.clone())).unwrap();
+        store.clear_cache();
+
+        let loaded = store.inner.get_one(tx_hash).unwrap().unwrap();
+        assert_eq!(loaded.sparse_sidecar(), Some(&sidecar));
+    }
+
+    #[test]
     fn disk_insert_all_get_all() {
         let (store, _dir) = tmp_store();
 
