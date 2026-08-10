@@ -655,8 +655,8 @@ where
 {
     let mut calls: Vec<SimCallResult> = Vec::with_capacity(results.len());
 
-    let mut log_index = 0;
     for (index, (result, tx)) in results.into_iter().zip(block.body().transactions()).enumerate() {
+        let mut log_index = 0;
         let call = match result {
             ExecutionResult::Halt { reason, gas, .. } => {
                 let error = Err::from_evm_halt(reason, tx.gas_limit());
