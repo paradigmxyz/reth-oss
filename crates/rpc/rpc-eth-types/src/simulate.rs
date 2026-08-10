@@ -337,19 +337,22 @@ pub fn append_transfer_logs<HaltReasonTy>(
     inspector: &TransferInspector,
     result: &mut ExecutionResult<HaltReasonTy>,
     next_transfer: &mut usize,
-) {
+) -> u64 {
     let transfers = inspector.transfers();
     if *next_transfer >= transfers.len() {
-        return
+        return 0
     }
+
+    let transfer_count = (transfers.len() - *next_transfer) as u64;
 
     let ExecutionResult::Success { logs, .. } = result else {
         *next_transfer = transfers.len();
-        return
+        return transfer_count
     };
 
     logs.extend(transfers[*next_transfer..].iter().map(transfer_to_log));
     *next_transfer = transfers.len();
+    transfer_count
 }
 
 fn transfer_to_log(transfer: &TransferOperation) -> Log {
@@ -420,6 +423,7 @@ pub fn execute_transactions_with_transfer_logs<S, T>(
     (
         BlockBuilderOutcome<S::Primitives>,
         Vec<ExecutionResult<<<S::Executor as BlockExecutor>::Evm as Evm>::HaltReason>>,
+        Vec<u64>,
     ),
     EthApiError,
 >
@@ -429,7 +433,8 @@ where
     T: RpcConvert<Primitives = S::Primitives>,
 {
     let mut next_transfer = 0;
-    execute_transactions_with_result_hook(
+    let mut log_counts = Vec::new();
+    let (block, results) = execute_transactions_with_result_hook(
         builder,
         state_provider,
         calls,
@@ -437,8 +442,16 @@ where
         chain_id,
         compute_state_root,
         converter,
-        |evm, result| append_transfer_logs(evm.inspector(), result, &mut next_transfer),
-    )
+        |evm, result| {
+            let transfer_count = append_transfer_logs(evm.inspector(), result, &mut next_transfer);
+            let log_count = match result {
+                ExecutionResult::Success { logs, .. } => logs.len() as u64,
+                ExecutionResult::Halt { .. } | ExecutionResult::Revert { .. } => transfer_count,
+            };
+            log_counts.push(log_count);
+        },
+    )?;
+    Ok((block, results, log_counts))
 }
 
 #[expect(clippy::type_complexity)]
@@ -643,6 +656,7 @@ pub fn build_simulated_block<Err, T>(
     block: RecoveredBlock<BlockTy<T::Primitives>>,
     results: Vec<ExecutionResult<HaltReasonFor<T::Evm>>>,
     txs_kind: BlockTransactionsKind,
+    trace_log_counts: Option<&[u64]>,
     converter: &T,
 ) -> Result<SimulatedBlock<RpcBlock<T::Network>>, Err>
 where
@@ -657,6 +671,7 @@ where
 
     let mut log_index = 0;
     for (index, (result, tx)) in results.into_iter().zip(block.body().transactions()).enumerate() {
+        let log_index_start = log_index;
         let call = match result {
             ExecutionResult::Halt { reason, gas, .. } => {
                 let error = Err::from_evm_halt(reason, tx.gas_limit());
@@ -712,6 +727,10 @@ where
                 status: true,
             },
         };
+
+        if let Some(trace_log_counts) = trace_log_counts {
+            log_index = log_index_start + trace_log_counts[index];
+        }
 
         calls.push(call);
     }
