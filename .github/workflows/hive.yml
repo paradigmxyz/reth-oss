@@ -208,7 +208,7 @@ jobs:
       - build-reth
       - prepare-hive
     name: Hive-Amsterdam / ${{ matrix.scenario.sim }}${{ matrix.scenario.limit && format(' - {0}', matrix.scenario.limit) }}
-    # Use larger runners for eels tests to avoid OOM runner crashes
+    # Use larger runners for eels tests to avoid OOM runner crashes.
     runs-on: ${{ github.repository == 'paradigmxyz/reth-oss' && (contains(matrix.scenario.sim, 'eels') && 'depot-ubuntu-latest-8' || 'depot-ubuntu-latest-4') || 'ubuntu-latest' }}
     permissions:
       contents: read
