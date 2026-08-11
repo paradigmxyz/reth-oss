@@ -5,8 +5,8 @@ fixture_variant="${1:-amsterdam}"
 
 case "${fixture_variant}" in
     amsterdam)
-        eels_fixtures="https://github.com/ethereum/execution-specs/releases/download/tests-glamsterdam-devnet@v7.2.1/fixtures_glamsterdam-devnet.tar.gz"
-        eels_branch="devnets/glamsterdam/7"
+        eels_fixtures="https://github.com/ethereum/execution-specs/releases/download/tests-glamsterdam-devnet@v8.1.0/fixtures_glamsterdam-devnet.tar.gz"
+        eels_branch="devnets/glamsterdam/8"
         eels_fork="Amsterdam"
         ;;
     osaka)
