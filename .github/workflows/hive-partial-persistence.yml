@@ -1,0 +1,224 @@
+name: Hive partial-persistence differential
+
+on:
+  pull_request:
+  push:
+    branches:
+      - ci/hive-partial-persistence
+  workflow_dispatch:
+    inputs:
+      hive_ref:
+        description: Branch or commit in Soubhik-10/hive to synchronize with ethereum/hive master
+        required: true
+        default: master
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-reth:
+    name: Build feature-enabled Reth image
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Record Reth revision
+        run: |
+          mkdir -p artifacts
+          git rev-parse HEAD > artifacts/reth-commit.txt
+
+      - name: Build Reth once with partial persistence compiled in
+        env:
+          FEATURES: partial-persistence
+          HIVE_OUTPUT_DIR: artifacts
+          VERGEN_GIT_SHA: ${{ github.sha }}
+        run: |
+          docker buildx bake \
+            --file docker-bake.hcl \
+            --set '*.dockerfile=Dockerfile' \
+            hive
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: reth-partial-persistence-image
+          path: artifacts
+          retention-days: 7
+          compression-level: 1
+
+  compare-rpc:
+    name: Compare baseline and partial RPC behavior
+    needs: build-reth
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      LAB_DIR: ${{ github.workspace }}/hive-partial-persistence-lab
+      HIVE_DIR: ${{ github.workspace }}/hive-partial-persistence-lab/hive
+      RESULTS_DIR: ${{ github.workspace }}/hive-partial-persistence-lab/results
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Initialize lab
+        run: mkdir -p "$LAB_DIR" "$RESULTS_DIR"
+
+      - name: Checkout Hive fork
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: Soubhik-10/hive
+          ref: ${{ inputs.hive_ref || 'master' }}
+          path: hive-partial-persistence-lab/hive
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Synchronize Hive checkout with upstream master
+        working-directory: hive-partial-persistence-lab/hive
+        run: |
+          fork_commit=$(git rev-parse HEAD)
+          git remote add upstream https://github.com/ethereum/hive.git
+          git fetch --no-tags upstream master
+          git merge --ff-only upstream/master
+          test "$(git rev-parse HEAD)" = "$(git rev-parse upstream/master)"
+          printf '%s\n' "$fork_commit" > "$LAB_DIR/hive-fork-commit.txt"
+          git rev-parse HEAD > "$LAB_DIR/hive-commit.txt"
+          git status --short --branch > "$LAB_DIR/hive-status.txt"
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: hive-partial-persistence-lab/hive/go.mod
+          cache-dependency-path: hive-partial-persistence-lab/hive/go.sum
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+
+      - name: Install Hive result-parser dependency
+        run: python3 -m pip install PyYAML==6.0.2
+
+      - name: Record acceptance environment
+        run: |
+          mkdir -p "$RESULTS_DIR"
+          {
+            echo '## uname'
+            uname -a
+            echo '## Docker'
+            docker version
+            echo '## Docker Buildx'
+            docker buildx version
+            echo '## Go'
+            go version
+            echo '## C toolchain'
+            gcc --version
+            echo '## Python'
+            python3 --version
+            echo '## PyYAML'
+            python3 -c 'import yaml; print(yaml.__version__)'
+            echo '## CPU'
+            nproc
+            echo '## memory'
+            free -h
+            echo '## disk'
+            df -h "$GITHUB_WORKSPACE"
+          } > "$LAB_DIR/environment.txt" 2>&1
+          docker info > "$LAB_DIR/docker-info.txt" 2>&1
+          printf '%s\n' '${{ github.sha }}' > "$LAB_DIR/workflow-reth-sha.txt"
+          printf '%s\n' '${{ github.event_name }}' > "$LAB_DIR/github-event.txt"
+          printf '%s\n' '${{ github.run_id }}' > "$LAB_DIR/github-run-id.txt"
+
+      - name: Validate comparison harness
+        run: |
+          bash -n .github/scripts/hive/compare_partial_persistence.sh
+          python3 -m py_compile \
+            .github/scripts/hive/analyze_partial_persistence.py \
+            .github/scripts/hive/normalize_results.py
+
+      - name: Build Hive
+        working-directory: hive-partial-persistence-lab/hive
+        run: |
+          go build -o hive .
+          ./hive --help > "$LAB_DIR/hive-help.txt" 2>&1
+          sha256sum hive > "$LAB_DIR/hive-binary-sha256.txt"
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: reth-partial-persistence-image
+          path: /tmp/reth-partial-persistence-image
+
+      - name: Load and verify the Reth image
+        run: |
+          cp /tmp/reth-partial-persistence-image/reth-commit.txt "$LAB_DIR/reth-commit.txt"
+          sha256sum /tmp/reth-partial-persistence-image/reth_image.tar \
+            > "$LAB_DIR/reth-image-tar-sha256.txt"
+          test "$(git rev-parse HEAD)" = "$(cat "$LAB_DIR/reth-commit.txt")"
+          docker load --input /tmp/reth-partial-persistence-image/reth_image.tar
+          docker image inspect ghcr.io/paradigmxyz/reth:latest \
+            --format '{{.Id}} {{json .RepoTags}} {{json .RepoDigests}}' \
+            > "$LAB_DIR/reth-image.txt"
+          docker run --rm ghcr.io/paradigmxyz/reth:latest --version \
+            > "$LAB_DIR/reth-version.txt"
+          docker run --rm ghcr.io/paradigmxyz/reth:latest node --help \
+            > "$LAB_DIR/reth-node-help.txt"
+          grep -F -- '--engine.num-state-masking-blocks' \
+            "$LAB_DIR/reth-node-help.txt"
+
+      - name: Run paired Hive comparisons
+        id: comparison
+        continue-on-error: true
+        run: |
+          bash .github/scripts/hive/compare_partial_persistence.sh \
+            "$HIVE_DIR" \
+            "$RESULTS_DIR"
+
+      - name: Add comparison summary
+        if: always()
+        run: |
+          if [ -f "$RESULTS_DIR/summary.md" ]; then
+            cat "$RESULTS_DIR/summary.md" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [ -f "$RESULTS_DIR/persistence-coverage.txt" ]; then
+            echo >> "$GITHUB_STEP_SUMMARY"
+            cat "$RESULTS_DIR/persistence-coverage.txt" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          while IFS= read -r focused_summary; do
+            echo >> "$GITHUB_STEP_SUMMARY"
+            echo '```text' >> "$GITHUB_STEP_SUMMARY"
+            cat "$focused_summary" >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          done < <(find "$RESULTS_DIR" -path '*/focused-*/summary.tsv' -type f | sort)
+          while IFS= read -r review_file; do
+            echo >> "$GITHUB_STEP_SUMMARY"
+            cat "$review_file" >> "$GITHUB_STEP_SUMMARY"
+          done < <(find "$RESULTS_DIR" -name '*-serious-errors-review.txt' -type f | sort)
+
+      - name: Package complete lab
+        if: always()
+        run: |
+          tar -czf "$RUNNER_TEMP/hive-partial-persistence-lab.tar.gz" \
+            -C "$GITHUB_WORKSPACE" hive-partial-persistence-lab
+
+      - name: Upload complete lab
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: hive-partial-persistence-lab
+          path: ${{ runner.temp }}/hive-partial-persistence-lab.tar.gz
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 1
+
+      - name: Enforce comparison result
+        if: steps.comparison.outcome == 'failure'
+        run: exit 1
