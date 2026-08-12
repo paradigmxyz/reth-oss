@@ -2,9 +2,6 @@ name: Hive partial-persistence differential
 
 on:
   pull_request:
-  push:
-    branches:
-      - ci/hive-partial-persistence
   workflow_dispatch:
     inputs:
       hive_ref:
@@ -21,7 +18,7 @@ concurrency:
 
 jobs:
   build-reth:
-    name: Build feature-enabled Reth image
+    name: 1/2 Build feature-enabled Reth image
     runs-on: ubuntu-latest
     timeout-minutes: 90
     permissions:
@@ -39,16 +36,19 @@ jobs:
           git rev-parse HEAD > artifacts/reth-commit.txt
 
       - name: Build Reth once with partial persistence compiled in
+        uses: docker/bake-action@d3418bd7d0e9324001bca92fa8ba175ea7e6dc9b # v7.3.0
         env:
           DEPOT_TOKEN: ${{ secrets.DEPOT_TOKEN }}
           FEATURES: partial-persistence
           HIVE_OUTPUT_DIR: artifacts
           VERGEN_GIT_SHA: ${{ github.sha }}
-        run: |
-          docker buildx bake \
-            --file docker-bake.hcl \
-            --set '*.dockerfile=Dockerfile' \
-            hive
+        with:
+          files: docker-bake.hcl
+          targets: hive
+          set: |
+            *.dockerfile=Dockerfile
+            hive.cache-from=type=gha,scope=reth-hive-partial-persistence
+            hive.cache-to=type=gha,scope=reth-hive-partial-persistence,mode=max,ignore-error=true,timeout=20m
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -58,7 +58,7 @@ jobs:
           compression-level: 1
 
   compare-rpc:
-    name: Compare baseline and partial RPC behavior
+    name: 2/2 Run and compare named Hive batches
     needs: build-reth
     runs-on: ubuntu-latest
     timeout-minutes: 360
@@ -96,6 +96,14 @@ jobs:
           printf '%s\n' "$fork_commit" > "$LAB_DIR/hive-fork-commit.txt"
           git rev-parse HEAD > "$LAB_DIR/hive-commit.txt"
           git status --short --branch > "$LAB_DIR/hive-status.txt"
+
+      - name: Pin rpc-compat fixture revision
+        run: |
+          execution_apis_commit=$(git ls-remote \
+            https://github.com/ethereum/execution-apis.git refs/heads/main | cut -f1)
+          test -n "$execution_apis_commit"
+          echo "EXECUTION_APIS_COMMIT=$execution_apis_commit" >> "$GITHUB_ENV"
+          echo "$execution_apis_commit" > "$LAB_DIR/execution-apis-commit.txt"
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -175,7 +183,7 @@ jobs:
           grep -F -- '--engine.num-state-masking-blocks' \
             "$LAB_DIR/reth-node-help.txt"
 
-      - name: Run paired Hive comparisons
+      - name: Run named RPC and Engine batches
         id: comparison
         continue-on-error: true
         run: |
@@ -193,6 +201,17 @@ jobs:
             echo >> "$GITHUB_STEP_SUMMARY"
             cat "$RESULTS_DIR/persistence-coverage.txt" >> "$GITHUB_STEP_SUMMARY"
           fi
+          if [ -f "$RESULTS_DIR/rpc-test-inventory.txt" ]; then
+            echo >> "$GITHUB_STEP_SUMMARY"
+            echo "RPC fixture cases in the built simulator image: $(wc -l < "$RESULTS_DIR/rpc-test-inventory.txt")" \
+              >> "$GITHUB_STEP_SUMMARY"
+            echo '<details><summary>RPC method-group inventory</summary>' >> "$GITHUB_STEP_SUMMARY"
+            echo >> "$GITHUB_STEP_SUMMARY"
+            echo '```text' >> "$GITHUB_STEP_SUMMARY"
+            cat "$RESULTS_DIR/rpc-test-method-counts.tsv" >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            echo '</details>' >> "$GITHUB_STEP_SUMMARY"
+          fi
           while IFS= read -r focused_summary; do
             echo >> "$GITHUB_STEP_SUMMARY"
             echo '```text' >> "$GITHUB_STEP_SUMMARY"
@@ -202,7 +221,17 @@ jobs:
           while IFS= read -r review_file; do
             echo >> "$GITHUB_STEP_SUMMARY"
             cat "$review_file" >> "$GITHUB_STEP_SUMMARY"
-          done < <(find "$RESULTS_DIR" -name '*-serious-errors-review.txt' -type f | sort)
+          done < <(find "$RESULTS_DIR" -name '*-review.txt' -type f | sort)
+          for label in rpc-ci-baseline rpc-ci-partial rpc-full-baseline rpc-full-partial; do
+            failure_report="$RESULTS_DIR/$label/failure-analysis/failure-report.md"
+            if [ -f "$failure_report" ] && [ "$(cat "$RESULTS_DIR/$label/failure-analysis/failure-count.txt")" -gt 0 ]; then
+              echo >> "$GITHUB_STEP_SUMMARY"
+              echo "<details><summary>Failure diagnostics: $label</summary>" >> "$GITHUB_STEP_SUMMARY"
+              echo >> "$GITHUB_STEP_SUMMARY"
+              cat "$failure_report" >> "$GITHUB_STEP_SUMMARY"
+              echo '</details>' >> "$GITHUB_STEP_SUMMARY"
+            fi
+          done
 
       - name: Package complete lab
         if: always()

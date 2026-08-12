@@ -19,12 +19,14 @@ RPC_CI_FILTER='/(eth_blockNumber|eth_call|eth_chainId|eth_createAccessList|eth_e
 RPC_FULL_FILTER='/'
 PARTIAL_FLAGS='--engine.persistence-threshold 2 --engine.persistence-backpressure-threshold 4 --engine.memory-block-buffer-target 0 --engine.num-state-masking-blocks 1'
 CLIENT_IMAGE='ghcr.io/paradigmxyz/reth:latest'
+EXECUTION_APIS_COMMIT="${EXECUTION_APIS_COMMIT:?EXECUTION_APIS_COMMIT must pin rpc-compat fixtures}"
 
 mkdir -p "$RESULTS"
 printf '%s\n' "$RPC_CI_FILTER" > "$RESULTS/rpc-ci-filter.txt"
 printf '%s\n' "$RPC_FULL_FILTER" > "$RESULTS/rpc-full-filter.txt"
 printf '%s\n' "$SEED" > "$RESULTS/random-seed.txt"
 printf '%s\n' "$PARALLELISM" > "$RESULTS/parallelism.txt"
+printf '%s\n' "$EXECUTION_APIS_COMMIT" > "$RESULTS/execution-apis-commit.txt"
 python3 "$ANALYZER" rpc-ci-filter \
   "$RETH_REPO/.github/workflows/hive.yml" "$RPC_CI_FILTER" \
   > "$RESULTS/rpc-ci-filter-from-workflow.txt"
@@ -64,8 +66,32 @@ run_one() {
   local out="$RESULTS/$label"
   local status
   local simulator_image="hive/simulators/$simulator:latest"
+  local display_name
+  local -a simulator_build_args=()
+
+  if [[ "$simulator" == ethereum/rpc-compat ]]; then
+    simulator_build_args=(--sim.buildarg "branch=$EXECUTION_APIS_COMMIT")
+  fi
+
+  case "$label" in
+    rpc-ci-baseline) display_name='RPC CI subset — baseline' ;;
+    rpc-ci-partial) display_name='RPC CI subset — partial persistence' ;;
+    rpc-full-baseline) display_name='Complete rpc-compat — baseline' ;;
+    rpc-full-partial) display_name='Complete rpc-compat — partial persistence' ;;
+    engine-api-baseline) display_name='Engine API — baseline' ;;
+    engine-api-partial) display_name='Engine API — partial persistence' ;;
+    cancun-baseline) display_name='Engine Cancun — baseline' ;;
+    cancun-partial) display_name='Engine Cancun — partial persistence' ;;
+    engine-withdrawals-baseline) display_name='Engine withdrawals — baseline' ;;
+    engine-withdrawals-partial) display_name='Engine withdrawals — partial persistence' ;;
+    focused-*-partial) display_name="Focused rerun — partial persistence ($label)" ;;
+    focused-*-baseline) display_name="Focused rerun — baseline ($label)" ;;
+    *) display_name="$label" ;;
+  esac
 
   mkdir -p "$out"
+  echo "::notice title=Starting Hive batch::$display_name; simulator=$simulator; filter=$limit; parallelism=$parallelism; seed=$SEED"
+  echo "::group::$display_name"
   select_mode "$mode"
   if [[ -d "$HIVE_DIR/workspace/logs" ]]; then
     rm -rf -- "$HIVE_DIR/workspace/logs"
@@ -75,7 +101,7 @@ run_one() {
   printf '%q ' ./hive --sim "$simulator" --sim.limit "$limit" \
     --sim.limit.exact=false --sim.parallelism "$parallelism" \
     --sim.randomseed "$SEED" --sim.loglevel 4 --client reth \
-    --docker.nocache hive/clients/reth > "$out/command.txt"
+    --docker.nocache hive/clients/reth "${simulator_build_args[@]}" > "$out/command.txt"
   printf '\n' >> "$out/command.txt"
 
   set +e
@@ -88,6 +114,7 @@ run_one() {
     --sim.loglevel 4 \
     --client reth \
     --docker.nocache hive/clients/reth \
+    "${simulator_build_args[@]}" \
     2>&1 | tee "$out/console.log"
   status=${PIPESTATUS[0]}
   set -e
@@ -100,6 +127,8 @@ run_one() {
   else
     mkdir -p "$out/logs"
   fi
+  echo "::endgroup::"
+  echo "::notice title=Finished Hive batch::$display_name; Hive exit code=$status"
 }
 
 verify_mode() {
@@ -124,6 +153,28 @@ verify_mode() {
 normalize_one() {
   local label="$1"
   python3 "$NORMALIZER" "$RESULTS/$label/logs" > "$RESULTS/$label/results.tsv"
+}
+
+record_rpc_inventory() {
+  local simulator_image='hive/simulators/ethereum/rpc-compat:latest'
+  docker run --rm --entrypoint sh "$simulator_image" -c \
+    "find tests -type f -name '*.io' -print | sed -e 's#^tests/##' -e 's#\.io$##' | sort" \
+    > "$RESULTS/rpc-test-inventory.txt"
+  docker run --rm --entrypoint sh "$simulator_image" -c \
+    "find tests -type f -name '*.io' -exec sha256sum {} + | sort" \
+    > "$RESULTS/rpc-test-fixture-sha256.txt"
+  docker run --rm --entrypoint sha256sum "$simulator_image" /source/openrpc.json \
+    > "$RESULTS/rpc-openrpc-sha256.txt"
+  wc -l "$RESULTS/rpc-test-inventory.txt" > "$RESULTS/rpc-test-inventory-count.txt"
+  awk -F/ '{ counts[$1]++ } END { for (method in counts) print method "\t" counts[method] }' \
+    "$RESULTS/rpc-test-inventory.txt" | sort > "$RESULTS/rpc-test-method-counts.tsv"
+}
+
+verify_full_rpc_inventory() {
+  local label="$1"
+  python3 "$ANALYZER" verify-rpc-inventory \
+    "$RESULTS/rpc-test-inventory.txt" "$RESULTS/$label/results.tsv" \
+    > "$RESULTS/$label/rpc-inventory-verification.tsv"
 }
 
 run_policy_parser() {
@@ -174,10 +225,14 @@ compare_pair() {
   local partial="$2"
   local name="$3"
   local status=0
+  local baseline_cases partial_cases
 
   normalize_one "$baseline"
   normalize_one "$partial"
   wc -l "$RESULTS/$baseline/results.tsv" "$RESULTS/$partial/results.tsv" > "$RESULTS/$name-counts.txt"
+  baseline_cases="$(wc -l < "$RESULTS/$baseline/results.tsv")"
+  partial_cases="$(wc -l < "$RESULTS/$partial/results.tsv")"
+  echo "::notice title=Compared individual Hive cases ($name)::baseline=$baseline_cases; partial=$partial_cases"
   diff -u "$RESULTS/$baseline/results.tsv" "$RESULTS/$partial/results.tsv" > "$RESULTS/$name.diff" || status=1
   if [[ ! -s "$RESULTS/$baseline/results.tsv" || ! -s "$RESULTS/$partial/results.tsv" ]]; then
     echo "One or both modes collected zero test cases" >> "$RESULTS/$name.diff"
@@ -231,17 +286,82 @@ compare_serious_errors() {
   return "$status"
 }
 
+analyze_failure_details() {
+  local label="$1"
+  python3 "$ANALYZER" failure-details \
+    "$RESULTS/$label/logs" "$RESULTS/$label/failure-analysis"
+}
+
+compare_failure_details() {
+  local baseline="$1"
+  local partial="$2"
+  local name="$3"
+  local status=0
+
+  analyze_failure_details "$baseline"
+  analyze_failure_details "$partial"
+  diff -u "$RESULTS/$baseline/failure-analysis/failure-signatures.tsv" \
+    "$RESULTS/$partial/failure-analysis/failure-signatures.tsv" \
+    > "$RESULTS/$name-failure-reasons.diff" || status=1
+  if [[ "$status" -ne 0 ]]; then
+    echo 'manual review required: failed tests reported different normalized reasons' \
+      > "$RESULTS/$name-failure-reasons-review.txt"
+  fi
+  return "$status"
+}
+
+compare_rpc_transcripts() {
+  local baseline="$1"
+  local partial="$2"
+  local name="$3"
+  local status=0
+
+  python3 "$ANALYZER" case-details "$RESULTS/$baseline/logs" \
+    > "$RESULTS/$baseline/rpc-transcripts.tsv"
+  python3 "$ANALYZER" case-details "$RESULTS/$partial/logs" \
+    > "$RESULTS/$partial/rpc-transcripts.tsv"
+  python3 "$ANALYZER" case-signatures "$RESULTS/$baseline/logs" \
+    > "$RESULTS/$baseline/rpc-transcript-signatures.tsv"
+  python3 "$ANALYZER" case-signatures "$RESULTS/$partial/logs" \
+    > "$RESULTS/$partial/rpc-transcript-signatures.tsv"
+  diff -u "$RESULTS/$baseline/rpc-transcripts.tsv" \
+    "$RESULTS/$partial/rpc-transcripts.tsv" \
+    > "$RESULTS/$name-rpc-transcripts.diff" || status=1
+  if [[ "$status" -ne 0 ]]; then
+    echo 'manual review required: normalized RPC request/response transcripts differ' \
+      > "$RESULTS/$name-rpc-transcripts-review.txt"
+  fi
+  return "$status"
+}
+
 investigate_differences() {
   local simulator="$1"
   local baseline="$2"
   local partial="$3"
   local name="$4"
+  local comparison_kind="${5:-results}"
   local filters="$RESULTS/$name-focused-filters.tsv"
   local differences_status
+  local baseline_comparison partial_comparison
+
+  case "$comparison_kind" in
+    results)
+      baseline_comparison="$RESULTS/$baseline/results.tsv"
+      partial_comparison="$RESULTS/$partial/results.tsv"
+      ;;
+    rpc-transcripts)
+      baseline_comparison="$RESULTS/$baseline/rpc-transcript-signatures.tsv"
+      partial_comparison="$RESULTS/$partial/rpc-transcript-signatures.tsv"
+      ;;
+    *)
+      echo "unknown comparison kind: $comparison_kind" >&2
+      return 2
+      ;;
+  esac
 
   set +e
   python3 "$ANALYZER" differences \
-    "$RESULTS/$baseline/results.tsv" "$RESULTS/$partial/results.tsv" \
+    "$baseline_comparison" "$partial_comparison" \
     > "$filters"
   differences_status=$?
   set -e
@@ -251,6 +371,29 @@ investigate_differences() {
     return 0
   elif [[ "$differences_status" -ne 1 ]]; then
     echo 'failed to derive focused Hive filters' > "$RESULTS/$name-focused-reruns.txt"
+    return 1
+  fi
+
+  # A client-launch failure prevents the simulator from exposing its selected
+  # conformance cases. Treat the resulting missing tests as one startup root
+  # cause instead of scheduling three reruns for every absent RPC/Engine case.
+  local startup_filters="$RESULTS/$name-startup-focused-filter.tsv"
+  local startup_status
+  set +e
+  python3 "$ANALYZER" differences \
+    "$baseline_comparison" "$partial_comparison" --startup-only \
+    > "$startup_filters"
+  startup_status=$?
+  set -e
+  if [[ "$startup_status" -eq 1 ]]; then
+    cp "$filters" "$RESULTS/$name-suppressed-differences-after-startup.tsv"
+    cp "$startup_filters" "$filters"
+    echo 'collapsed missing conformance cases into the differing mandatory client-launch case' \
+      > "$RESULTS/$name-startup-root-cause.txt"
+    echo "::warning title=Startup differential ($name)::Conformance cases were suppressed because one mode could not launch Reth; rerunning client launch only"
+  elif [[ "$startup_status" -ne 0 ]]; then
+    echo 'failed to identify a possible client-launch root cause' \
+      > "$RESULTS/$name-focused-reruns.txt"
     return 1
   fi
 
@@ -290,6 +433,21 @@ investigate_differences() {
       normalize_one "$partial_label"
       normalize_one "$baseline_label"
 
+      local focused_partial_comparison="$RESULTS/$partial_label/results.tsv"
+      local focused_baseline_comparison="$RESULTS/$baseline_label/results.tsv"
+      if [[ "$comparison_kind" == rpc-transcripts ]]; then
+        python3 "$ANALYZER" case-details "$RESULTS/$partial_label/logs" \
+          > "$RESULTS/$partial_label/rpc-transcripts.tsv"
+        python3 "$ANALYZER" case-details "$RESULTS/$baseline_label/logs" \
+          > "$RESULTS/$baseline_label/rpc-transcripts.tsv"
+        python3 "$ANALYZER" case-signatures "$RESULTS/$partial_label/logs" \
+          > "$RESULTS/$partial_label/rpc-transcript-signatures.tsv"
+        python3 "$ANALYZER" case-signatures "$RESULTS/$baseline_label/logs" \
+          > "$RESULTS/$baseline_label/rpc-transcript-signatures.tsv"
+        focused_partial_comparison="$RESULTS/$partial_label/rpc-transcript-signatures.tsv"
+        focused_baseline_comparison="$RESULTS/$baseline_label/rpc-transcript-signatures.tsv"
+      fi
+
       local partial_cases baseline_cases
       partial_cases="$(wc -l < "$RESULTS/$partial_label/results.tsv")"
       baseline_cases="$(wc -l < "$RESULTS/$baseline_label/results.tsv")"
@@ -300,11 +458,11 @@ investigate_differences() {
         continue
       fi
 
-      if ! python3 "$ANALYZER" lookup "$RESULTS/$baseline_label/results.tsv" "$suite" "$test" \
+      if ! python3 "$ANALYZER" lookup "$focused_baseline_comparison" "$suite" "$test" \
         > "$case_dir/attempt-$attempt-baseline-result.txt"; then
         invalid=1
       fi
-      if ! python3 "$ANALYZER" lookup "$RESULTS/$partial_label/results.tsv" "$suite" "$test" \
+      if ! python3 "$ANALYZER" lookup "$focused_partial_comparison" "$suite" "$test" \
         > "$case_dir/attempt-$attempt-partial-result.txt"; then
         invalid=1
       fi
@@ -312,7 +470,7 @@ investigate_differences() {
       local attempt_differences_status
       set +e
       python3 "$ANALYZER" differences \
-        "$RESULTS/$baseline_label/results.tsv" "$RESULTS/$partial_label/results.tsv" \
+        "$focused_baseline_comparison" "$focused_partial_comparison" \
         > "$case_dir/attempt-$attempt-differences.tsv"
       attempt_differences_status=$?
       set -e
@@ -325,6 +483,12 @@ investigate_differences() {
         reproduced=$((reproduced + 1))
       fi
       compare_pair "$baseline_label" "$partial_label" "$comparison_name" || true
+      compare_failure_details "$baseline_label" "$partial_label" "$comparison_name" || true
+      if [[ "$comparison_kind" == rpc-transcripts ]]; then
+        diff -u "$RESULTS/$baseline_label/rpc-transcripts.tsv" \
+          "$RESULTS/$partial_label/rpc-transcripts.tsv" \
+          > "$case_dir/attempt-$attempt-rpc-transcripts.diff" || true
+      fi
       compare_serious_errors "$baseline_label" "$partial_label" "$comparison_name" || true
     done
 
@@ -346,9 +510,25 @@ investigate_differences() {
   return 1
 }
 
+has_startup_difference() {
+  local baseline="$1"
+  local partial="$2"
+  local name="$3"
+  local status
+
+  set +e
+  python3 "$ANALYZER" differences \
+    "$RESULTS/$baseline/results.tsv" "$RESULTS/$partial/results.tsv" \
+    --startup-only > "$RESULTS/$name-startup-difference.tsv"
+  status=$?
+  set -e
+  [[ "$status" -eq 1 ]]
+}
+
 comparison_status=0
 
 run_one baseline ethereum/rpc-compat "$RPC_CI_FILTER" rpc-ci-baseline "$PARALLELISM"
+record_rpc_inventory
 run_one partial ethereum/rpc-compat "$RPC_CI_FILTER" rpc-ci-partial "$PARALLELISM"
 # A slash with empty suite and test regexes matches every suite and every test
 # in Hive's unmodified ethereum/rpc-compat simulator. This is intentionally
@@ -365,22 +545,69 @@ done
 
 compare_pair rpc-ci-baseline rpc-ci-partial rpc-ci || comparison_status=1
 compare_pair rpc-full-baseline rpc-full-partial rpc-full || comparison_status=1
+verify_full_rpc_inventory rpc-full-baseline || comparison_status=1
+verify_full_rpc_inventory rpc-full-partial || comparison_status=1
+compare_failure_details rpc-ci-baseline rpc-ci-partial rpc-ci || comparison_status=1
+compare_failure_details rpc-full-baseline rpc-full-partial rpc-full || comparison_status=1
+rpc_ci_transcript_status=0
+rpc_full_transcript_status=0
+compare_rpc_transcripts rpc-ci-baseline rpc-ci-partial rpc-ci || {
+  rpc_ci_transcript_status=1
+  comparison_status=1
+}
+compare_rpc_transcripts rpc-full-baseline rpc-full-partial rpc-full || {
+  rpc_full_transcript_status=1
+  comparison_status=1
+}
 compare_serious_errors rpc-ci-baseline rpc-ci-partial rpc-ci || comparison_status=1
 compare_serious_errors rpc-full-baseline rpc-full-partial rpc-full || comparison_status=1
 
-investigate_differences ethereum/rpc-compat rpc-ci-baseline rpc-ci-partial rpc-ci || comparison_status=1
-investigate_differences ethereum/rpc-compat rpc-full-baseline rpc-full-partial rpc-full || comparison_status=1
+startup_root_cause=''
+if has_startup_difference rpc-ci-baseline rpc-ci-partial rpc-ci; then
+  startup_root_cause='rpc-ci'
+elif has_startup_difference rpc-full-baseline rpc-full-partial rpc-full; then
+  startup_root_cause='rpc-full'
+fi
+
+if [[ -n "$startup_root_cause" ]]; then
+  echo "partial/baseline client startup differed in $startup_root_cause" \
+    > "$RESULTS/startup-root-cause.txt"
+  comparison_status=1
+  if [[ "$startup_root_cause" == rpc-ci ]]; then
+    investigate_differences ethereum/rpc-compat \
+      rpc-ci-baseline rpc-ci-partial rpc-ci || true
+  else
+    investigate_differences ethereum/rpc-compat \
+      rpc-full-baseline rpc-full-partial rpc-full || true
+  fi
+else
+  investigate_differences ethereum/rpc-compat rpc-ci-baseline rpc-ci-partial rpc-ci || comparison_status=1
+  investigate_differences ethereum/rpc-compat rpc-full-baseline rpc-full-partial rpc-full || comparison_status=1
+  if [[ "$rpc_ci_transcript_status" -ne 0 ]]; then
+    investigate_differences ethereum/rpc-compat rpc-ci-baseline rpc-ci-partial \
+      rpc-ci-transcripts rpc-transcripts || comparison_status=1
+  fi
+  if [[ "$rpc_full_transcript_status" -ne 0 ]]; then
+    investigate_differences ethereum/rpc-compat rpc-full-baseline rpc-full-partial \
+      rpc-full-transcripts rpc-transcripts || comparison_status=1
+  fi
+fi
 
 compare_policy_pair rpc-ci-baseline rpc-ci-partial rpc-ci || comparison_status=1
 # Full-suite absolute failures do not fail the experiment, but applying the same
 # policy to both modes makes any expectation difference explicit in the artifact.
 compare_policy_pair rpc-full-baseline rpc-full-partial rpc-full || comparison_status=1
 
-activation_found=false
-record_activation rpc-ci-partial && activation_found=true
-record_activation rpc-full-partial && activation_found=true
+if [[ -n "$startup_root_cause" ]]; then
+  echo 'coverage unresolved: the startup differential prevented RPC and Engine behavior testing' \
+    > "$RESULTS/persistence-coverage.txt"
+  echo 'Engine suites skipped because the partial client could not pass Hive client launch' \
+    > "$RESULTS/engine-suites-skipped.txt"
+else
+  activation_found=false
+  record_activation rpc-ci-partial && activation_found=true
+  record_activation rpc-full-partial && activation_found=true
 
-if [[ "$activation_found" == false ]]; then
   engine_pairs=(
     'engine-api'
     'cancun'
@@ -393,23 +620,24 @@ if [[ "$activation_found" == false ]]; then
     verify_mode "$suite-partial" partial || comparison_status=1
     compare_pair "$suite-baseline" "$suite-partial" "$suite" || comparison_status=1
     compare_policy_pair "$suite-baseline" "$suite-partial" "$suite" || comparison_status=1
+    compare_failure_details "$suite-baseline" "$suite-partial" "$suite" || comparison_status=1
     compare_serious_errors "$suite-baseline" "$suite-partial" "$suite" || comparison_status=1
     investigate_differences ethereum/engine "$suite-baseline" "$suite-partial" "$suite" || comparison_status=1
     record_activation "$suite-partial" && activation_found=true
   done
-fi
 
-if [[ "$activation_found" == true ]]; then
-  echo activated > "$RESULTS/persistence-coverage.txt"
-else
-  echo 'coverage unresolved: no standard RPC or Engine run logged a persistence cycle' \
-    > "$RESULTS/persistence-coverage.txt"
-  comparison_status=1
+  if [[ "$activation_found" == true ]]; then
+    echo activated > "$RESULTS/persistence-coverage.txt"
+  else
+    echo 'coverage unresolved: no standard RPC or Engine run logged a persistence cycle' \
+      > "$RESULTS/persistence-coverage.txt"
+    comparison_status=1
+  fi
 fi
 
 {
-  echo '| Suite | Baseline cases | Partial cases | Baseline unexpected failures | Partial unexpected failures | Differential |'
-  echo '| --- | ---: | ---: | ---: | ---: | --- |'
+  echo '| Suite | Baseline cases | Partial cases | Baseline unexpected failures | Partial unexpected failures | Result set | Failure reasons | RPC transcripts | Serious errors | Differential |'
+  echo '| --- | ---: | ---: | ---: | ---: | --- | --- | --- | --- | --- |'
   for pair in 'RPC CI subset:rpc-ci' 'Full rpc-compat:rpc-full' \
     'engine-api:engine-api' 'engine-cancun:cancun' 'engine-withdrawals:engine-withdrawals'; do
     title="${pair%%:*}"
@@ -426,13 +654,38 @@ fi
       baseline_unexpected='n/a'
       partial_unexpected='n/a'
     fi
-    if [[ -s "$RESULTS/$key.diff" || -s "$RESULTS/$key-serious-errors.diff" || \
+    if [[ -s "$RESULTS/$key.diff" ]]; then
+      result_set=changed
+    else
+      result_set=clean
+    fi
+    if [[ -s "$RESULTS/$key-failure-reasons.diff" ]]; then
+      failure_reasons=changed
+    else
+      failure_reasons=clean
+    fi
+    if [[ -f "$RESULTS/$key-rpc-transcripts.diff" ]]; then
+      if [[ -s "$RESULTS/$key-rpc-transcripts.diff" ]]; then
+        rpc_transcripts=changed
+      else
+        rpc_transcripts=clean
+      fi
+    else
+      rpc_transcripts='n/a'
+    fi
+    if [[ -s "$RESULTS/$key-serious-errors.diff" ]]; then
+      serious_errors=changed
+    else
+      serious_errors=clean
+    fi
+    if [[ "$result_set" == changed || "$failure_reasons" == changed || \
+          "$rpc_transcripts" == changed || "$serious_errors" == changed || \
           -s "$RESULTS/$key-expected.diff" ]]; then
       differential=changed
     else
       differential=clean
     fi
-    echo "| $title | $baseline_cases | $partial_cases | $baseline_unexpected | $partial_unexpected | $differential |"
+    echo "| $title | $baseline_cases | $partial_cases | $baseline_unexpected | $partial_unexpected | $result_set | $failure_reasons | $rpc_transcripts | $serious_errors | $differential |"
   done
 } > "$RESULTS/summary.md"
 
