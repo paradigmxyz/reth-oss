@@ -46,7 +46,6 @@ jobs:
           files: docker-bake.hcl
           targets: hive
           set: |
-            *.dockerfile=Dockerfile
             hive.cache-from=type=gha,scope=reth-hive-partial-persistence
             hive.cache-to=type=gha,scope=reth-hive-partial-persistence,mode=max,ignore-error=true,timeout=20m
 
