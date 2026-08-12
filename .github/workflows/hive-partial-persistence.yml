@@ -40,6 +40,7 @@ jobs:
 
       - name: Build Reth once with partial persistence compiled in
         env:
+          DEPOT_TOKEN: ${{ secrets.DEPOT_TOKEN }}
           FEATURES: partial-persistence
           HIVE_OUTPUT_DIR: artifacts
           VERGEN_GIT_SHA: ${{ github.sha }}
