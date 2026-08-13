@@ -8,10 +8,17 @@ use smallvec::SmallVec;
 pub mod config;
 /// Default and spec'd bounds.
 pub mod constants;
+/// Temporary storage for blobless eth/72 transactions while cells are fetched.
+pub mod eth72_buffer;
 /// Component responsible for fetching transactions from [`NewPooledTransactionHashes`].
 pub mod fetcher;
 /// Defines the traits for transaction-related policies.
 pub mod policy;
+
+pub use eth72_buffer::{
+    Eth72BlobBuffer, Eth72BlobBufferError, MergedEth72Cells, PendingEth72Blob,
+    DEFAULT_ETH72_BLOB_BUFFER_CAPACITY, DEFAULT_ETH72_BLOB_BUFFER_TTL,
+};
 
 pub use self::constants::{
     tx_fetcher::DEFAULT_SOFT_LIMIT_BYTE_SIZE_POOLED_TRANSACTIONS_RESP_ON_PACK_GET_POOLED_TRANSACTIONS_REQ,
@@ -319,6 +326,8 @@ pub struct TransactionsManager<Pool, N: NetworkPrimitives = EthNetworkPrimitives
     bad_imports: LruCache<TxHash, FbBuildHasher<32>>,
     /// All the connected peers.
     peers: HashMap<PeerId, PeerMetadata<N>, FbBuildHasher<64>>,
+    /// Short-lived storage for structurally valid eth/72 blobless responses awaiting cells.
+    eth72_blob_buffer: Eth72BlobBuffer<N::PooledTransaction>,
     /// Send half for the command channel.
     ///
     /// This is kept so that a new [`TransactionsHandle`] can be created at any time.
@@ -412,6 +421,7 @@ impl<Pool: TransactionPool, N: NetworkPrimitives> TransactionsManager<Pool, N> {
             pending_pool_imports_info,
             bad_imports: LruCache::with_hasher(DEFAULT_MAX_COUNT_BAD_IMPORTS, Default::default()),
             peers: Default::default(),
+            eth72_blob_buffer: Default::default(),
             command_tx,
             command_rx: UnboundedReceiverStream::new(command_rx),
             pending_transactions: pending,
@@ -1589,6 +1599,9 @@ where
         let mut poll_durations = TxManagerPollDurations::default();
 
         let this = self.get_mut();
+
+        // Keep incomplete eth/72 responses bounded even when no new cells arrive.
+        this.eth72_blob_buffer.purge_expired(Instant::now());
 
         // All streams are polled until their corresponding budget is exhausted, then we manually
         // yield back control to tokio. See `NetworkManager` for more context on the design
