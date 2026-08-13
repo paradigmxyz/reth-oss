@@ -134,13 +134,15 @@ impl<T> Eth72BlobBuffer<T> {
         if self.capacity == 0 {
             return Ok(false)
         }
-        if self.entries.len() >= self.capacity {
-            if let Some(oldest) =
-                self.entries.iter().min_by_key(|(_, entry)| entry.expires_at).map(|(hash, _)| *hash)
-            {
-                self.entries.remove(&oldest);
-                self.requested.retain(|(pending, _), _| pending != &oldest);
-            }
+        if self.entries.len() >= self.capacity &&
+            let Some(oldest) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, entry)| entry.expires_at)
+                .map(|(hash, _)| *hash)
+        {
+            self.entries.remove(&oldest);
+            self.requested.retain(|(pending, _), _| pending != &oldest);
         }
 
         let expires_at = now.checked_add(self.ttl).unwrap_or(now);
