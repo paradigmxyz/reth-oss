@@ -288,8 +288,10 @@ jobs:
         scenario:
           - sim: ethereum/eels/consume-rlp
             limit: .fork_Bogota.
+            loglevel: 3
           - sim: ethereum/eels/consume-rlp
             limit: .*8141.*
+            loglevel: 3
     needs:
       - build-reth
       - prepare-hive
