@@ -1652,6 +1652,7 @@ mod tests {
             prague: true.into(),
             osaka: true.into(),
             amsterdam: true.into(),
+            bogota: true.into(),
             tip_timestamp: 0.into(),
             max_blob_count: 0.into(),
             max_initcode_size: AtomicUsize::new(MAX_INITCODE_SIZE),
