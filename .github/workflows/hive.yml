@@ -288,10 +288,8 @@ jobs:
         scenario:
           - sim: ethereum/eels/consume-rlp
             limit: .fork_Bogota.
-            loglevel: 3
           - sim: ethereum/eels/consume-rlp
             limit: .*8141.*
-            loglevel: 3
     needs:
       - build-reth
       - prepare-hive
@@ -338,9 +336,8 @@ jobs:
         env:
           SCENARIO_SIM: ${{ matrix.scenario.sim }}
           SCENARIO_LIMIT: ${{ matrix.scenario.limit }}
-          SCENARIO_LOGLEVEL: ${{ matrix.scenario.loglevel }}
         run: |
-          .github/scripts/hive/run_simulator.sh "$SCENARIO_SIM" "$SCENARIO_LIMIT" "bogota" "$SCENARIO_LOGLEVEL"
+          .github/scripts/hive/run_simulator.sh "$SCENARIO_SIM" "$SCENARIO_LIMIT" "bogota"
 
       - name: Parse hive output
         run: |
