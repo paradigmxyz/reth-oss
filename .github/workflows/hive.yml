@@ -38,8 +38,9 @@ jobs:
       matrix:
         variant:
           - amsterdam
+          - bogota
           - osaka
-    name: Prepare Hive - ${{ matrix.variant == 'amsterdam' && 'Amsterdam' || 'Osaka' }}
+    name: Prepare Hive - ${{ matrix.variant == 'amsterdam' && 'Amsterdam' || matrix.variant == 'bogota' && 'Bogota' || 'Osaka' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -278,6 +279,81 @@ jobs:
         if: ${{ failure() }}
         run: .github/scripts/hive/print_client_logs.sh
 
+  test-bogota-frames:
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario:
+          - sim: ethereum/eels/consume-rlp
+            limit: .fork_Bogota.
+            loglevel: 3
+          - sim: ethereum/eels/consume-rlp
+            limit: .*8141.*
+            loglevel: 3
+    needs:
+      - build-reth
+      - prepare-hive
+    name: Hive-Bogota / Frame transactions - ${{ matrix.scenario.limit }}
+    runs-on: ${{ github.repository == 'paradigmxyz/reth' && 'depot-ubuntu-latest-8' || 'ubuntu-latest' }}
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Download hive assets
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: hive_assets_bogota
+          path: /tmp
+
+      - name: Download reth image
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: reth
+          path: /tmp
+
+      - name: Load Docker images
+        run: .github/scripts/hive/load_images.sh
+
+      - name: Move hive binary
+        run: |
+          mv /tmp/hive /usr/local/bin
+          chmod +x /usr/local/bin/hive
+
+      - name: Checkout hive tests
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ethereum/hive
+          ref: master
+          path: hivetests
+          persist-credentials: false
+
+      - name: Run frame transaction simulator
+        env:
+          SCENARIO_SIM: ${{ matrix.scenario.sim }}
+          SCENARIO_LIMIT: ${{ matrix.scenario.limit }}
+          SCENARIO_LOGLEVEL: ${{ matrix.scenario.loglevel }}
+        run: |
+          .github/scripts/hive/run_simulator.sh "$SCENARIO_SIM" "$SCENARIO_LIMIT" "bogota" "$SCENARIO_LOGLEVEL"
+
+      - name: Parse hive output
+        run: |
+          find hivetests/workspace/logs -type f -name "*.json" ! -name "hive.json" | xargs -I {} python .github/scripts/hive/parse.py {} --exclusion .github/scripts/hive/expected_failures.yaml --ignored .github/scripts/hive/ignored_tests.yaml
+
+      - name: Print simulator output
+        if: ${{ failure() }}
+        run: |
+          cat hivetests/workspace/logs/*simulator*.log
+
+      - name: Print reth client logs
+        if: ${{ failure() }}
+        run: .github/scripts/hive/print_client_logs.sh
+
   test-osaka:
     timeout-minutes: 120
     strategy:
@@ -463,6 +539,7 @@ jobs:
   notify-on-error:
     needs:
       - test-amsterdam
+      - test-bogota-frames
       - test-osaka
     if: failure()
     runs-on: ubuntu-latest
