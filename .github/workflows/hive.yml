@@ -280,16 +280,20 @@ jobs:
         if: ${{ failure() }}
         run: .github/scripts/hive/print_client_logs.sh
 
-  test-bogota-frames:
+  test-bogota:
     timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
         scenario:
+          # consume-engine
           - sim: ethereum/eels/consume-engine
             limit: .fork_Bogota.
           - sim: ethereum/eels/consume-engine
             limit: .*8141.*
+          - sim: ethereum/eels/consume-engine
+            limit: .*tests/amsterdam/eip8141_frame_transactions.*
+          # consume-rlp
           - sim: ethereum/eels/consume-rlp
             limit: .fork_Bogota.
           - sim: ethereum/eels/consume-rlp
@@ -297,8 +301,9 @@ jobs:
     needs:
       - build-reth
       - prepare-hive
-    name: Hive-Bogota / Frame transactions - ${{ matrix.scenario.limit }}
-    runs-on: ${{ github.repository == 'paradigmxyz/reth-oss' && 'depot-ubuntu-latest-8' || 'ubuntu-latest' }}
+    name: Hive-Bogota / ${{ matrix.scenario.sim }}${{ matrix.scenario.limit && format(' - {0}', matrix.scenario.limit) }}
+    # Use larger runners for eels tests to avoid OOM runner crashes
+    runs-on: ${{ github.repository == 'paradigmxyz/reth-oss' && (contains(matrix.scenario.sim, 'eels') && 'depot-ubuntu-latest-8' || 'depot-ubuntu-latest-4') || 'ubuntu-latest' }}
     permissions:
       contents: read
       issues: write
@@ -336,12 +341,25 @@ jobs:
           path: hivetests
           persist-credentials: false
 
-      - name: Run frame transaction simulator
+      - name: Run simulator
         env:
           SCENARIO_SIM: ${{ matrix.scenario.sim }}
           SCENARIO_LIMIT: ${{ matrix.scenario.limit }}
+          SCENARIO_TESTS: ${{ join(matrix.scenario.include, '|') }}
         run: |
-          .github/scripts/hive/run_simulator.sh "$SCENARIO_SIM" "$SCENARIO_LIMIT" "bogota"
+          LIMIT="$SCENARIO_LIMIT"
+          TESTS="$SCENARIO_TESTS"
+          if [ -n "$LIMIT" ] && [ -n "$TESTS" ]; then
+            FILTER="$LIMIT/$TESTS"
+          elif [ -n "$LIMIT" ]; then
+            FILTER="$LIMIT"
+          elif [ -n "$TESTS" ]; then
+            FILTER="/$TESTS"
+          else
+            FILTER="/"
+          fi
+          echo "filter: $FILTER"
+          .github/scripts/hive/run_simulator.sh "$SCENARIO_SIM" "$FILTER" "bogota"
 
       - name: Parse hive output
         run: |
@@ -541,7 +559,7 @@ jobs:
   notify-on-error:
     needs:
       - test-amsterdam
-      - test-bogota-frames
+      - test-bogota
       - test-osaka
     if: failure()
     runs-on: ubuntu-latest
