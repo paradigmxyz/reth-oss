@@ -346,7 +346,7 @@ jobs:
 
           # consume-engine
           - sim: ethereum/eels/consume-engine
-            limit: .*tests/amsterdam.*
+            limit: '.*tests/amsterdam/(?!eip8141_frame_transactions).*'
           - sim: ethereum/eels/consume-engine
             limit: .*tests/osaka.*
           - sim: ethereum/eels/consume-engine
@@ -368,11 +368,13 @@ jobs:
 
           # EIP-8141 frame transactions
           - sim: ethereum/eels/consume-engine
-            limit: .*tests/amsterdam/eip8141_frame_transactions.*
+            # Keep valid frame cases; the fixture's explicit rejection cases are covered by the
+            # transaction validation tests and are not useful for execution debugging.
+            limit: '^(?!.*(?:test_admission_validity\.py::test_admission_constraints.*max_cost_overflow|test_expiry_verifier\.py::test_expiry_verifier_frame.*expired|test_frame_transactions\.py::test_sender_frame_before_approval|test_frame_transactions\.py::test_verify_frame_reverts|test_target_resolution\.py::test_verify_frame_precompile_target|test_static_validity\.py::test_expiry_verifier_constraints.*(?:expiry_data_empty|expiry_data_too_long|expiry_data_too_short|expiry_frame_with_flags|expiry_frame_with_value|multiple_expiry_frames)|test_static_validity\.py::test_frame_constraints.*(?:approve_execution_frame_with_foreign_target|atomic_batch_followed_by_verify_frame|atomic_flag_on_last_frame|atomic_flag_on_verify_frame|default_frame_with_value|frame_gas_above_64_bits|frame_gas_sum_overflows|reserved_frame_flag|reserved_frame_flag_high|undefined_frame_mode|undefined_frame_mode_high|verify_frame_with_value)|test_static_validity\.py::test_gas_limit_cap_from_(?:calldata_floor|frame_gas).*above_cap|test_static_validity\.py::test_invalid_tx_fields.*(?:blob_count_above_max|blob_fee_without_blobs|frame_count_above_max|invalid_blob_hash_version|max_fee_overflow|no_frames|nonce_overflow|priority_fee_above_max_fee|priority_fee_overflow)|test_static_validity\.py::test_signature_constraints.*(?:arbitrary_with_signer|msg_all_zeros|msg_single_byte|msg_too_long|msg_too_short|p256_high_s|p256_not_on_curve|p256_r_at_curve_order|p256_r_zero|p256_s_zero|p256_signature_over_different_digest|p256_signature_too_long|p256_signature_too_short|p256_signer_mismatch|secp256k1_high_s|secp256k1_r_at_curve_order|secp256k1_r_zero|secp256k1_s_zero|secp256k1_signature_empty|secp256k1_signature_too_long|secp256k1_signature_too_short|secp256k1_signer_mismatch|secp256k1_v_27|secp256k1_v_2|secp256k1_wrong_key|signer_too_long|signer_too_short|undefined_signature_scheme|undefined_signature_scheme_high))).*tests/amsterdam/eip8141_frame_transactions.*'
 
           # consume-rlp
           - sim: ethereum/eels/consume-rlp
-            limit: .*tests/amsterdam.*
+            limit: '.*tests/amsterdam/(?!eip8141_frame_transactions).*'
           - sim: ethereum/eels/consume-rlp
             limit: .*tests/osaka.*
           - sim: ethereum/eels/consume-rlp
@@ -392,7 +394,7 @@ jobs:
           - sim: ethereum/eels/consume-rlp
             limit: .*tests/paris.*
           - sim: ethereum/eels/consume-rlp
-            limit: .*tests/amsterdam/eip8141_frame_transactions.*
+            limit: '^(?!.*(?:test_admission_validity\.py::test_admission_constraints.*max_cost_overflow|test_expiry_verifier\.py::test_expiry_verifier_frame.*expired|test_frame_transactions\.py::test_sender_frame_before_approval|test_frame_transactions\.py::test_verify_frame_reverts|test_target_resolution\.py::test_verify_frame_precompile_target|test_static_validity\.py::test_expiry_verifier_constraints.*(?:expiry_data_empty|expiry_data_too_long|expiry_data_too_short|expiry_frame_with_flags|expiry_frame_with_value|multiple_expiry_frames)|test_static_validity\.py::test_frame_constraints.*(?:approve_execution_frame_with_foreign_target|atomic_batch_followed_by_verify_frame|atomic_flag_on_last_frame|atomic_flag_on_verify_frame|default_frame_with_value|frame_gas_above_64_bits|frame_gas_sum_overflows|reserved_frame_flag|reserved_frame_flag_high|undefined_frame_mode|undefined_frame_mode_high|verify_frame_with_value)|test_static_validity\.py::test_gas_limit_cap_from_(?:calldata_floor|frame_gas).*above_cap|test_static_validity\.py::test_invalid_tx_fields.*(?:blob_count_above_max|blob_fee_without_blobs|frame_count_above_max|invalid_blob_hash_version|max_fee_overflow|no_frames|nonce_overflow|priority_fee_above_max_fee|priority_fee_overflow)|test_static_validity\.py::test_signature_constraints.*(?:arbitrary_with_signer|msg_all_zeros|msg_single_byte|msg_too_long|msg_too_short|p256_high_s|p256_not_on_curve|p256_r_at_curve_order|p256_r_zero|p256_s_zero|p256_signature_over_different_digest|p256_signature_too_long|p256_signature_too_short|p256_signer_mismatch|secp256k1_high_s|secp256k1_r_at_curve_order|secp256k1_r_zero|secp256k1_s_zero|secp256k1_signature_empty|secp256k1_signature_too_long|secp256k1_signature_too_short|secp256k1_signer_mismatch|secp256k1_v_27|secp256k1_v_2|secp256k1_wrong_key|signer_too_long|signer_too_short|undefined_signature_scheme|undefined_signature_scheme_high))).*tests/amsterdam/eip8141_frame_transactions.*'
 
           # execute-blobs
           - sim: ethereum/eels/execute-blobs
