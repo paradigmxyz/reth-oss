@@ -11,6 +11,7 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+tracing.workspace = true
 # reth
 reth-execution-errors.workspace = true
 reth-execution-types.workspace = true

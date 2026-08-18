@@ -478,6 +478,14 @@ where
         Evm: ConfigureEngineEvm<T::ExecutionData, Primitives = N>,
     {
         let parent_hash = input.parent_hash();
+        info!(
+            target: "engine::tree::payload_validator",
+            block = ?input.hash(),
+            parent = ?parent_hash,
+            transactions = input.transaction_count(),
+            gas_limit = input.gas_limit(),
+            "Starting payload validation"
+        );
         let _txpool_pause = self.txpool_prewarm.as_ref().map(txpool_prewarm::Handle::pause);
         let txpool_snapshot =
             self.txpool_prewarm.as_ref().and_then(|prewarmer| prewarmer.snapshot(parent_hash));
@@ -601,6 +609,15 @@ where
         let overlay_factory = OverlayStateProviderFactory::new(provider_factory, overlay_builder);
 
         let parallel_bal_execution = ensure_ok!(self.bal_path_eligible(env.decoded_bal.as_deref()));
+
+        info!(
+            target: "engine::tree::payload_validator",
+            block = ?env.hash,
+            transactions = env.transaction_count,
+            parallel_bal_execution,
+            has_bal = env.decoded_bal.is_some(),
+            "Prepared payload execution environment"
+        );
 
         // Prepare the state-root job before execution so it can provide streaming hooks.
         let mut state_root_job =

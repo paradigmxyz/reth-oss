@@ -65,6 +65,13 @@ where
     let worker_pool = runtime.bal_streaming_pool();
     let worker_count = worker_pool.current_num_threads().max(1).min(transaction_count);
 
+    tracing::info!(
+        target: "engine::tree::payload_processor::bal",
+        transaction_count,
+        worker_count,
+        "Starting parallel BAL block execution"
+    );
+
     worker_pool.in_place_scope(|scope| {
         execute_block_inner(
             scope,
@@ -147,6 +154,14 @@ where
         for output in ordered_worker_outputs(&result_rx, transaction_count) {
             let output = output?;
 
+            tracing::info!(
+                target: "engine::tree::payload_processor::bal",
+                tx_index = output.index,
+                signer = ?output.signer,
+                tx_gas_limit = output.tx_gas_limit,
+                "Committing BAL worker transaction in canonical order"
+            );
+
             gas_tracker.validate_tx_limit(output.tx_gas_limit)?;
             gas_tracker.record_result(output.result.result());
             canonical_executor.evm_mut().db_mut().bump_bal_index();
@@ -171,6 +186,13 @@ where
     };
 
     let built_bal = take_built_bal_and_log_divergence(&mut canonical_state, bal);
+
+    tracing::info!(
+        target: "engine::tree::payload_processor::bal",
+        transaction_count,
+        sender_count = senders.len(),
+        "Finished parallel BAL block execution"
+    );
 
     canonical_state.merge_transitions(BundleRetention::Reverts);
     Ok((
@@ -209,13 +231,13 @@ where
     DB: Database,
 {
     let built_bal = canonical_state.take_built_alloy_bal().expect("with_bal_builder set");
-    if tracing::enabled!(target: "engine::tree::payload_processor::bal", tracing::Level::DEBUG) &&
+    if tracing::enabled!(target: "engine::tree::payload_processor::bal", tracing::Level::INFO) &&
         built_bal.as_slice() != received_bal.as_slice()
     {
         let rebuilt = compute_block_access_list_hash(built_bal.as_slice());
         let expected = compute_block_access_list_hash(received_bal.as_slice());
         let div = received_bal.diff(built_bal.as_slice());
-        tracing::debug!(
+        tracing::info!(
             target: "engine::tree::payload_processor::bal",
             %rebuilt,
             %expected,

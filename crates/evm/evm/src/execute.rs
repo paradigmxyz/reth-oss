@@ -17,7 +17,8 @@ pub use reth_execution_errors::{
 use reth_execution_types::BlockExecutionResult;
 pub use reth_execution_types::{BlockExecutionOutput, ExecutionOutcome};
 use reth_primitives_traits::{
-    Block, HeaderTy, NodePrimitives, ReceiptTy, Recovered, RecoveredBlock, SealedHeader, TxTy,
+    Block, BlockBody, HeaderTy, NodePrimitives, ReceiptTy, Recovered, RecoveredBlock, SealedHeader,
+    TxTy,
 };
 use reth_storage_api::StateProvider;
 pub use reth_storage_errors::provider::ProviderError;
@@ -26,6 +27,7 @@ use revm::{
     database::{states::bundle_state::BundleRetention, BundleState, State},
     state::bal::Bal,
 };
+use tracing::info;
 
 /// A type that knows how to execute a block. It is assumed to operate on a
 /// [`crate::Evm`] internally and use [`State`] as database.
@@ -593,6 +595,13 @@ where
         block: &RecoveredBlock<<Self::Primitives as NodePrimitives>::Block>,
     ) -> Result<BlockExecutionResult<<Self::Primitives as NodePrimitives>::Receipt>, Self::Error>
     {
+        info!(
+            target: "reth::evm",
+            block = ?block.hash(),
+            number = block.header().number(),
+            transactions = block.body().transactions().len(),
+            "Starting block execution"
+        );
         let mut executor = self
             .strategy_factory
             .executor_for_block(&mut self.db, block)
@@ -612,7 +621,8 @@ where
             executor.evm_mut().db_mut().bump_bal_index();
         }
 
-        for tx in block.transactions_recovered() {
+        for (tx_index, tx) in block.transactions_recovered().enumerate() {
+            info!(target: "reth::evm", tx_index, "Executing transaction");
             executor.execute_transaction(tx)?;
             if has_bal {
                 executor.evm_mut().db_mut().bump_bal_index();
@@ -622,6 +632,14 @@ where
         let result = executor.apply_post_execution_changes()?;
 
         self.db.merge_transitions(BundleRetention::Reverts);
+
+        info!(
+            target: "reth::evm",
+            block = ?block.hash(),
+            gas_used = result.gas_used,
+            receipts = result.receipts.len(),
+            "Finished block execution"
+        );
 
         Ok(result)
     }

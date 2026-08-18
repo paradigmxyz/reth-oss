@@ -38,7 +38,7 @@ use std::{
         mpsc, Arc, OnceLock,
     },
 };
-use tracing::{debug, instrument, trace, warn, Span};
+use tracing::{debug, info, instrument, trace, warn, Span};
 
 pub mod bal;
 pub(crate) mod bal_prewarm_pool;
@@ -183,6 +183,13 @@ where
             + TryIntoHistoricalStateProvider
             + 'static,
     {
+        info!(
+            target: "engine::tree::payload_processor",
+            block = ?env.hash,
+            transactions = env.transaction_count,
+            parallel_bal_execution,
+            "Starting payload processor"
+        );
         let (prewarm_rx, execution_rx) =
             self.spawn_tx_iterator(transactions, env.transaction_count, parallel_bal_execution);
         let prewarm_handle = self.spawn_caching_with(
@@ -235,6 +242,7 @@ where
         let (execute_tx, execute_rx) = crossbeam_channel::bounded(transaction_count);
 
         if transaction_count == 0 {
+            info!(target: "engine::tree::payload_processor", "Payload has no transactions");
             // Empty block — nothing to do.
         } else if transaction_count < Self::SMALL_BLOCK_TX_THRESHOLD {
             // Sequential path for small blocks — avoids rayon work-stealing setup and
@@ -244,6 +252,11 @@ where
                 transaction_count,
                 "using sequential sig recovery for small block"
             );
+            info!(
+                target: "engine::tree::payload_processor",
+                transaction_count,
+                "Using sequential transaction conversion"
+            );
             self.executor.spawn_blocking_named("tx-iterator", move || {
                 let (transactions, convert) = transactions.into_parts();
                 convert_serial(transactions.into_iter(), &convert, &prewarm_tx, &execute_tx);
@@ -251,6 +264,12 @@ where
         } else {
             // Parallel path — recover signatures in parallel on rayon, stream results
             // to prewarming and execution.
+            info!(
+                target: "engine::tree::payload_processor",
+                transaction_count,
+                parallel_bal_execution,
+                "Using parallel transaction conversion"
+            );
             let executor = self.executor.clone();
             self.executor.spawn_blocking_named("tx-iterator", move || {
                 let (transactions, convert) = transactions.into_parts();
