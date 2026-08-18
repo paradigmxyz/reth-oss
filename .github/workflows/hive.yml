@@ -391,6 +391,8 @@ jobs:
             limit: .*tests/frontier.*
           - sim: ethereum/eels/consume-rlp
             limit: .*tests/paris.*
+          - sim: ethereum/eels/consume-rlp
+            limit: .*tests/amsterdam/eip8141_frame_transactions.*
 
           # execute-blobs
           - sim: ethereum/eels/execute-blobs
