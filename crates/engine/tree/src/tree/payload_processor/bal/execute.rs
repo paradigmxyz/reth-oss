@@ -113,6 +113,13 @@ where
     ReceiptTy<Evm::Primitives>: Clone,
 {
     let bal = input_bal.as_bal();
+    let decoded_bal_hash = compute_block_access_list_hash(bal.as_slice());
+    tracing::info!(
+        target: "engine::tree::payload_processor::bal",
+        decoded_bal_accounts = bal.len(),
+        %decoded_bal_hash,
+        "Decoded BAL supplied by execution payload"
+    );
     let input_bal_revm = convert_alloy_to_revm_bal(bal)?;
 
     let block_gas_limit = evm_env.block_env.gas_limit();

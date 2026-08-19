@@ -1346,6 +1346,14 @@ where
         let block_access_list_hash = built_bal
             .as_ref()
             .map(|bal| compute_block_access_list_hash_with_buf(bal, &mut self.bal_hash_buf));
+        info!(
+            target: "engine::tree::payload_validator",
+            block = ?block.num_hash(),
+            built_bal_accounts = built_bal.as_ref().map_or(0, |bal| bal.len()),
+            built_bal_hash = ?block_access_list_hash,
+            expected_payload_bal_hash = ?block.header().block_access_list_hash(),
+            "Comparing generated BAL with execution payload"
+        );
 
         if let Err(err) = self.consensus.validate_block_post_execution(
             block,
