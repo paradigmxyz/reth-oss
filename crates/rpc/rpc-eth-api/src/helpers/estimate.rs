@@ -192,7 +192,7 @@ pub trait EstimateCall: Call {
         };
 
         let gas_refund = match res.result {
-            ExecutionResult::Success { gas, .. } => gas.final_refunded(),
+            ExecutionResult::Success { gas, .. } |
             ExecutionResult::FrameTransaction { gas, .. } => gas.final_refunded(),
             ExecutionResult::Halt { reason, .. } => {
                 // here we don't check for invalid opcode because already executed with highest gas
