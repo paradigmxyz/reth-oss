@@ -371,31 +371,11 @@ jobs:
 
           # Focused EIP-8141 frame cases for engine debugging.
           - sim: ethereum/eels/consume-engine
-            include:
-              - '.*tests/amsterdam/eip8141_frame_transactions/test_target_resolution\.py::test_dead_target_entry_charge\[fork_Bogota-blockchain_test_engine_from_state_test-affordable\].*'
-              - '.*tests/amsterdam/eip8141_frame_transactions/test_expiry_verifier\.py::test_expiry_verifier_frame\[fork_Bogota-blockchain_test_engine_from_state_test-future_expiry\].*'
-              - '.*tests/amsterdam/eip8141_frame_transactions/test_target_resolution\.py::test_delegated_to_precompile_target\[fork_Bogota-blockchain_test_engine_from_state_test\].*'
-              - '.*tests/amsterdam/eip8141_frame_transactions/test_admission_validity\.py::test_admission_constraints\[fork_Bogota-blockchain_test_engine_from_state_test-max_cost_within_bound\].*'
-              - '.*tests/amsterdam/eip8141_frame_transactions/test_frame_transactions\.py::test_atomic_batch_rollback\[fork_Bogota-blockchain_test_engine_from_state_test-unrolls_executed_frames\].*'
-              - '.*tests/amsterdam/eip8141_frame_transactions/test_block_access_lists\.py::test_bal_unaffordable_designation_absent\[fork_Bogota-blockchain_test_engine\].*'
-              - '.*tests/amsterdam/eip8141_frame_transactions/test_target_resolution\.py::test_dead_target_entry_charge\[fork_Bogota-blockchain_test_engine_from_state_test-unaffordable\].*'
-              - '.*tests/amsterdam/eip8141_frame_transactions/test_block_access_lists\.py::test_bal_atomic_batch_write\[fork_Bogota-blockchain_test_engine-unrolled\].*'
-              - '.*tests/amsterdam/eip8141_frame_transactions/test_target_resolution\.py::test_verify_frame_delegated_to_precompile_target\[fork_Bogota-blockchain_test_engine_from_state_test\].*'
-              - '.*tests/amsterdam/eip8141_frame_transactions/test_expiry_verifier\.py::test_expiry_verifier_frame\[fork_Bogota-blockchain_test_engine_from_state_test-expiry_at_block_timestamp\].*'
+            limit: '.*tests/amsterdam/eip8141_frame_transactions/.*(?:test_target_resolution\.py::test_dead_target_entry_charge\[fork_Bogota-blockchain_test_engine_from_state_test-(?:affordable|unaffordable)\]|test_expiry_verifier\.py::test_expiry_verifier_frame\[fork_Bogota-blockchain_test_engine_from_state_test-(?:future_expiry|expiry_at_block_timestamp)\]|test_target_resolution\.py::test_delegated_to_precompile_target\[fork_Bogota-blockchain_test_engine_from_state_test\]|test_admission_validity\.py::test_admission_constraints\[fork_Bogota-blockchain_test_engine_from_state_test-max_cost_within_bound\]|test_frame_transactions\.py::test_atomic_batch_rollback\[fork_Bogota-blockchain_test_engine_from_state_test-unrolls_executed_frames\]|test_block_access_lists\.py::test_bal_unaffordable_designation_absent\[fork_Bogota-blockchain_test_engine\]|test_block_access_lists\.py::test_bal_atomic_batch_write\[fork_Bogota-blockchain_test_engine-unrolled\]).*'
 
           # Focused EIP-8141 frame cases for RLP debugging.
           - sim: ethereum/eels/consume-rlp
-            include:
-              - '.*tests/amsterdam/eip8141_frame_transactions/test_target_resolution\.py::test_dead_target_entry_charge\[fork_Bogota-blockchain_test_engine_from_state_test-affordable\].*'
-              - '.*tests/amsterdam/eip8141_frame_transactions/test_expiry_verifier\.py::test_expiry_verifier_frame\[fork_Bogota-blockchain_test_engine_from_state_test-future_expiry\].*'
-              - '.*tests/amsterdam/eip8141_frame_transactions/test_target_resolution\.py::test_delegated_to_precompile_target\[fork_Bogota-blockchain_test_engine_from_state_test\].*'
-              - '.*tests/amsterdam/eip8141_frame_transactions/test_admission_validity\.py::test_admission_constraints\[fork_Bogota-blockchain_test_engine_from_state_test-max_cost_within_bound\].*'
-              - '.*tests/amsterdam/eip8141_frame_transactions/test_frame_transactions\.py::test_atomic_batch_rollback\[fork_Bogota-blockchain_test_engine_from_state_test-unrolls_executed_frames\].*'
-              - '.*tests/amsterdam/eip8141_frame_transactions/test_block_access_lists\.py::test_bal_unaffordable_designation_absent\[fork_Bogota-blockchain_test_engine\].*'
-              - '.*tests/amsterdam/eip8141_frame_transactions/test_target_resolution\.py::test_dead_target_entry_charge\[fork_Bogota-blockchain_test_engine_from_state_test-unaffordable\].*'
-              - '.*tests/amsterdam/eip8141_frame_transactions/test_block_access_lists\.py::test_bal_atomic_batch_write\[fork_Bogota-blockchain_test_engine-unrolled\].*'
-              - '.*tests/amsterdam/eip8141_frame_transactions/test_target_resolution\.py::test_verify_frame_delegated_to_precompile_target\[fork_Bogota-blockchain_test_engine_from_state_test\].*'
-              - '.*tests/amsterdam/eip8141_frame_transactions/test_expiry_verifier\.py::test_expiry_verifier_frame\[fork_Bogota-blockchain_test_engine_from_state_test-expiry_at_block_timestamp\].*'
+            limit: '.*tests/amsterdam/eip8141_frame_transactions/.*(?:test_target_resolution\.py::test_dead_target_entry_charge\[fork_Bogota-blockchain_test_engine_from_state_test-(?:affordable|unaffordable)\]|test_expiry_verifier\.py::test_expiry_verifier_frame\[fork_Bogota-blockchain_test_engine_from_state_test-(?:future_expiry|expiry_at_block_timestamp)\]|test_target_resolution\.py::test_delegated_to_precompile_target\[fork_Bogota-blockchain_test_engine_from_state_test\]|test_admission_validity\.py::test_admission_constraints\[fork_Bogota-blockchain_test_engine_from_state_test-max_cost_within_bound\]|test_frame_transactions\.py::test_atomic_batch_rollback\[fork_Bogota-blockchain_test_engine_from_state_test-unrolls_executed_frames\]|test_block_access_lists\.py::test_bal_unaffordable_designation_absent\[fork_Bogota-blockchain_test_engine\]|test_block_access_lists\.py::test_bal_atomic_batch_write\[fork_Bogota-blockchain_test_engine-unrolled\]).*'
 
           # EIP-8141 frame transactions
           - sim: ethereum/eels/consume-engine
