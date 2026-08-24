@@ -46,7 +46,11 @@ use reth_stages_api::ControlFlow;
 use reth_storage_overlay::OverlayManager;
 use reth_tasks::{spawn_os_thread, utils::increase_thread_priority};
 use reth_trie::ComputedTrieData;
-use revm::interpreter::debug_unreachable;
+use revm::{
+    context_interface::cfg::gas_params::Eip2780TxInfo,
+    interpreter::{debug_unreachable, gas::calculate_initial_tx_gas},
+    primitives::hardfork::SpecId,
+};
 use state::TreeState;
 use std::{
     fmt::Debug,
@@ -181,8 +185,8 @@ where
 
 /// Performs the post-state eligibility portion of the EIP-7805 inclusion-list check.
 ///
-/// Full transaction execution validation remains a follow-up; this check intentionally does not
-/// make an invalid payload invalid, it only reports its inclusion-list status.
+/// This check intentionally does not make an invalid payload invalid; it only reports its
+/// inclusion-list status.
 fn inclusion_list_satisfied<N: NodePrimitives>(
     block: &RecoveredBlock<N::Block>,
     state: &StateProviderBox,
@@ -197,12 +201,50 @@ fn inclusion_list_satisfied<N: NodePrimitives>(
 
     for encoded in transactions {
         let Ok(transaction) = N::SignedTx::decode_2718_exact(encoded) else { continue };
+        // Blob transactions cannot be appended from the Engine API byte list because their blob
+        // sidecars are not supplied with the inclusion list.
+        if transaction.is_eip4844() {
+            continue
+        }
         if included.contains(&transaction.recalculate_hash()) ||
             transaction.gas_limit() > available_gas
         {
             continue
         }
         let Ok(sender) = transaction.try_recover() else { continue };
+
+        // Nonce and balance checks are only part of transaction validity. A transaction with
+        // insufficient intrinsic gas or an unusable fee cap cannot be appended and must not make
+        // an otherwise valid payload fail its inclusion-list check.
+        if block
+            .base_fee_per_gas()
+            .is_some_and(|base_fee| transaction.max_fee_per_gas() < base_fee as u128) ||
+            transaction
+                .max_priority_fee_per_gas()
+                .is_some_and(|tip| tip > transaction.max_fee_per_gas())
+        {
+            continue
+        }
+        let intrinsic_gas = calculate_initial_tx_gas(
+            SpecId::BOGOTA,
+            transaction.input(),
+            transaction.is_create(),
+            transaction.access_list().map_or(0, |list| list.len()) as u64,
+            transaction
+                .access_list()
+                .map_or(0, |list| list.iter().map(|item| item.storage_keys.len()).sum())
+                as u64,
+            transaction.authorization_list().map_or(0, |list| list.len()) as u64,
+            Some(Eip2780TxInfo {
+                value: transaction.value(),
+                is_self_transfer: transaction.kind().to() == Some(&sender),
+            }),
+        );
+        if transaction.gas_limit() < intrinsic_gas.initial_total_gas() ||
+            transaction.gas_limit() < intrinsic_gas.floor_gas
+        {
+            continue
+        }
         let account = state.basic_account(&sender)?.unwrap_or_default();
         let max_gas_cost = U256::from(transaction.gas_limit())
             .checked_mul(U256::from(transaction.max_fee_per_gas()))
