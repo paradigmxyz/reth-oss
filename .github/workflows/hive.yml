@@ -49,8 +49,7 @@ jobs:
       - name: Checkout hive tests
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          repository: Soubhik-10/hive
-          ref: glamsterdam-devnet-8-eels
+          repository: ethereum/hive
           path: hivetests
           persist-credentials: false
 
@@ -246,8 +245,8 @@ jobs:
       - name: Checkout hive tests
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          repository: Soubhik-10/hive
-          ref: glamsterdam-devnet-8-eels
+          repository: ethereum/hive
+          ref: master
           path: hivetests
           persist-credentials: false
 
@@ -433,8 +432,8 @@ jobs:
       - name: Checkout hive tests
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          repository: Soubhik-10/hive
-          ref: glamsterdam-devnet-8-eels
+          repository: ethereum/hive
+          ref: master
           path: hivetests
           persist-credentials: false
 
