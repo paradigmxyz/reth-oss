@@ -19,6 +19,7 @@ reth-storage-api.workspace = true
 reth-trie = { workspace = true, optional = true }
 
 # alloy
+alloy-consensus.workspace = true
 alloy-primitives.workspace = true
 alloy-rlp = { workspace = true, optional = true }
 alloy-rpc-types-debug = { workspace = true, optional = true }
@@ -29,7 +30,6 @@ revm.workspace = true
 [dev-dependencies]
 reth-trie.workspace = true
 reth-ethereum-forks.workspace = true
-alloy-consensus.workspace = true
 
 [features]
 default = ["std"]
