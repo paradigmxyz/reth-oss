@@ -5,9 +5,10 @@ use crate::{
     persistence::PersistenceHandle,
     tree::{error::InsertPayloadError, payload_validator::TreeCtx},
 };
-use alloy_consensus::{BlockHeader, Transaction, Typed2718};
+use alloy_consensus::{BlockHeader, Transaction};
 use alloy_eips::{
-    eip1898::BlockWithParent, eip2718::Decodable2718, merge::EPOCH_SLOTS, BlockNumHash, NumHash,
+    eip1898::BlockWithParent, eip2718::Decodable2718, eip4844::DATA_GAS_PER_BLOB,
+    merge::EPOCH_SLOTS, BlockNumHash, NumHash,
 };
 use alloy_primitives::{
     map::{B256Map, B256Set},
@@ -201,9 +202,9 @@ fn inclusion_list_satisfied<N: NodePrimitives>(
 
     for encoded in transactions {
         let Ok(transaction) = N::SignedTx::decode_2718_exact(encoded) else { continue };
-        // Blob transactions cannot be appended from the Engine API byte list because their blob
-        // sidecars are not supplied with the inclusion list.
-        if transaction.is_eip4844() {
+        // EIP-2681 reserves the maximum uint64 nonce. A transaction using it cannot be
+        // appended because execution would have to increment the sender nonce past the limit.
+        if transaction.nonce() == u64::MAX {
             continue
         }
         if included.contains(&transaction.recalculate_hash()) ||
@@ -249,7 +250,20 @@ fn inclusion_list_satisfied<N: NodePrimitives>(
         let max_gas_cost = U256::from(transaction.gas_limit())
             .checked_mul(U256::from(transaction.max_fee_per_gas()))
             .unwrap_or(U256::MAX);
-        let max_cost = max_gas_cost.checked_add(transaction.value()).unwrap_or(U256::MAX);
+        let max_blob_gas_cost = transaction
+            .blob_count()
+            .zip(transaction.max_fee_per_blob_gas())
+            .map(|(blob_count, max_fee_per_blob_gas)| {
+                U256::from(blob_count)
+                    .checked_mul(U256::from(DATA_GAS_PER_BLOB))
+                    .and_then(|cost| cost.checked_mul(U256::from(max_fee_per_blob_gas)))
+                    .unwrap_or(U256::MAX)
+            })
+            .unwrap_or_default();
+        let max_cost = max_gas_cost
+            .checked_add(max_blob_gas_cost)
+            .and_then(|cost| cost.checked_add(transaction.value()))
+            .unwrap_or(U256::MAX);
         if account.nonce == transaction.nonce() && account.balance >= max_cost {
             return Ok(false)
         }
