@@ -5,7 +5,7 @@ use crate::{
     persistence::PersistenceHandle,
     tree::{error::InsertPayloadError, payload_validator::TreeCtx},
 };
-use alloy_consensus::{BlockHeader, Transaction};
+use alloy_consensus::{BlockHeader, Transaction, Typed2718};
 use alloy_eips::{
     eip1898::BlockWithParent, eip2718::Decodable2718, merge::EPOCH_SLOTS, BlockNumHash, NumHash,
 };
