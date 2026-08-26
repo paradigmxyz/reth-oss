@@ -42,6 +42,7 @@ pub async fn run_embedded(
     let genesis: Genesis = serde_json::from_str(&fs::read_to_string(&genesis_path)?)
         .wrap_err_with(|| format!("failed to parse {}", genesis_path.display()))?;
     let genesis_config = &genesis.config;
+    println!("Genesis = {genesis:#?}");
     let chain = fixture.tests.join("chain.rlp");
     let headfcu = fixture.tests.join("headfcu.json");
     println!(
