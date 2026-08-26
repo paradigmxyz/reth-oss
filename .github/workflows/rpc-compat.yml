@@ -57,12 +57,26 @@ jobs:
       - name: Run RPC compatibility suite
         shell: bash
         run: |
+          set -o pipefail
+          mkdir -p target/rpc-compat
           rm -f target/rpc-compat/report.json
-          cargo run --locked -p reth-rpc-compat-tests --bin reth-rpc-compat --features embedded -- run --offline ||
+          cargo run --locked -p reth-rpc-compat-tests --bin reth-rpc-compat --features embedded -- run --offline 2>&1 |
+            tee target/rpc-compat/run.log ||
             test -f target/rpc-compat/report.json
       - name: Parse test result
         if: always()
-        run: cargo run --locked -p reth-rpc-compat-tests --bin reth-rpc-compat --no-default-features -- list-unexpected --color always --github-groups --fail-on-unexpected
+        shell: bash
+        run: |
+          if test -f target/rpc-compat/run.log; then
+            echo '::group::eth_simulate BAL diagnostics'
+            awk '
+              /eth_simulate BAL:/ { in_bal=1 }
+              in_bal { print }
+              in_bal && /^\)$/ { in_bal=0 }
+            ' target/rpc-compat/run.log
+            echo '::endgroup::'
+          fi
+          cargo run --locked -p reth-rpc-compat-tests --bin reth-rpc-compat --no-default-features -- list-unexpected --color always --github-groups --fail-on-unexpected
       - name: Upload reports
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
