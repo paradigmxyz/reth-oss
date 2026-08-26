@@ -6,7 +6,6 @@ use crate::{
 };
 use alloy_chains::Chain;
 use alloy_consensus::{transaction::TxHashRef, BlockHeader, Transaction as _};
-use alloy_eip7928::compute_block_access_list_hash;
 use alloy_eips::eip2718::WithEncoded;
 use alloy_evm::{
     block::TxResult,
@@ -41,7 +40,6 @@ use revm_inspectors::transfer::{
     TransferInspector, TransferOperation, TRANSFER_EVENT_TOPIC, TRANSFER_LOG_EMITTER,
 };
 use std::{collections::HashMap, rc::Rc};
-use tracing::trace;
 
 /// Fallback seconds added between simulated block timestamps when neither the user nor the chain
 /// hint provides a value.
@@ -507,23 +505,6 @@ where
     } else {
         builder.finish(NoopProvider::default(), None)?
     };
-
-    let bal_hash =
-        result.block_access_list.as_ref().map(|bal| compute_block_access_list_hash(bal.as_slice()));
-    trace!(
-        target: "rpc::eth_simulate::bal",
-        block_number = result.block.header().number(),
-        transaction_count = result.block.body().transactions().len(),
-        ?bal_hash,
-        bal = ?result.block_access_list,
-        "Built simulated block access list"
-    );
-    println!(
-        "eth_simulate BAL: block={} txs={} hash={bal_hash:?} value={:#?}",
-        result.block.header().number(),
-        result.block.body().transactions().len(),
-        result.block_access_list
-    );
 
     Ok((result, results))
 }

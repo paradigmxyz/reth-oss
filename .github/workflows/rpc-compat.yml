@@ -63,54 +63,9 @@ jobs:
           cargo run --locked -p reth-rpc-compat-tests --bin reth-rpc-compat --features embedded -- run --offline 2>&1 |
             tee target/rpc-compat/run.log ||
             test -f target/rpc-compat/report.json
-      - name: Parse test result
+      - name: Report test result
         if: always()
-        shell: bash
-        run: |
-          python3 - <<'PY'
-          import json
-          from pathlib import Path
-
-          report_path = Path("target/rpc-compat/report.json")
-          log_path = Path("target/rpc-compat/run.log")
-          if report_path.exists() and log_path.exists():
-              report = json.loads(report_path.read_text())
-              unexpected = {
-                  result["id"]
-                  for result in report["results"]
-                  if result["outcome"] in {"fail", "xpass"}
-              }
-              lines = log_path.read_text(errors="replace").splitlines(keepends=True)
-              current = None
-              bal = []
-
-              def emit():
-                  if current in unexpected and bal:
-                      print(f"::group::eth_simulate BAL: {current}")
-                      print("".join(bal), end="")
-                      print("::endgroup::")
-
-              index = 0
-              while index < len(lines):
-                  line = lines[index]
-                  if line.startswith("RPC_COMPAT_TEST_START "):
-                      emit()
-                      current = line.removeprefix("RPC_COMPAT_TEST_START ").strip()
-                      bal = []
-                  elif "eth_simulate BAL:" in line:
-                      block = [line]
-                      if "Some(" in line and line.rstrip().endswith("("):
-                          index += 1
-                          while index < len(lines):
-                              block.append(lines[index])
-                              if lines[index].strip() == ")":
-                                  break
-                              index += 1
-                      bal.append("".join(block))
-                  index += 1
-              emit()
-          PY
-          cargo run --locked -p reth-rpc-compat-tests --bin reth-rpc-compat --no-default-features -- list-unexpected --color always --github-groups --fail-on-unexpected
+        run: cargo run --locked -p reth-rpc-compat-tests --bin reth-rpc-compat --no-default-features -- list-unexpected --color always --github-groups --fail-on-unexpected
       - name: Upload reports
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
