@@ -349,7 +349,7 @@ fn shared_precompile(precompile: Rc<DynPrecompile>) -> DynPrecompile {
     }
 }
 
-/// Appends newly observed ETH transfers to the cloned simulation result as RPC-only logs.
+/// Adds newly observed ETH transfers to the cloned simulation result as RPC-only logs.
 ///
 /// The underlying `TransferInspector` does not write these synthetic logs to the journal, so
 /// simulated receipts, blooms, and block hashes continue to reflect only contract-emitted logs.
@@ -368,7 +368,7 @@ pub fn append_transfer_logs<HaltReasonTy>(
         return
     };
 
-    logs.extend(transfers[*next_transfer..].iter().map(transfer_to_log));
+    logs.splice(0..0, transfers[*next_transfer..].iter().map(transfer_to_log));
     *next_transfer = transfers.len();
 }
 
