@@ -63,13 +63,166 @@ jobs:
           cargo run --locked -p reth-rpc-compat-tests --bin reth-rpc-compat --features embedded -- run --offline 2>&1 |
             tee target/rpc-compat/run.log ||
             test -f target/rpc-compat/report.json
-      - name: Report test result
+      - name: Parse test result
         if: always()
-        run: cargo run --locked -p reth-rpc-compat-tests --bin reth-rpc-compat --no-default-features -- list-unexpected --color always --github-groups --fail-on-unexpected
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          report_path = Path("target/rpc-compat/report.json")
+          log_path = Path("target/rpc-compat/run.log")
+          if report_path.exists() and log_path.exists():
+              report = json.loads(report_path.read_text())
+              unexpected = {
+                  result["id"]
+                  for result in report["results"]
+                  if result["outcome"] in {"fail", "xpass"}
+              }
+              lines = log_path.read_text(errors="replace").splitlines(keepends=True)
+              current = None
+              bal = []
+
+              def emit():
+                  if current in unexpected and bal:
+                      print(f"::group::eth_simulate BAL: {current}")
+                      print("".join(bal), end="")
+                      print("::endgroup::")
+
+              index = 0
+              while index < len(lines):
+                  line = lines[index]
+                  if line.startswith("RPC_COMPAT_TEST_START "):
+                      emit()
+                      current = line.removeprefix("RPC_COMPAT_TEST_START ").strip()
+                      bal = []
+                  elif "eth_simulate BAL:" in line:
+                      block = [line]
+                      if "Some(" in line and line.rstrip().endswith("("):
+                          index += 1
+                          while index < len(lines):
+                              block.append(lines[index])
+                              if lines[index].strip() == ")":
+                                  break
+                              index += 1
+                      bal.append("".join(block))
+                  index += 1
+              emit()
+          PY
+          cargo run --locked -p reth-rpc-compat-tests --bin reth-rpc-compat --no-default-features -- list-unexpected --color always --github-groups --fail-on-unexpected
       - name: Upload reports
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: rpc-compat-reports
           path: target/rpc-compat
+          if-no-files-found: warn
+
+  geth-fixture:
+    name: RPC compatibility against go-ethereum fixtures
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Checkout execution-apis
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: ethereum/execution-apis
+          ref: main
+          path: execution-apis
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: execution-apis/tools/go.mod
+          cache-dependency-path: execution-apis/tools/go.sum
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          cache-on-failure: true
+      - name: Generate fixtures with go-ethereum
+        working-directory: execution-apis
+        run: |
+          echo "execution-apis=$(git rev-parse HEAD)"
+          grep 'github.com/ethereum/go-ethereum ' tools/go.mod
+          make -C tools fill
+      - name: Check generated fixtures
+        run: cargo run --locked -p reth-rpc-compat-tests --bin reth-rpc-compat --no-default-features -- check --offline --fixture "$GITHUB_WORKSPACE/execution-apis"
+      - name: Run eth_simulate compatibility against generated fixtures
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p target/rpc-compat-geth
+          rm -f target/rpc-compat-geth/report.json
+          cargo run --locked -p reth-rpc-compat-tests --bin reth-rpc-compat --features embedded -- run \
+            --offline \
+            --fixture "$GITHUB_WORKSPACE/execution-apis" \
+            --include 'eth_simulateV1/*' \
+            --report-json "$GITHUB_WORKSPACE/target/rpc-compat-geth/report.json" \
+            --report-junit "$GITHUB_WORKSPACE/target/rpc-compat-geth/junit.xml" 2>&1 |
+            tee target/rpc-compat-geth/run.log ||
+            test -f target/rpc-compat-geth/report.json
+      - name: Report generated-fixture result
+        if: always()
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          report_path = Path("target/rpc-compat-geth/report.json")
+          log_path = Path("target/rpc-compat-geth/run.log")
+          if report_path.exists() and log_path.exists():
+              report = json.loads(report_path.read_text())
+              unexpected = {
+                  result["id"]
+                  for result in report["results"]
+                  if result["outcome"] in {"fail", "xpass"}
+              }
+              lines = log_path.read_text(errors="replace").splitlines(keepends=True)
+              current = None
+              bal = []
+
+              def emit():
+                  if current in unexpected and bal:
+                      print(f"::group::go-ethereum BAL: {current}")
+                      print("".join(bal), end="")
+                      print("::endgroup::")
+
+              index = 0
+              while index < len(lines):
+                  line = lines[index]
+                  if line.startswith("RPC_COMPAT_TEST_START "):
+                      emit()
+                      current = line.removeprefix("RPC_COMPAT_TEST_START ").strip()
+                      bal = []
+                  elif "eth_simulate BAL:" in line:
+                      block = [line]
+                      if "Some(" in line and line.rstrip().endswith("("):
+                          index += 1
+                          while index < len(lines):
+                              block.append(lines[index])
+                              if lines[index].strip() == ")":
+                                  break
+                              index += 1
+                      bal.append("".join(block))
+                  index += 1
+              emit()
+          PY
+          if test -f target/rpc-compat-geth/report.json; then
+            cargo run --locked -p reth-rpc-compat-tests --bin reth-rpc-compat --no-default-features -- list-unexpected \
+              --report target/rpc-compat-geth/report.json \
+              --color always --github-groups --fail-on-unexpected
+          fi
+      - name: Upload generated-fixture reports
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rpc-compat-geth-reports
+          path: target/rpc-compat-geth
           if-no-files-found: warn

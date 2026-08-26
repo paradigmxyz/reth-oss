@@ -54,6 +54,7 @@ impl<Engine: EngineTypes> Action<Engine> for RunRpcCompatTests {
                     results.push(TestResult::new(&test, Outcome::Skip, 0, None));
                     continue;
                 }
+                println!("RPC_COMPAT_TEST_START {}", test.id);
                 let test_started = Instant::now();
                 let result =
                     execute_test(&client, url.as_str(), &test, &self.config, &self.schemas).await;
@@ -167,7 +168,7 @@ async fn execute_exchange(
         .wrap_err_with(|| format!("{} exchange {} request failed", test.id, index + 1))?
         .text()
         .await?;
-    let mut actual: Value = serde_json::from_str(body.trim()).wrap_err_with(|| {
+    let actual: Value = serde_json::from_str(body.trim()).wrap_err_with(|| {
         format!("{} exchange {} returned invalid JSON: {body}", test.id, index + 1)
     })?;
     let expected = if let Some(variants) = variants {
@@ -175,7 +176,6 @@ async fn execute_exchange(
     } else {
         vec![exchange.expected.clone()]
     };
-    trim_zero_beneficiary_metadata(&test.id, method, &mut actual, &expected);
     match matcher::compare(&actual, &expected, test.spec_only, ignore_error_data, method, schemas) {
         Ok(()) => Ok(()),
         Err(error) => Err(eyre!(
@@ -185,37 +185,6 @@ async fn execute_exchange(
             exchange.request_raw,
             body
         )),
-    }
-}
-
-/// The compatibility fixture omits the empty zero-address beneficiary entry from the simulated
-/// BAL. Keep execution and beneficiary state unchanged, but compare the derived block metadata
-/// against the fixture for this one known fixture case.
-fn trim_zero_beneficiary_metadata(
-    test_id: &str,
-    method: &str,
-    actual: &mut Value,
-    expected: &[Value],
-) {
-    if method != "eth_simulateV1" || test_id != "eth_simulateV1/ethSimulate-blockhash-simple" {
-        return
-    }
-    let Some(expected) = expected.first() else { return };
-    let (Some(actual_blocks), Some(expected_blocks)) = (
-        actual.get_mut("result").and_then(Value::as_array_mut),
-        expected.get("result").and_then(Value::as_array),
-    ) else {
-        return
-    };
-    for (actual, expected) in actual_blocks.iter_mut().zip(expected_blocks) {
-        let (Some(actual), Some(expected)) = (actual.as_object_mut(), expected.as_object()) else {
-            continue
-        };
-        for field in ["hash", "size", "blockAccessListHash"] {
-            if let Some(value) = expected.get(field) {
-                actual.insert(field.to_string(), value.clone());
-            }
-        }
     }
 }
 
