@@ -54,6 +54,7 @@ impl<Engine: EngineTypes> Action<Engine> for RunRpcCompatTests {
                     results.push(TestResult::new(&test, Outcome::Skip, 0, None));
                     continue;
                 }
+                println!("RPC_COMPAT_TEST_START {}", test.id);
                 let test_started = Instant::now();
                 let result =
                     execute_test(&client, url.as_str(), &test, &self.config, &self.schemas).await;
