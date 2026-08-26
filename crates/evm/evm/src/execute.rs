@@ -510,16 +510,6 @@ where
         // merge all transitions into bundle state
         db.merge_transitions(BundleRetention::Reverts);
 
-        if let Some(bal) = db.bal_state.bal_builder.as_mut() {
-            bal.accounts.retain(|address, account| {
-                *address != Address::ZERO ||
-                    !account.account_info.nonce.is_empty() ||
-                    !account.account_info.balance.is_empty() ||
-                    !account.account_info.code.is_empty() ||
-                    !account.storage.storage.is_empty()
-            });
-        }
-
         let block_access_list = db.take_built_alloy_bal();
         let block_access_list_hash =
             block_access_list.as_ref().map(|bal| compute_block_access_list_hash(bal.as_slice()));
