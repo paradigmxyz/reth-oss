@@ -1,4 +1,5 @@
 use crate::primitives::alloy_primitives::{BlockNumber, StorageKey, StorageValue};
+use alloy_consensus::EMPTY_ROOT_HASH;
 use alloy_primitives::{Address, B256, U256};
 use core::ops::{Deref, DerefMut};
 use reth_primitives_traits::Account;
@@ -31,6 +32,9 @@ pub trait EvmStateProvider {
         account: Address,
         storage_key: StorageKey,
     ) -> ProviderResult<Option<StorageValue>>;
+
+    /// Returns whether the account has any non-empty storage.
+    fn has_storage(&self, address: &Address) -> ProviderResult<bool>;
 }
 
 // Blanket implementation of EvmStateProvider for any type that implements StateProvider.
@@ -56,6 +60,10 @@ impl<T: StateProvider> EvmStateProvider for T {
         storage_key: StorageKey,
     ) -> ProviderResult<Option<StorageValue>> {
         <T as StateProvider>::storage(self, account, storage_key)
+    }
+
+    fn has_storage(&self, address: &Address) -> ProviderResult<bool> {
+        Ok(self.storage_root(*address, Default::default())? != EMPTY_ROOT_HASH)
     }
 }
 
@@ -127,6 +135,10 @@ impl<DB: EvmStateProvider> Database for StateProviderDatabase<DB> {
         self.storage_ref(address, index)
     }
 
+    fn has_storage(&mut self, address: Address) -> Result<bool, Self::Error> {
+        self.0.has_storage(&address)
+    }
+
     /// Retrieves the block hash for a given block number.
     ///
     /// Returns `Ok` with the block hash if found, or the default hash otherwise.
@@ -159,6 +171,10 @@ impl<DB: EvmStateProvider> DatabaseRef for StateProviderDatabase<DB> {
     /// Returns `Ok` with the storage value, or the default value if not found.
     fn storage_ref(&self, address: Address, index: U256) -> Result<U256, Self::Error> {
         Ok(self.0.storage(address, B256::new(index.to_be_bytes()))?.unwrap_or_default())
+    }
+
+    fn has_storage_ref(&self, address: Address) -> Result<bool, Self::Error> {
+        self.0.has_storage(&address)
     }
 
     /// Retrieves the block hash for a given block number.

@@ -1,12 +1,13 @@
 use alloc::vec::Vec;
-use alloy_consensus::{proofs::calculate_receipt_root, BlockHeader, TxReceipt};
+use alloy_consensus::{proofs::calculate_receipt_root, BlockHeader, Transaction, TxReceipt};
 use alloy_eips::Encodable2718;
 use alloy_primitives::{Bloom, Bytes, B256};
 use reth_chainspec::EthereumHardforks;
 use reth_consensus::ConsensusError;
 use reth_execution_types::BlockExecutionResult;
 use reth_primitives_traits::{
-    receipt::gas_spent_by_transactions, Block, GotExpected, Receipt, RecoveredBlock,
+    receipt::gas_spent_by_transactions, Block, BlockBody, GotExpected, Receipt, RecoveredBlock,
+    SignedTransaction,
 };
 
 /// Validate a block with regard to execution results:
@@ -55,9 +56,50 @@ where
 {
     // Check if gas used matches the value set in header.
     if block.header().gas_used() != result.gas_used {
+        let gas_spent_by_tx = gas_spent_by_transactions(&result.receipts);
+        let receipt_cumulative_gas =
+            result.receipts.iter().map(TxReceipt::cumulative_gas_used).collect::<Vec<_>>();
+
+        tracing::error!(
+            target: "consensus::gas",
+            block_hash = ?block.hash(),
+            parent_hash = ?block.header().parent_hash(),
+            block_number = block.header().number(),
+            timestamp = block.header().timestamp(),
+            base_fee_per_gas = ?block.header().base_fee_per_gas(),
+            gas_limit = block.header().gas_limit(),
+            header_gas_used = block.header().gas_used(),
+            execution_gas_used = result.gas_used,
+            gas_delta = block.header().gas_used().abs_diff(result.gas_used),
+            transaction_count = block.body().transactions().len(),
+            receipt_count = result.receipts.len(),
+            ?gas_spent_by_tx,
+            ?receipt_cumulative_gas,
+            blob_gas_used = ?block.header().blob_gas_used(),
+            excess_blob_gas = ?block.header().excess_blob_gas(),
+            ?block_access_list_hash,
+            amsterdam_active = chain_spec.is_amsterdam_active_at_timestamp(block.header().timestamp()),
+            bogota_active = chain_spec.is_bogota_active_at_timestamp(block.header().timestamp()),
+            "block gas used mismatch details"
+        );
+
+        for (index, tx) in block.body().transactions().iter().enumerate() {
+            tracing::error!(
+                target: "consensus::gas",
+                tx_index = index,
+                tx_hash = ?tx.recalculate_hash(),
+                tx_nonce = tx.nonce(),
+                tx_gas_limit = tx.gas_limit(),
+                tx_input_len = tx.input().len(),
+                tx_to = ?tx.to(),
+                tx_value = ?tx.value(),
+                "block transaction gas details"
+            );
+        }
+
         return Err(ConsensusError::BlockGasUsed {
             gas: GotExpected { got: result.gas_used, expected: block.header().gas_used() },
-            gas_spent_by_tx: gas_spent_by_transactions(&result.receipts),
+            gas_spent_by_tx,
         })
     }
 
