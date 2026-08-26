@@ -29,7 +29,10 @@ use reth_primitives_traits::Recovered;
 use reth_revm::{
     cancelled::CancelOnDrop,
     database::StateProviderDatabase,
-    db::{bal::EvmDatabaseError, State},
+    db::{
+        bal::{Bal, EvmDatabaseError},
+        State,
+    },
 };
 use reth_rpc_convert::{RpcConvert, RpcTxReq};
 use reth_rpc_eth_types::{
@@ -102,14 +105,9 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
 
             self.spawn_with_state_at_block(block, move |this, db| {
                 let state_provider = db.database.0 .0;
-                let is_amsterdam = this
-                    .provider()
-                    .chain_spec()
-                    .is_amsterdam_active_at_timestamp(parent.timestamp().saturating_add(12));
                 let mut db = State::builder()
                     .with_database(StateProviderDatabase::new(&state_provider))
                     .with_bundle_update()
-                    .with_bal_builder_if(is_amsterdam)
                     .build();
                 let mut parent = parent;
 
@@ -145,6 +143,16 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                         .next_evm_env(&parent, &attributes)
                         .map_err(RethError::other)
                         .map_err(Self::Error::from_eth_err)?;
+
+                    // `finish` consumes the BAL builder, so a multi-block simulation must create
+                    // a new one for each Amsterdam-active block.
+                    db.bal_state.bal_builder = this
+                        .provider()
+                        .chain_spec()
+                        .is_amsterdam_active_at_timestamp(
+                            evm_env.block_env.timestamp().saturating_to(),
+                        )
+                        .then(Bal::new);
 
                     // Always disable EIP-3607
                     evm_env.cfg_env.disable_eip3607 = true;
