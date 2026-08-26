@@ -153,7 +153,7 @@ jobs:
           go mod download github.com/ethereum/go-ethereum
           geth_dir="$(go list -m -f '{{.Dir}}' github.com/ethereum/go-ethereum)"
           chmod u+w "$geth_dir/internal/ethapi/simulate.go"
-          python3 - "$geth_dir/internal/ethapi/simulate.go" ../cmd/rpctestgen/generate.go <<'PY'
+          python3 - "$geth_dir/internal/ethapi/simulate.go" cmd/rpctestgen/generate.go <<'PY'
           from pathlib import Path
           import sys
 
