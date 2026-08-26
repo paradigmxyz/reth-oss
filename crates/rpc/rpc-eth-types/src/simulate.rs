@@ -39,7 +39,7 @@ use revm::{
 use revm_inspectors::transfer::{
     TransferInspector, TransferOperation, TRANSFER_EVENT_TOPIC, TRANSFER_LOG_EMITTER,
 };
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, rc::Rc};
 
 /// Fallback seconds added between simulated block timestamps when neither the user nor the chain
 /// hint provides a value.
@@ -325,20 +325,20 @@ pub fn apply_precompile_overrides(
         for (dest, precompile) in extracted {
             // Dynamic lookups are only consulted for addresses absent from the main map.
             precompiles.apply_precompile(&dest, |_| None);
-            moved_precompiles.insert(dest, Arc::new(precompile));
+            moved_precompiles.insert(dest, Rc::new(precompile));
         }
 
         precompiles.set_precompile_lookup(move |address: &Address| -> Option<DynPrecompile> {
             moved_precompiles
                 .get(address)
-                .map(|precompile| shared_precompile(Arc::clone(precompile)))
+                .map(|precompile| shared_precompile(Rc::clone(precompile)))
         });
     }
 
     Ok(())
 }
 
-fn shared_precompile(precompile: Arc<DynPrecompile>) -> DynPrecompile {
+fn shared_precompile(precompile: Rc<DynPrecompile>) -> DynPrecompile {
     let id = precompile.precompile_id().clone();
     if precompile.supports_caching() {
         DynPrecompile::new(id, move |input| precompile.call(input))
@@ -392,7 +392,7 @@ fn transfer_to_log(transfer: &TransferOperation) -> Log {
 /// geth's per-call `sanitizeCall` behavior.
 ///
 /// [`TransactionRequest`]: alloy_rpc_types_eth::TransactionRequest
-#[expect(clippy::type_complexity)]
+#[expect(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn execute_transactions<S, T, F>(
     mut builder: S,
     state_provider: impl StateProvider,

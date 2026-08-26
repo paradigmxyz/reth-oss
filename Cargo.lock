@@ -10136,7 +10136,7 @@ dependencies = [
 
 [[package]]
 name = "reth-rpc-compat-tests"
-version = "2.4.1"
+version = "2.5.1"
 dependencies = [
  "alloy-genesis",
  "alloy-rpc-types-engine",
@@ -10156,7 +10156,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
- "sha2",
+ "sha2 0.10.9",
  "similar",
  "tar",
  "tempfile",
