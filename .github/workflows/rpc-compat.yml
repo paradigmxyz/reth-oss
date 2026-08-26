@@ -145,12 +145,60 @@ jobs:
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           cache-on-failure: true
+      - name: Instrument go-ethereum block access lists
+        working-directory: execution-apis/tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          go mod download github.com/ethereum/go-ethereum
+          geth_dir="$(go list -m -f '{{.Dir}}' github.com/ethereum/go-ethereum)"
+          chmod u+w "$geth_dir/internal/ethapi/simulate.go"
+          python3 - "$geth_dir/internal/ethapi/simulate.go" ../cmd/rpctestgen/generate.go <<'PY'
+          from pathlib import Path
+          import sys
+
+          simulate = Path(sys.argv[1])
+          source = simulate.read_text()
+          needle = '''\t// Assemble the block
+\tb := core.AssembleBlock(chainHeadReader, header, sim.state, blockBody, receipts, blockAccessList)
+
+\trepairLogs(callResults, b.Hash())'''
+          replacement = '''\t// Assemble the block
+\tb := core.AssembleBlock(chainHeadReader, header, sim.state, blockBody, receipts, blockAccessList)
+
+\taccessList := "<nil>"
+\tif b.AccessList() != nil {
+\t\taccessList = b.AccessList().PrettyPrint()
+\t}
+\tfmt.Printf("GETH_ETH_SIMULATE_BAL: block=%d txs=%d hash=%v\\n%sGETH_ETH_SIMULATE_BAL_END\\n", header.Number.Uint64(), len(block.Calls), b.BlockAccessListHash(), accessList)
+
+\trepairLogs(callResults, b.Hash())'''
+          if needle not in source:
+              raise SystemExit(f"Geth simulation hook not found in {simulate}")
+          simulate.write_text(source.replace(needle, replacement, 1))
+
+          generator = Path(sys.argv[2])
+          source = generator.read_text()
+          needle = '''\t\t\tfilename := fmt.Sprintf("%s/%s.io", methodDir, test.Name)
+\t\t\tfmt.Printf("generating %s", filename)'''
+          replacement = '''\t\t\tfilename := fmt.Sprintf("%s/%s.io", methodDir, test.Name)
+\t\t\tfmt.Printf("GETH_FIXTURE_TEST_START %s/%s\\n", methodTest.Name, test.Name)
+\t\t\tfmt.Printf("generating %s\\n", filename)'''
+          if needle not in source:
+              raise SystemExit(f"Fixture-generator hook not found in {generator}")
+          generator.write_text(source.replace(needle, replacement, 1))
+          PY
       - name: Generate fixtures with go-ethereum
         working-directory: execution-apis
+        shell: bash
         run: |
+          set -o pipefail
+          mkdir -p "$GITHUB_WORKSPACE/target/rpc-compat-geth"
           echo "execution-apis=$(git rev-parse HEAD)"
           grep 'github.com/ethereum/go-ethereum ' tools/go.mod
-          make -C tools fill
+          make -C tools build geth
+          tools/rpctestgen -v --bin tools/geth --chain tools/chain --out tests 2>&1 |
+            tee "$GITHUB_WORKSPACE/target/rpc-compat-geth/geth-fixture.log"
       - name: Check generated fixtures
         run: cargo run --locked -p reth-rpc-compat-tests --bin reth-rpc-compat --no-default-features -- check --offline --fixture "$GITHUB_WORKSPACE/execution-apis"
       - name: Run eth_simulate compatibility against generated fixtures
@@ -188,11 +236,11 @@ jobs:
               current = None
               bal = []
 
+              reth_bals = {}
+
               def emit():
                   if current in unexpected and bal:
-                      print(f"::group::go-ethereum BAL: {current}")
-                      print("".join(bal), end="")
-                      print("::endgroup::")
+                      reth_bals[current] = "".join(bal)
 
               index = 0
               while index < len(lines):
@@ -213,6 +261,45 @@ jobs:
                       bal.append("".join(block))
                   index += 1
               emit()
+
+              geth_bals = {}
+              fixture_log = Path("target/rpc-compat-geth/geth-fixture.log")
+              if fixture_log.exists():
+                  current = None
+                  lines = fixture_log.read_text(errors="replace").splitlines(keepends=True)
+                  index = 0
+                  while index < len(lines):
+                      line = lines[index]
+                      if line.startswith("GETH_FIXTURE_TEST_START "):
+                          current = line.removeprefix("GETH_FIXTURE_TEST_START ").strip()
+                      elif line.startswith("GETH_ETH_SIMULATE_BAL:") and current:
+                          block = [line]
+                          index += 1
+                          while index < len(lines):
+                              block.append(lines[index])
+                              if lines[index].strip() == "GETH_ETH_SIMULATE_BAL_END":
+                                  break
+                              index += 1
+                          geth_bals.setdefault(current, []).append("".join(block))
+                      index += 1
+
+              for test_id in sorted(unexpected):
+                  if not test_id.startswith("eth_simulateV1/"):
+                      continue
+                  print(f"::group::BAL comparison: {test_id}")
+                  print("--- go-ethereum BAL ---")
+                  print("".join(geth_bals.get(test_id, ["<no Geth BAL captured>\\n"])), end="")
+                  print("--- Reth BAL ---")
+                  print(reth_bals.get(test_id, "<no Reth BAL captured>\\n"), end="")
+                  print("::endgroup::")
+                  fixture_path = Path("execution-apis/tests") / f"{test_id}.io"
+                  if not fixture_path.exists():
+                      continue
+                  print(f"::group::go-ethereum expected response: {test_id}")
+                  for line in fixture_path.read_text(errors="replace").splitlines():
+                      if line.startswith("<<"):
+                          print(line)
+                  print("::endgroup::")
           PY
           if test -f target/rpc-compat-geth/report.json; then
             cargo run --locked -p reth-rpc-compat-tests --bin reth-rpc-compat --no-default-features -- list-unexpected \
