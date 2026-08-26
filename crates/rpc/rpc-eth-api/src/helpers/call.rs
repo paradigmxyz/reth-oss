@@ -102,9 +102,14 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
 
             self.spawn_with_state_at_block(block, move |this, db| {
                 let state_provider = db.database.0 .0;
+                let is_amsterdam = this
+                    .provider()
+                    .chain_spec()
+                    .is_amsterdam_active_at_timestamp(parent.timestamp().saturating_add(12));
                 let mut db = State::builder()
                     .with_database(StateProviderDatabase::new(&state_provider))
                     .with_bundle_update()
+                    .with_bal_builder_if(is_amsterdam)
                     .build();
                 let mut parent = parent;
 
