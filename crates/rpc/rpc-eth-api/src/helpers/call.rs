@@ -29,10 +29,8 @@ use reth_primitives_traits::Recovered;
 use reth_revm::{
     cancelled::CancelOnDrop,
     database::StateProviderDatabase,
-    db::{
-        bal::{Bal, EvmDatabaseError},
-        State,
-    },
+    db::{bal::EvmDatabaseError, State},
+    state::bal::Bal,
 };
 use reth_rpc_convert::{RpcConvert, RpcTxReq};
 use reth_rpc_eth_types::{
