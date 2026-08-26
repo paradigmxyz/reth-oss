@@ -352,18 +352,19 @@ where
             // Configure the executor to use the current state.
             trace!(target: "sync::stages::execution", number = block_number, txs = block.body().transactions().len(), "Executing block");
             if let Some(expected_bal_hash) = block.header().block_access_list_hash() {
-                info!(
-                    target: "sync::stages::execution::amsterdam_fixture",
-                    number = block_number,
-                    timestamp = block.header().timestamp(),
-                    txs = block.body().transactions().len(),
-                    gas_limit = block.header().gas_limit(),
-                    expected_gas_used = block.header().gas_used(),
-                    expected_state_root = ?block.header().state_root(),
-                    expected_bal_hash = ?expected_bal_hash,
-                    blob_gas_used = ?block.header().blob_gas_used(),
-                    excess_blob_gas = ?block.header().excess_blob_gas(),
-                    "Executing Amsterdam fixture block"
+                println!(
+                    "Amsterdam fixture block: number={} timestamp={} txs={} gas_limit={} \
+                     expected_gas_used={} expected_state_root={:?} expected_bal_hash={:?} \
+                     blob_gas_used={:?} excess_blob_gas={:?}",
+                    block_number,
+                    block.header().timestamp(),
+                    block.body().transactions().len(),
+                    block.header().gas_limit(),
+                    block.header().gas_used(),
+                    block.header().state_root(),
+                    expected_bal_hash,
+                    block.header().blob_gas_used(),
+                    block.header().excess_blob_gas(),
                 );
             }
 
@@ -389,14 +390,14 @@ where
             let bal_hash = built_bal.as_ref().map(|bal| bal.compute_hash_with_buf(&mut bal_buf));
 
             if block.header().block_access_list_hash().is_some() {
-                info!(
-                    target: "sync::stages::execution::amsterdam_fixture",
-                    number = block_number,
-                    actual_gas_used = result.gas_used,
-                    expected_gas_used = block.header().gas_used(),
-                    actual_bal_hash = ?bal_hash,
-                    expected_state_root = ?block.header().state_root(),
-                    "Executed Amsterdam fixture block"
+                println!(
+                    "Amsterdam fixture result: number={} actual_gas_used={} expected_gas_used={} \
+                     actual_bal_hash={:?} expected_state_root={:?}",
+                    block_number,
+                    result.gas_used,
+                    block.header().gas_used(),
+                    bal_hash,
+                    block.header().state_root(),
                 );
             }
 
