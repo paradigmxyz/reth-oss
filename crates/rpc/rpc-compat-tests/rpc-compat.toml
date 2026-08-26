@@ -1,6 +1,7 @@
 [fixture]
-repository = "ethereum/execution-apis"
-branch = "main"
+# use MysticRyuujin:amsterdam-chain
+repository = "MysticRyuujin/execution-apis"
+branch = "amsterdam-chain"
 github_token_env = "GITHUB_TOKEN"
 cache_dir = "../../../.cache/rpc-compat"
 tests_dir = "tests"
