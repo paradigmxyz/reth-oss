@@ -514,21 +514,25 @@ where
         let value = call.as_ref().value().unwrap_or_default();
         let gas_limit =
             call.as_ref().gas_limit().unwrap_or(default_gas_limit).min(tx_gas_limit_cap);
-        let balance = builder
-            .evm_mut()
-            .db_mut()
-            .basic(from)
-            .map_err(Into::into)?
-            .map(|account| account.balance)
-            .unwrap_or_default();
-        if balance < value {
-            return Err(EthApiError::other(EthSimulateError::InsufficientFundsForTransfer {
-                address: from,
-                cost: value,
-                balance,
-                gas_limit,
-            }))
+        let account = builder.evm_mut().db_mut().basic(from).map_err(Into::into)?;
+
+        // Geth checks the nonce overflow before transaction fee validation. In particular, this
+        // must also cover an omitted nonce filled from an account override.
+        let nonce = call.as_ref().nonce().or_else(|| account.as_ref().map(|account| account.nonce));
+        if !builder.evm().cfg_env().disable_nonce_check && nonce == Some(u64::MAX) {
+            return Err(EthApiError::other(EthSimulateError::NonceMaxValue))
         }
+
+        let balance = account.map(|account| account.balance).unwrap_or_default();
+        let max_fee_per_gas = call
+            .as_ref()
+            .max_fee_per_gas()
+            .or_else(|| call.as_ref().gas_price())
+            .unwrap_or_default();
+        let base_fee = builder.evm().block().basefee();
+        // Validation-off simulations set the block base fee to zero. Keeping this check based on
+        // the block environment avoids coupling this generic helper to revm's optional cfg flags.
+        let fee_is_valid = base_fee == 0 || max_fee_per_gas >= u128::from(base_fee);
 
         // Resolve transaction, populate missing fields and enforce calls
         // correctness.
@@ -541,6 +545,19 @@ where
             builder.evm_mut().db_mut(),
             converter,
         )?;
+
+        // Keep Geth's fee-validation error ahead of its value/funds error. The latter is a
+        // simulate-specific diagnostic and is only emitted once the transaction's fee cap is
+        // acceptable for the simulated block.
+        if fee_is_valid && balance < value {
+            return Err(EthApiError::other(EthSimulateError::InsufficientFundsForTransfer {
+                address: from,
+                cost: value,
+                balance,
+                gas_limit,
+            }))
+        }
+
         // Create transaction with an empty envelope.
         // The effect for a layer-2 execution client is that it does not charge L1 cost.
         let tx = WithEncoded::new(Default::default(), tx);
