@@ -121,6 +121,20 @@ pub enum EthSimulateError {
         /// Sender balance.
         balance: U256,
     },
+    /// Sender lacks the value required by a simulated top-level transfer.
+    #[error(
+        "err: insufficient funds for gas * price + value: address {address} have {balance} want {cost} (supplied gas {gas_limit})"
+    )]
+    InsufficientFundsForTransfer {
+        /// Sender address.
+        address: Address,
+        /// Transaction value.
+        cost: U256,
+        /// Sender balance.
+        balance: U256,
+        /// Gas supplied to the simulated transaction.
+        gas_limit: u64,
+    },
     /// Sender is not an EOA.
     #[error("sender is not an EOA")]
     SenderNotEOA,
@@ -144,7 +158,7 @@ impl EthSimulateError {
             Self::NonceMaxValue => INTERNAL_ERROR_CODE,
             Self::BaseFeePerGasTooLow => -38012,
             Self::IntrinsicGasTooLow => -38013,
-            Self::InsufficientFunds { .. } => -38014,
+            Self::InsufficientFunds { .. } | Self::InsufficientFundsForTransfer { .. } => -38014,
             Self::BlockGasLimitExceeded => -38015,
             Self::BlockNumberInvalid { .. } => -38020,
             Self::BlockTimestampInvalid { .. } => -38021,
@@ -496,6 +510,26 @@ where
             }
         }
 
+        let from = call.as_ref().from().unwrap_or(Address::ZERO);
+        let value = call.as_ref().value().unwrap_or_default();
+        let gas_limit =
+            call.as_ref().gas_limit().unwrap_or(default_gas_limit).min(tx_gas_limit_cap);
+        let balance = builder
+            .evm_mut()
+            .db_mut()
+            .basic(from)
+            .map_err(Into::into)?
+            .map(|account| account.balance)
+            .unwrap_or_default();
+        if balance < value {
+            return Err(EthApiError::other(EthSimulateError::InsufficientFundsForTransfer {
+                address: from,
+                cost: value,
+                balance,
+                gas_limit,
+            }))
+        }
+
         // Resolve transaction, populate missing fields and enforce calls
         // correctness.
         let tx = resolve_transaction(
@@ -571,7 +605,7 @@ pub fn resolve_transaction<DB: Database, Tx, T>(
     default_gas_limit: u64,
     block_base_fee_per_gas: u64,
     chain_id: u64,
-    disable_nonce_check: bool,
+    _disable_nonce_check: bool,
     db: &mut DB,
     converter: &T,
 ) -> Result<Recovered<Tx>, EthApiError>
@@ -595,11 +629,6 @@ where
             db.basic(from).map_err(Into::into)?.map(|acc| acc.nonce).unwrap_or_default(),
         );
     }
-    // eth_simulateV1 validation-off mode behaves like eth_call; avoid revm's max-nonce guard.
-    if disable_nonce_check && tx.as_ref().nonce() == Some(u64::MAX) {
-        tx.as_mut().set_nonce(0);
-    }
-
     if tx.as_ref().gas_limit().is_none() {
         tx.as_mut().set_gas_limit(default_gas_limit);
     }
@@ -803,6 +832,24 @@ mod tests {
 
         assert_eq!(err.code(), INTERNAL_ERROR_CODE);
         assert_eq!(err.message(), "nonce has max value");
+    }
+
+    #[test]
+    fn insufficient_transfer_error_matches_geth() {
+        let err = EthSimulateError::InsufficientFundsForTransfer {
+            address: address!("c000000000000000000000000000000000000000"),
+            cost: U256::from(1000),
+            balance: U256::ZERO,
+            gas_limit: 50_000_000,
+        }
+        .to_rpc_error();
+
+        assert_eq!(err.code(), -38014);
+        assert_eq!(
+            err.message(),
+            "err: insufficient funds for gas * price + value: address \
+             0xC000000000000000000000000000000000000000 have 0 want 1000 (supplied gas 50000000)"
+        );
     }
 
     #[test]

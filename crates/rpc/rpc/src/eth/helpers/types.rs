@@ -70,7 +70,7 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_transaction_wraps_max_nonce_when_nonce_check_disabled() {
+    fn test_resolve_transaction_preserves_max_nonce_when_nonce_check_disabled() {
         let mut db = CacheDB::<reth_revm::db::EmptyDBTyped<reth_errors::ProviderError>>::default();
         let rpc_converter = EthRpcConverter::new(EthReceiptConverter::new(MAINNET.clone()));
 
@@ -78,6 +78,6 @@ mod tests {
 
         let result = resolve_transaction(tx, 21000, 0, 1, true, &mut db, &rpc_converter).unwrap();
 
-        assert_eq!(result.nonce(), 0);
+        assert_eq!(result.nonce(), u64::MAX);
     }
 }

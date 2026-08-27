@@ -2,7 +2,7 @@
 
 use crate::{ConfigureEvm, Database, OnStateHook, TxEnvFor};
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
-use alloy_consensus::{BlockHeader, Header};
+use alloy_consensus::{BlockHeader, Header, Transaction as _};
 use alloy_eip7928::{compute_block_access_list_hash, BlockAccessList};
 use alloy_eips::eip2718::WithEncoded;
 pub use alloy_evm::block::{BlockExecutor, BlockExecutorFactory, GasOutput};
@@ -23,8 +23,8 @@ use reth_storage_api::StateProvider;
 pub use reth_storage_errors::provider::ProviderError;
 use reth_trie_common::{updates::TrieUpdates, HashedPostState};
 use revm::{
-    database::{states::bundle_state::BundleRetention, BundleState, State},
-    state::bal::Bal,
+    database::{states::bundle_state::BundleRetention, BundleState, DatabaseCommit, State},
+    state::{bal::Bal, Account},
 };
 
 /// A type that knows how to execute a block. It is assumed to operate on a
@@ -488,10 +488,25 @@ where
         f: impl FnOnce(&<Self::Executor as BlockExecutor>::Result) -> CommitChanges,
     ) -> Result<Option<GasOutput>, BlockExecutionError> {
         let (tx_env, tx) = tx.into_parts();
+        let caller = tx.signer();
+        let wraps_nonce = self.executor.evm().cfg_env().disable_nonce_check &&
+            tx.kind().is_call() &&
+            tx.nonce() == u64::MAX &&
+            self.executor
+                .evm()
+                .db()
+                .cache
+                .accounts
+                .get(&caller)
+                .and_then(|account| account.account_info())
+                .is_some_and(|account| account.nonce == u64::MAX);
         if let Some(gas_used) =
             self.executor.execute_transaction_with_commit_condition((tx_env, &tx), f)?
         {
             self.transactions.push(tx);
+            if wraps_nonce {
+                wrap_simulation_nonce(self.executor.evm_mut().db_mut(), caller);
+            }
             self.executor.evm_mut().db_mut().bump_bal_index();
             Ok(Some(gas_used))
         } else {
@@ -560,6 +575,26 @@ where
     fn into_executor(self) -> Self::Executor {
         self.executor
     }
+}
+
+/// Reproduce Geth's wrapping nonce increment for validation-off call simulations.
+///
+/// Normal block execution rejects `u64::MAX` before incrementing the sender nonce. Geth's
+/// `eth_simulateV1` validation-off path instead increments the nonce with wrapping arithmetic,
+/// so the transition must be reflected in both the state root and the BAL.
+fn wrap_simulation_nonce<DB: Database>(db: &mut State<DB>, address: Address) {
+    let Some(mut info) = db.cache.accounts.get(&address).and_then(|account| account.account_info())
+    else {
+        return
+    };
+    if info.nonce != u64::MAX {
+        return
+    }
+
+    info.nonce = 0;
+    let mut account = Account::from(info);
+    account.mark_touch();
+    db.commit([(address, account)].into_iter().collect());
 }
 
 /// A generic block executor that uses a [`BlockExecutor`] to
