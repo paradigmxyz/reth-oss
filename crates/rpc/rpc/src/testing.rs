@@ -23,8 +23,8 @@ use alloy_primitives::{
 };
 use alloy_rlp::Encodable;
 use alloy_rpc_types_engine::{
-    BlobsBundleV2, ExecutionData, ExecutionPayloadEnvelopeV5, ExecutionPayloadSidecar,
-    ExecutionPayloadV3, ForkchoiceState, PayloadAttributes, PraguePayloadFields,
+    BlobsBundleV2, ExecutionData, ExecutionPayloadEnvelopeV6, ExecutionPayloadSidecar,
+    ExecutionPayloadV4, ForkchoiceState, PayloadAttributes, PraguePayloadFields,
 };
 use async_trait::async_trait;
 use jsonrpsee::core::RpcResult;
@@ -290,18 +290,23 @@ where
         &self,
         request: TestingBuildBlockRequestV1,
         use_pool_transactions: bool,
-    ) -> Result<ExecutionPayloadEnvelopeV5, Eth::Error> {
+    ) -> Result<ExecutionPayloadEnvelopeV6, Eth::Error> {
         let payload = self
             .build_payload_v1(request, self.skip_invalid_transactions, use_pool_transactions)
             .await?;
         let fees = payload.fees();
         let requests = payload.requests().unwrap_or_default();
+        let block_access_list = payload.block_access_list().cloned().unwrap_or_default();
         let block = Arc::unwrap_or_clone(payload.into_block_arc());
         let block_hash = block.hash();
         let block = block.into_block().into_ethereum_block();
 
-        Ok(ExecutionPayloadEnvelopeV5 {
-            execution_payload: ExecutionPayloadV3::from_block_unchecked(block_hash, &block),
+        Ok(ExecutionPayloadEnvelopeV6 {
+            execution_payload: ExecutionPayloadV4::from_block_unchecked_with_bal(
+                block_hash,
+                &block,
+                block_access_list,
+            ),
             block_value: fees,
             blobs_bundle: BlobsBundleV2::empty(),
             should_override_builder: false,
@@ -422,7 +427,7 @@ where
         payload_attributes: PayloadAttributes,
         transactions: Option<Vec<Bytes>>,
         extra_data: Option<Bytes>,
-    ) -> RpcResult<ExecutionPayloadEnvelopeV5> {
+    ) -> RpcResult<ExecutionPayloadEnvelopeV6> {
         let use_pool_transactions = transactions.is_none();
         let request = TestingBuildBlockRequestV1 {
             parent_block_hash,

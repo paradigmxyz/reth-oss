@@ -501,7 +501,8 @@ impl<H: BlockHeader> BuildPendingEnv<H> for NextBlockEnvAttributes {
             parent_beacon_block_root: parent.parent_beacon_block_root().map(|_| B256::ZERO),
             withdrawals: parent.withdrawals_root().map(|_| Default::default()),
             extra_data: parent.extra_data().clone(),
-            slot_number: parent.slot_number().map(|slot| slot.saturating_add(1)),
+            // RPC-created pending/simulated blocks do not have consensus-layer slot attributes.
+            slot_number: None,
         };
 
         if attributes.parent_beacon_block_root.is_some() &&
@@ -559,12 +560,12 @@ mod tests {
     }
 
     #[test]
-    fn pending_env_increments_parent_slot_number() {
+    fn pending_env_does_not_set_slot_number() {
         let header = Header { slot_number: Some(7), ..Default::default() };
         let sealed = SealedHeader::new(header, B256::ZERO);
 
         let attrs = NextBlockEnvAttributes::build_pending_env(&sealed, None);
 
-        assert_eq!(attrs.slot_number, Some(8));
+        assert_eq!(attrs.slot_number, None);
     }
 }

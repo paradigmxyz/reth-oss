@@ -6,14 +6,20 @@ use crate::{
 };
 use alloy_chains::Chain;
 use alloy_consensus::{transaction::TxHashRef, BlockHeader, Transaction as _};
+use alloy_eip7928::compute_block_access_list_hash;
 use alloy_eips::eip2718::WithEncoded;
-use alloy_evm::{block::TxResult, precompiles::PrecompilesMap};
+use alloy_evm::{
+    block::TxResult,
+    precompiles::{DynPrecompile, Precompile, PrecompilesMap},
+};
 use alloy_network::{NetworkTransactionBuilder, TransactionBuilder};
+use alloy_primitives::{Log, LogData, B256};
 use alloy_rpc_types_eth::{
     simulate::{SimBlock, SimCallResult, SimulateError, SimulatedBlock},
     state::StateOverride,
     BlockId, BlockOverrides, BlockTransactionsKind,
 };
+use alloy_sol_types::SolValue;
 use jsonrpsee_types::{error::INTERNAL_ERROR_CODE, ErrorObject};
 use reth_evm::{
     execute::{BlockBuilder, BlockBuilderOutcome, BlockExecutor},
@@ -28,9 +34,14 @@ use reth_storage_api::{noop::NoopProvider, StateProvider};
 use revm::{
     context::Block,
     context_interface::result::ExecutionResult,
-    primitives::{Address, Bytes, TxKind, U256},
+    primitives::{eip7708::ETH_TRANSFER_LOG_ADDRESS, Address, Bytes, TxKind, U256},
     Database,
 };
+use revm_inspectors::transfer::{
+    TransferInspector, TransferKind, TransferOperation, TRANSFER_EVENT_TOPIC, TRANSFER_LOG_EMITTER,
+};
+use std::{collections::HashMap, rc::Rc};
+use tracing::trace;
 
 /// Fallback seconds added between simulated block timestamps when neither the user nor the chain
 /// hint provides a value.
@@ -110,6 +121,20 @@ pub enum EthSimulateError {
         /// Sender balance.
         balance: U256,
     },
+    /// Sender lacks the value required by a simulated top-level transfer.
+    #[error(
+        "err: insufficient funds for gas * price + value: address {address} have {balance} want {cost} (supplied gas {gas_limit})"
+    )]
+    InsufficientFundsForTransfer {
+        /// Sender address.
+        address: Address,
+        /// Transaction value.
+        cost: U256,
+        /// Sender balance.
+        balance: U256,
+        /// Gas supplied to the simulated transaction.
+        gas_limit: u64,
+    },
     /// Sender is not an EOA.
     #[error("sender is not an EOA")]
     SenderNotEOA,
@@ -133,7 +158,7 @@ impl EthSimulateError {
             Self::NonceMaxValue => INTERNAL_ERROR_CODE,
             Self::BaseFeePerGasTooLow => -38012,
             Self::IntrinsicGasTooLow => -38013,
-            Self::InsufficientFunds { .. } => -38014,
+            Self::InsufficientFunds { .. } | Self::InsufficientFundsForTransfer { .. } => -38014,
             Self::BlockGasLimitExceeded => -38015,
             Self::BlockNumberInvalid { .. } => -38020,
             Self::BlockTimestampInvalid { .. } => -38021,
@@ -289,13 +314,119 @@ pub fn apply_precompile_overrides(
         }
     }
 
-    precompiles.move_precompiles(moves).map_err(
-        |alloy_evm::precompiles::MovePrecompileError::NotAPrecompile(addr)| {
-            EthSimulateError::NotAPrecompile(addr)
-        },
-    )?;
+    // Validate every source before mutating the map, matching `move_precompiles`.
+    for (source, _) in &moves {
+        if precompiles.get(source).is_none() {
+            return Err(EthSimulateError::NotAPrecompile(*source))
+        }
+    }
+
+    // Extract all sources before handling destinations so swaps and chained moves retain the
+    // original precompiles.
+    let mut extracted = Vec::with_capacity(moves.len());
+    for (source, dest) in moves {
+        let mut moved_precompile = None;
+        precompiles.apply_precompile(&source, |existing| {
+            moved_precompile = existing;
+            None
+        });
+
+        if let Some(precompile) = moved_precompile {
+            extracted.push((dest, precompile));
+        }
+    }
+
+    if !extracted.is_empty() {
+        let mut moved_precompiles = HashMap::with_capacity(extracted.len());
+        for (dest, precompile) in extracted {
+            // Dynamic lookups are only consulted for addresses absent from the main map.
+            precompiles.apply_precompile(&dest, |_| None);
+            moved_precompiles.insert(dest, Rc::new(precompile));
+        }
+
+        precompiles.set_precompile_lookup(move |address: &Address| -> Option<DynPrecompile> {
+            moved_precompiles
+                .get(address)
+                .map(|precompile| shared_precompile(Rc::clone(precompile)))
+        });
+    }
 
     Ok(())
+}
+
+fn shared_precompile(precompile: Rc<DynPrecompile>) -> DynPrecompile {
+    let id = precompile.precompile_id().clone();
+    if precompile.supports_caching() {
+        DynPrecompile::new(id, move |input| precompile.call(input))
+    } else {
+        DynPrecompile::new_stateful(id, move |input| precompile.call(input))
+    }
+}
+
+/// Adds newly observed ETH transfers to the cloned simulation result as RPC-only logs.
+///
+/// The underlying `TransferInspector` does not write these synthetic logs to the journal, so
+/// simulated receipts, blooms, and block hashes continue to reflect only contract-emitted logs.
+pub fn append_transfer_logs<HaltReasonTy>(
+    inspector: &TransferInspector,
+    result: &mut ExecutionResult<HaltReasonTy>,
+    next_transfer: &mut usize,
+) {
+    let transfers = inspector.transfers();
+    if *next_transfer >= transfers.len() {
+        return
+    }
+
+    let ExecutionResult::Success { logs, .. } = result else {
+        *next_transfer = transfers.len();
+        return
+    };
+
+    append_transfer_logs_to_result(logs, &transfers[*next_transfer..]);
+    *next_transfer = transfers.len();
+}
+
+/// Inserts synthetic transfer logs alongside their EIP-7708 counterparts when available.
+///
+/// `traceTransfers` predates EIP-7708 and uses a distinct emitter. Geth returns synthetic logs
+/// before their protocol counterparts for calls and creates, but after them for self-destructs.
+/// The fallback preserves pre-Amsterdam behavior, where no protocol transfer log exists.
+fn append_transfer_logs_to_result(logs: &mut Vec<Log>, transfers: &[TransferOperation]) {
+    let mut protocol_log_start = 0;
+
+    for transfer in transfers {
+        let synthetic_log = transfer_to_log(transfer);
+        let matching_protocol_log =
+            logs.iter().enumerate().skip(protocol_log_start).find_map(|(index, log)| {
+                (log.address == ETH_TRANSFER_LOG_ADDRESS &&
+                    log.data.topics() == synthetic_log.data.topics() &&
+                    log.data.data == synthetic_log.data.data)
+                    .then_some(index)
+            });
+
+        if let Some(index) = matching_protocol_log {
+            let insertion_index =
+                if matches!(transfer.kind, TransferKind::SelfDestruct) { index + 1 } else { index };
+            logs.insert(insertion_index, synthetic_log);
+            // Skip the inserted synthetic log and its matched protocol log before pairing the
+            // next transfer. This also handles multiple identical transfers deterministically.
+            protocol_log_start = index + 2;
+        } else {
+            logs.push(synthetic_log);
+            protocol_log_start = logs.len();
+        }
+    }
+}
+
+fn transfer_to_log(transfer: &TransferOperation) -> Log {
+    let from = B256::from_slice(&transfer.from.abi_encode());
+    let to = B256::from_slice(&transfer.to.abi_encode());
+    let data = transfer.value.abi_encode();
+
+    Log {
+        address: TRANSFER_LOG_EMITTER,
+        data: LogData::new_unchecked(vec![TRANSFER_EVENT_TOPIC, from, to], data.into()),
+    }
 }
 
 /// Converts all [`TransactionRequest`]s into [`Recovered`] transactions and applies them to the
@@ -309,8 +440,8 @@ pub fn apply_precompile_overrides(
 /// geth's per-call `sanitizeCall` behavior.
 ///
 /// [`TransactionRequest`]: alloy_rpc_types_eth::TransactionRequest
-#[expect(clippy::type_complexity)]
-pub fn execute_transactions<S, T>(
+#[expect(clippy::too_many_arguments, clippy::type_complexity)]
+pub fn execute_transactions<S, T, F>(
     mut builder: S,
     state_provider: impl StateProvider,
     calls: Vec<RpcTxReq<T::Network>>,
@@ -318,6 +449,7 @@ pub fn execute_transactions<S, T>(
     chain_id: u64,
     compute_state_root: bool,
     converter: &T,
+    mut process_result: F,
 ) -> Result<
     (
         BlockBuilderOutcome<S::Primitives>,
@@ -328,6 +460,10 @@ pub fn execute_transactions<S, T>(
 where
     S: BlockBuilder<Executor: BlockExecutor<Evm: Evm<DB: Database<Error: Into<EthApiError>>>>>,
     T: RpcConvert<Primitives = S::Primitives>,
+    F: FnMut(
+        &<<S::Executor as BlockExecutor>::Evm as Evm>::Inspector,
+        &mut ExecutionResult<<<S::Executor as BlockExecutor>::Evm as Evm>::HaltReason>,
+    ),
 {
     builder.apply_pre_execution_changes()?;
 
@@ -374,6 +510,30 @@ where
             }
         }
 
+        let from = call.as_ref().from().unwrap_or(Address::ZERO);
+        let value = call.as_ref().value().unwrap_or_default();
+        let gas_limit =
+            call.as_ref().gas_limit().unwrap_or(default_gas_limit).min(tx_gas_limit_cap);
+        let account = builder.evm_mut().db_mut().basic(from).map_err(Into::into)?;
+
+        // Geth checks the nonce overflow before transaction fee validation. In particular, this
+        // must also cover an omitted nonce filled from an account override.
+        let nonce = call.as_ref().nonce().or_else(|| account.as_ref().map(|account| account.nonce));
+        if !builder.evm().cfg_env().disable_nonce_check && nonce == Some(u64::MAX) {
+            return Err(EthApiError::other(EthSimulateError::NonceMaxValue))
+        }
+
+        let balance = account.map(|account| account.balance).unwrap_or_default();
+        let max_fee_per_gas = call
+            .as_ref()
+            .max_fee_per_gas()
+            .or_else(|| call.as_ref().gas_price())
+            .unwrap_or_default();
+        let base_fee = builder.evm().block().basefee();
+        // Validation-off simulations set the block base fee to zero. Keeping this check based on
+        // the block environment avoids coupling this generic helper to revm's optional cfg flags.
+        let fee_is_valid = base_fee == 0 || max_fee_per_gas >= u128::from(base_fee);
+
         // Resolve transaction, populate missing fields and enforce calls
         // correctness.
         let tx = resolve_transaction(
@@ -385,6 +545,19 @@ where
             builder.evm_mut().db_mut(),
             converter,
         )?;
+
+        // Keep Geth's fee-validation error ahead of its value/funds error. The latter is a
+        // simulate-specific diagnostic and is only emitted once the transaction's fee cap is
+        // acceptable for the simulated block.
+        if fee_is_valid && balance < value {
+            return Err(EthApiError::other(EthSimulateError::InsufficientFundsForTransfer {
+                address: from,
+                cost: value,
+                balance,
+                gas_limit,
+            }))
+        }
+
         // Create transaction with an empty envelope.
         // The effect for a layer-2 execution client is that it does not charge L1 cost.
         let tx = WithEncoded::new(Default::default(), tx);
@@ -394,6 +567,10 @@ where
             tx_regular_gas_used = result.result().result.gas().block_regular_gas_used();
             results.push(result.result().result.clone())
         })?;
+
+        if let Some(result) = results.last_mut() {
+            process_result(builder.evm().inspector(), result);
+        }
 
         let gas_used = gas_output.tx_gas_used();
         if let Some(remaining_call_gas_limit) = remaining_call_gas_limit.as_mut() {
@@ -414,6 +591,23 @@ where
         builder.finish(NoopProvider::default(), None)?
     };
 
+    let bal_hash =
+        result.block_access_list.as_ref().map(|bal| compute_block_access_list_hash(bal.as_slice()));
+    trace!(
+        target: "rpc::eth_simulate::bal",
+        block_number = result.block.header().number(),
+        transaction_count = result.block.body().transactions().len(),
+        ?bal_hash,
+        bal = ?result.block_access_list,
+        "Built simulated block access list"
+    );
+    println!(
+        "eth_simulate BAL: block={} txs={} hash={bal_hash:?} value={:#?}",
+        result.block.header().number(),
+        result.block.body().transactions().len(),
+        result.block_access_list
+    );
+
     Ok((result, results))
 }
 
@@ -428,7 +622,7 @@ pub fn resolve_transaction<DB: Database, Tx, T>(
     default_gas_limit: u64,
     block_base_fee_per_gas: u64,
     chain_id: u64,
-    disable_nonce_check: bool,
+    _disable_nonce_check: bool,
     db: &mut DB,
     converter: &T,
 ) -> Result<Recovered<Tx>, EthApiError>
@@ -452,11 +646,6 @@ where
             db.basic(from).map_err(Into::into)?.map(|acc| acc.nonce).unwrap_or_default(),
         );
     }
-    // eth_simulateV1 validation-off mode behaves like eth_call; avoid revm's max-nonce guard.
-    if disable_nonce_check && tx.as_ref().nonce() == Some(u64::MAX) {
-        tx.as_mut().set_nonce(0);
-    }
-
     if tx.as_ref().gas_limit().is_none() {
         tx.as_mut().set_gas_limit(default_gas_limit);
     }
@@ -586,20 +775,73 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_precompile_overrides, sanitize_chain, EthSimulateError, INTERNAL_ERROR_CODE,
+        append_transfer_logs_to_result, apply_precompile_overrides, sanitize_chain,
+        transfer_to_log, EthSimulateError, INTERNAL_ERROR_CODE,
     };
     use crate::{error::ToRpcError, EthApiError};
     use alloy_chains::Chain;
     use alloy_consensus::Header;
-    use alloy_evm::precompiles::PrecompilesMap;
-    use alloy_primitives::{address, U256};
+    use alloy_evm::precompiles::{Precompile, PrecompilesMap};
+    use alloy_primitives::{address, Address, U256};
     use alloy_rpc_types_eth::{
         simulate::SimBlock,
         state::{AccountOverride, StateOverride},
         BlockOverrides, TransactionRequest,
     };
     use reth_primitives_traits::SealedHeader;
-    use revm::precompile::Precompiles;
+    use revm::{precompile::Precompiles, primitives::eip7708::ETH_TRANSFER_LOG_ADDRESS};
+    use revm_inspectors::transfer::{TransferKind, TransferOperation, TRANSFER_LOG_EMITTER};
+
+    #[test]
+    fn trace_transfer_logs_precede_matching_eip7708_logs() {
+        let first = TransferOperation {
+            kind: TransferKind::Call,
+            from: address!("c000000000000000000000000000000000000000"),
+            to: address!("c100000000000000000000000000000000000000"),
+            value: U256::from(1),
+        };
+        let second = TransferOperation {
+            kind: TransferKind::Call,
+            from: first.to,
+            to: address!("c200000000000000000000000000000000000000"),
+            value: U256::from(2),
+        };
+        let mut first_protocol_log = transfer_to_log(&first);
+        first_protocol_log.address = ETH_TRANSFER_LOG_ADDRESS;
+        let mut second_protocol_log = transfer_to_log(&second);
+        second_protocol_log.address = ETH_TRANSFER_LOG_ADDRESS;
+        let mut logs = vec![first_protocol_log, second_protocol_log];
+
+        append_transfer_logs_to_result(&mut logs, &[first.clone(), second.clone()]);
+
+        assert_eq!(logs.len(), 4);
+        assert_eq!(logs[0], transfer_to_log(&first));
+        assert_eq!(logs[1].address, ETH_TRANSFER_LOG_ADDRESS);
+        assert_eq!(logs[2], transfer_to_log(&second));
+        assert_eq!(logs[3].address, ETH_TRANSFER_LOG_ADDRESS);
+        assert_eq!(logs[0].address, TRANSFER_LOG_EMITTER);
+        assert_eq!(logs[2].address, TRANSFER_LOG_EMITTER);
+    }
+
+    #[test]
+    fn trace_selfdestruct_log_follows_matching_eip7708_log() {
+        let transfer = TransferOperation {
+            kind: TransferKind::SelfDestruct,
+            from: address!("c200000000000000000000000000000000000000"),
+            to: Address::ZERO,
+            value: U256::from(2_000_000),
+        };
+        let mut protocol_log = transfer_to_log(&transfer);
+        protocol_log.address = ETH_TRANSFER_LOG_ADDRESS;
+        let mut logs = vec![protocol_log];
+
+        append_transfer_logs_to_result(&mut logs, &[transfer.clone()]);
+
+        assert_eq!(logs.len(), 2);
+        assert_eq!(logs[0].address, ETH_TRANSFER_LOG_ADDRESS);
+        assert_eq!(logs[1], transfer_to_log(&transfer));
+        assert_eq!(logs[1].address, TRANSFER_LOG_EMITTER);
+    }
 
     #[test]
     fn nonce_max_value_error_uses_internal_error_code() {
@@ -607,6 +849,24 @@ mod tests {
 
         assert_eq!(err.code(), INTERNAL_ERROR_CODE);
         assert_eq!(err.message(), "nonce has max value");
+    }
+
+    #[test]
+    fn insufficient_transfer_error_matches_geth() {
+        let err = EthSimulateError::InsufficientFundsForTransfer {
+            address: address!("c000000000000000000000000000000000000000"),
+            cost: U256::from(1000),
+            balance: U256::ZERO,
+            gas_limit: 50_000_000,
+        }
+        .to_rpc_error();
+
+        assert_eq!(err.code(), -38014);
+        assert_eq!(
+            err.message(),
+            "err: insufficient funds for gas * price + value: address \
+             0xC000000000000000000000000000000000000000 have 0 want 1000 (supplied gas 50000000)"
+        );
     }
 
     #[test]
@@ -662,7 +922,7 @@ mod tests {
     }
 
     #[test]
-    fn moved_precompile_is_callable() {
+    fn moved_precompile_is_callable_but_not_warm() {
         let source = address!("0000000000000000000000000000000000000001");
         let dest = address!("0000000000000000000000000000000000123456");
         let mut state_overrides = StateOverride::default();
@@ -676,6 +936,50 @@ mod tests {
 
         assert!(precompiles.get(&source).is_none());
         assert!(precompiles.get(&dest).is_some());
+        assert!(!precompiles.addresses().any(|address| address == &dest));
+    }
+
+    #[test]
+    fn invalid_precompile_move_does_not_apply_valid_moves() {
+        let source = address!("0000000000000000000000000000000000000001");
+        let dest = address!("0000000000000000000000000000000000123456");
+        let invalid_source = address!("c100000000000000000000000000000000000000");
+        let invalid_dest = address!("c200000000000000000000000000000000000000");
+        let mut state_overrides = StateOverride::default();
+        state_overrides.insert(
+            source,
+            AccountOverride { move_precompile_to: Some(dest), ..Default::default() },
+        );
+        state_overrides.insert(
+            invalid_source,
+            AccountOverride { move_precompile_to: Some(invalid_dest), ..Default::default() },
+        );
+        let mut precompiles = PrecompilesMap::from_static(Precompiles::prague());
+
+        let err = apply_precompile_overrides(&state_overrides, &mut precompiles).unwrap_err();
+
+        assert!(matches!(err, EthSimulateError::NotAPrecompile(addr) if addr == invalid_source));
+        assert!(precompiles.get(&source).is_some());
+        assert!(precompiles.get(&dest).is_none());
+    }
+
+    #[test]
+    fn moved_precompile_replaces_existing_destination() {
+        let source = address!("0000000000000000000000000000000000000001");
+        let dest = address!("0000000000000000000000000000000000000004");
+        let mut state_overrides = StateOverride::default();
+        state_overrides.insert(
+            source,
+            AccountOverride { move_precompile_to: Some(dest), ..Default::default() },
+        );
+        let mut precompiles = PrecompilesMap::from_static(Precompiles::prague());
+        let source_id = precompiles.get(&source).unwrap().precompile_id().clone();
+
+        apply_precompile_overrides(&state_overrides, &mut precompiles).unwrap();
+
+        assert!(precompiles.get(&source).is_none());
+        assert_eq!(precompiles.get(&dest).unwrap().precompile_id(), &source_id);
+        assert!(!precompiles.addresses().any(|address| address == &dest));
     }
 
     #[test]
