@@ -38,7 +38,7 @@ use revm::{
     Database,
 };
 use revm_inspectors::transfer::{
-    TransferInspector, TransferOperation, TRANSFER_EVENT_TOPIC, TRANSFER_LOG_EMITTER,
+    TransferInspector, TransferKind, TransferOperation, TRANSFER_EVENT_TOPIC, TRANSFER_LOG_EMITTER,
 };
 use std::{collections::HashMap, rc::Rc};
 use tracing::trace;
@@ -374,10 +374,9 @@ pub fn append_transfer_logs<HaltReasonTy>(
 
 /// Inserts synthetic transfer logs alongside their EIP-7708 counterparts when available.
 ///
-/// `traceTransfers` predates EIP-7708 and uses a distinct emitter. Geth returns its synthetic
-/// log immediately before the protocol transfer log, so keep that order instead of prepending all
-/// synthetic logs as a batch. The fallback preserves pre-Amsterdam behavior, where no protocol
-/// transfer log exists.
+/// `traceTransfers` predates EIP-7708 and uses a distinct emitter. Geth returns synthetic logs
+/// before their protocol counterparts for calls and creates, but after them for self-destructs.
+/// The fallback preserves pre-Amsterdam behavior, where no protocol transfer log exists.
 fn append_transfer_logs_to_result(logs: &mut Vec<Log>, transfers: &[TransferOperation]) {
     let mut protocol_log_start = 0;
 
@@ -392,7 +391,9 @@ fn append_transfer_logs_to_result(logs: &mut Vec<Log>, transfers: &[TransferOper
             });
 
         if let Some(index) = matching_protocol_log {
-            logs.insert(index, synthetic_log);
+            let insertion_index =
+                if matches!(transfer.kind, TransferKind::SelfDestruct) { index + 1 } else { index };
+            logs.insert(insertion_index, synthetic_log);
             // Skip the inserted synthetic log and its matched protocol log before pairing the
             // next transfer. This also handles multiple identical transfers deterministically.
             protocol_log_start = index + 2;
@@ -735,7 +736,7 @@ mod tests {
     use alloy_chains::Chain;
     use alloy_consensus::Header;
     use alloy_evm::precompiles::{Precompile, PrecompilesMap};
-    use alloy_primitives::{address, U256};
+    use alloy_primitives::{address, Address, U256};
     use alloy_rpc_types_eth::{
         simulate::SimBlock,
         state::{AccountOverride, StateOverride},
@@ -774,6 +775,26 @@ mod tests {
         assert_eq!(logs[3].address, ETH_TRANSFER_LOG_ADDRESS);
         assert_eq!(logs[0].address, TRANSFER_LOG_EMITTER);
         assert_eq!(logs[2].address, TRANSFER_LOG_EMITTER);
+    }
+
+    #[test]
+    fn trace_selfdestruct_log_follows_matching_eip7708_log() {
+        let transfer = TransferOperation {
+            kind: TransferKind::SelfDestruct,
+            from: address!("c200000000000000000000000000000000000000"),
+            to: Address::ZERO,
+            value: U256::from(2_000_000),
+        };
+        let mut protocol_log = transfer_to_log(&transfer);
+        protocol_log.address = ETH_TRANSFER_LOG_ADDRESS;
+        let mut logs = vec![protocol_log];
+
+        append_transfer_logs_to_result(&mut logs, &[transfer.clone()]);
+
+        assert_eq!(logs.len(), 2);
+        assert_eq!(logs[0].address, ETH_TRANSFER_LOG_ADDRESS);
+        assert_eq!(logs[1], transfer_to_log(&transfer));
+        assert_eq!(logs[1].address, TRANSFER_LOG_EMITTER);
     }
 
     #[test]
