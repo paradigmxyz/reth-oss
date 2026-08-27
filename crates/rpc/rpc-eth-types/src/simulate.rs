@@ -34,7 +34,7 @@ use reth_storage_api::{noop::NoopProvider, StateProvider};
 use revm::{
     context::Block,
     context_interface::result::ExecutionResult,
-    primitives::{Address, Bytes, TxKind, U256},
+    primitives::{eip7708::ETH_TRANSFER_LOG_ADDRESS, Address, Bytes, TxKind, U256},
     Database,
 };
 use revm_inspectors::transfer::{
@@ -368,8 +368,39 @@ pub fn append_transfer_logs<HaltReasonTy>(
         return
     };
 
-    logs.splice(0..0, transfers[*next_transfer..].iter().map(transfer_to_log));
+    append_transfer_logs_to_result(logs, &transfers[*next_transfer..]);
     *next_transfer = transfers.len();
+}
+
+/// Inserts synthetic transfer logs alongside their EIP-7708 counterparts when available.
+///
+/// `traceTransfers` predates EIP-7708 and uses a distinct emitter. Geth returns its synthetic
+/// log immediately before the protocol transfer log, so keep that order instead of prepending all
+/// synthetic logs as a batch. The fallback preserves pre-Amsterdam behavior, where no protocol
+/// transfer log exists.
+fn append_transfer_logs_to_result(logs: &mut Vec<Log>, transfers: &[TransferOperation]) {
+    let mut protocol_log_start = 0;
+
+    for transfer in transfers {
+        let synthetic_log = transfer_to_log(transfer);
+        let matching_protocol_log =
+            logs.iter().enumerate().skip(protocol_log_start).find_map(|(index, log)| {
+                (log.address == ETH_TRANSFER_LOG_ADDRESS &&
+                    log.data.topics() == synthetic_log.data.topics() &&
+                    log.data.data == synthetic_log.data.data)
+                    .then_some(index)
+            });
+
+        if let Some(index) = matching_protocol_log {
+            logs.insert(index, synthetic_log);
+            // Skip the inserted synthetic log and its matched protocol log before pairing the
+            // next transfer. This also handles multiple identical transfers deterministically.
+            protocol_log_start = index + 2;
+        } else {
+            logs.push(synthetic_log);
+            protocol_log_start = logs.len();
+        }
+    }
 }
 
 fn transfer_to_log(transfer: &TransferOperation) -> Log {
@@ -697,7 +728,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_precompile_overrides, sanitize_chain, EthSimulateError, INTERNAL_ERROR_CODE,
+        append_transfer_logs_to_result, apply_precompile_overrides, sanitize_chain,
+        transfer_to_log, EthSimulateError, INTERNAL_ERROR_CODE,
     };
     use crate::{error::ToRpcError, EthApiError};
     use alloy_chains::Chain;
@@ -710,7 +742,39 @@ mod tests {
         BlockOverrides, TransactionRequest,
     };
     use reth_primitives_traits::SealedHeader;
-    use revm::precompile::Precompiles;
+    use revm::{precompile::Precompiles, primitives::eip7708::ETH_TRANSFER_LOG_ADDRESS};
+    use revm_inspectors::transfer::{TransferKind, TransferOperation, TRANSFER_LOG_EMITTER};
+
+    #[test]
+    fn trace_transfer_logs_precede_matching_eip7708_logs() {
+        let first = TransferOperation {
+            kind: TransferKind::Call,
+            from: address!("c000000000000000000000000000000000000000"),
+            to: address!("c100000000000000000000000000000000000000"),
+            value: U256::from(1),
+        };
+        let second = TransferOperation {
+            kind: TransferKind::Call,
+            from: first.to,
+            to: address!("c200000000000000000000000000000000000000"),
+            value: U256::from(2),
+        };
+        let mut first_protocol_log = transfer_to_log(&first);
+        first_protocol_log.address = ETH_TRANSFER_LOG_ADDRESS;
+        let mut second_protocol_log = transfer_to_log(&second);
+        second_protocol_log.address = ETH_TRANSFER_LOG_ADDRESS;
+        let mut logs = vec![first_protocol_log, second_protocol_log];
+
+        append_transfer_logs_to_result(&mut logs, &[first.clone(), second.clone()]);
+
+        assert_eq!(logs.len(), 4);
+        assert_eq!(logs[0], transfer_to_log(&first));
+        assert_eq!(logs[1].address, ETH_TRANSFER_LOG_ADDRESS);
+        assert_eq!(logs[2], transfer_to_log(&second));
+        assert_eq!(logs[3].address, ETH_TRANSFER_LOG_ADDRESS);
+        assert_eq!(logs[0].address, TRANSFER_LOG_EMITTER);
+        assert_eq!(logs[2].address, TRANSFER_LOG_EMITTER);
+    }
 
     #[test]
     fn nonce_max_value_error_uses_internal_error_code() {
