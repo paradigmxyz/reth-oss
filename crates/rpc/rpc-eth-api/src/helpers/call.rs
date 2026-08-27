@@ -154,15 +154,14 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                         .map_err(RethError::other)
                         .map_err(Self::Error::from_eth_err)?;
 
-                    // `finish` consumes the BAL builder, so a multi-block simulation must create
-                    // a new one for each Amsterdam-active block.
-                    db.bal_state.bal_builder = this
-                        .provider()
-                        .chain_spec()
-                        .is_amsterdam_active_at_timestamp(
+                    // State overrides are synthetic initial state and must not be included in the
+                    // block's BAL. Keep the builder disabled until after the overrides are applied
+                    // below; transaction execution will still record accesses to overridden slots.
+                    let is_amsterdam =
+                        this.provider().chain_spec().is_amsterdam_active_at_timestamp(
                             evm_env.block_env.timestamp().saturating_to(),
-                        )
-                        .then(Bal::new);
+                        );
+                    db.bal_state.bal_builder = None;
 
                     // Always disable EIP-3607
                     evm_env.cfg_env.disable_eip3607 = true;
@@ -213,6 +212,11 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                         apply_state_overrides(state_overrides.clone(), &mut db)
                             .map_err(Self::Error::from_eth_err)?;
                     }
+
+                    // `finish` consumes the BAL builder, so a multi-block simulation must create
+                    // a new one for each Amsterdam-active block. This must happen after state
+                    // overrides so their setup commits remain outside the BAL.
+                    db.bal_state.bal_builder = is_amsterdam.then(Bal::new);
 
                     let chain_id = evm_env.cfg_env.chain_id;
 
