@@ -130,6 +130,18 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
 
                 for block in block_state_calls {
                     let SimBlock { block_overrides, state_overrides, calls } = block;
+                    // Geth's validation-off `NoBaseFee` path skips fee settlement when both
+                    // execution fee caps are zero. Revm otherwise loads the beneficiary even
+                    // when its computed reward is zero, which adds an empty zero-coinbase entry
+                    // to the Amsterdam BAL. This must be block-wide: a fee-bearing call in the
+                    // same simulated block still needs normal fee settlement.
+                    let has_only_zero_fee_calls = !calls.is_empty() &&
+                        calls.iter().all(|call| {
+                            let call = call.as_ref();
+                            call.gas_price().unwrap_or_default() == 0 &&
+                                call.max_fee_per_gas().unwrap_or_default() == 0 &&
+                                call.max_priority_fee_per_gas().unwrap_or_default() == 0
+                        });
 
                     let attributes = this
                         .pending_env_builder()
@@ -165,6 +177,9 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                         // If not explicitly required, we disable nonce check <https://github.com/paradigmxyz/reth/issues/16108>
                         evm_env.cfg_env.disable_nonce_check = true;
                         evm_env.cfg_env.disable_base_fee = true;
+                        // Match the Geth behavior described above without suppressing empty-block
+                        // system-call accesses or fee settlement for explicit-fee calls.
+                        evm_env.cfg_env.disable_fee_charge = has_only_zero_fee_calls;
                         evm_env.block_env.inner_mut().basefee = 0;
                     }
 
