@@ -14,17 +14,18 @@ use alloy_rpc_types_engine::{
     ExecutionPayloadBodyV2, ExecutionPayloadInputV2, ExecutionPayloadSidecar, ExecutionPayloadV1,
     ExecutionPayloadV3, ExecutionPayloadV4, ForkchoiceState, ForkchoiceUpdated,
     ForkchoiceUpdatedResponseV2, PayloadId, PayloadStatus, PayloadStatusV2, PraguePayloadFields,
-    MAX_BYTES_PER_INCLUSION_LIST,
 };
 use async_trait::async_trait;
 use jsonrpsee_core::{server::RpcModule, RpcResult};
 use reth_chainspec::EthereumHardforks;
-use reth_engine_primitives::{ConsensusEngineHandle, EngineApiValidator, EngineTypes};
+use reth_engine_primitives::{
+    ConsensusEngineHandle, EngineApiValidator, EngineTypes, ExecutionPayload,
+};
 use reth_network_api::{CellCustody, NetworkInfo};
 use reth_payload_builder::PayloadStore;
 use reth_payload_primitives::{
-    validate_payload_timestamp, EngineApiMessageVersion, MessageValidationKind,
-    PayloadOrAttributes, PayloadTypes,
+    validate_inclusion_list_size, validate_payload_timestamp, EngineApiMessageVersion,
+    MessageValidationKind, PayloadOrAttributes, PayloadTypes, MAX_INCLUSION_LIST_BYTES,
 };
 use reth_primitives_traits::{Block, BlockBody};
 use reth_rpc_api::{EngineApiServer, IntoEngineApiRpcModule};
@@ -300,6 +301,10 @@ where
         &self,
         payload: PayloadT::ExecutionData,
     ) -> EngineApiResult<PayloadStatusV2> {
+        let inclusion_list_transactions =
+            payload.inclusion_list_transactions().unwrap_or_default().to_vec();
+        validate_inclusion_list_size(&inclusion_list_transactions)?;
+        let block_hash = payload.block_hash();
         let payload_or_attrs = PayloadOrAttributes::<
             '_,
             PayloadT::ExecutionData,
@@ -309,7 +314,21 @@ where
             .validator
             .validate_version_specific_fields(EngineApiMessageVersion::V6, payload_or_attrs)?;
 
-        Ok(self.inner.beacon_consensus.new_payload(payload).await?.into())
+        let payload_status = self
+            .inner
+            .beacon_consensus
+            .new_payload_with_inclusion_list(payload, inclusion_list_transactions)
+            .await?;
+        let inclusion_list_satisfied = if payload_status.is_valid() {
+            self.inner
+                .beacon_consensus
+                .inclusion_list_status(block_hash)
+                .await
+                .map_err(|error| EngineApiError::Internal(Box::new(error)))?
+        } else {
+            None
+        };
+        Ok(PayloadStatusV2::new(payload_status, inclusion_list_satisfied))
     }
 
     /// Metrics version of `new_payload_v6`.
@@ -486,9 +505,7 @@ where
         for pool_tx in self.inner.tx_pool.best_transactions().without_blobs().without_updates() {
             let encoded = pool_tx.encoded_2718_consensus();
             let new_size = total_size + alloy_rlp::Encodable::length(&encoded);
-            if new_size + alloy_rlp::length_of_length(new_size) >
-                MAX_BYTES_PER_INCLUSION_LIST as usize
-            {
+            if new_size + alloy_rlp::length_of_length(new_size) > MAX_INCLUSION_LIST_BYTES {
                 break
             }
 
@@ -1395,12 +1412,12 @@ where
             sidecar: ExecutionPayloadSidecar::v6(
                 CancunPayloadFields { versioned_hashes, parent_beacon_block_root },
                 PraguePayloadFields { requests: execution_requests },
-                BogotaPayloadFields { inclusion_list_transactions },
+                BogotaPayloadFields {
+                    inclusion_list_transactions: inclusion_list_transactions.clone(),
+                },
             ),
         };
 
-        // TODO: perform structural validation of the inclusion list transactions and populate
-        // `inclusion_list_satisfied` for VALID payloads
         Ok(self.new_payload_v6_metered(payload).await?)
     }
 
@@ -1910,9 +1927,7 @@ mod tests {
 
         let res = EngineApiServer::get_inclusion_list_v1(&api).await.unwrap();
         assert_eq!(res, vec![expected]);
-        assert!(
-            alloy_rlp::list_length::<Bytes, [u8]>(&res) <= MAX_BYTES_PER_INCLUSION_LIST as usize
-        );
+        assert!(alloy_rlp::list_length::<Bytes, [u8]>(&res) <= MAX_INCLUSION_LIST_BYTES);
     }
 
     #[tokio::test]
