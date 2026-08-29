@@ -122,7 +122,7 @@ dependencies = [
 [[package]]
 name = "alloy-consensus"
 version = "2.4.1"
-source = "git+https://github.com/Rimeeeeee/alloy?branch=feat%2Feip8141-transaction#cae842d5917e5217d2981e7260c5b5677b12ac5f"
+source = "git+https://github.com/Rimeeeeee/alloy?branch=feat%2Feip8141-transaction#b73a6aa28c96d0d29594c5a6d871ec3821cfb3fc"
 dependencies = [
  "alloy-eips",
  "alloy-primitives",
@@ -149,7 +149,7 @@ dependencies = [
 [[package]]
 name = "alloy-consensus-any"
 version = "2.4.1"
-source = "git+https://github.com/Rimeeeeee/alloy?branch=feat%2Feip8141-transaction#cae842d5917e5217d2981e7260c5b5677b12ac5f"
+source = "git+https://github.com/Rimeeeeee/alloy?branch=feat%2Feip8141-transaction#b73a6aa28c96d0d29594c5a6d871ec3821cfb3fc"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -163,7 +163,7 @@ dependencies = [
 [[package]]
 name = "alloy-contract"
 version = "2.4.1"
-source = "git+https://github.com/Rimeeeeee/alloy?branch=feat%2Feip8141-transaction#cae842d5917e5217d2981e7260c5b5677b12ac5f"
+source = "git+https://github.com/Rimeeeeee/alloy?branch=feat%2Feip8141-transaction#b73a6aa28c96d0d29594c5a6d871ec3821cfb3fc"
 dependencies = [
  "alloy-consensus",
  "alloy-dyn-abi",
@@ -265,7 +265,7 @@ dependencies = [
 [[package]]
 name = "alloy-eip8141"
 version = "0.1.0"
-source = "git+https://github.com/Soubhik-10/eips?branch=feat%2Feip8141-basic-types#583fe436ef21a231f43e9a9c91cce28069a9d4fd"
+source = "git+https://github.com/Soubhik-10/eips?branch=feat%2Feip8141-basic-types#7904babec6888af5ab89d78e4e789781485157d0"
 dependencies = [
  "alloy-primitives",
  "alloy-rlp",
@@ -278,7 +278,7 @@ dependencies = [
 [[package]]
 name = "alloy-eips"
 version = "2.4.1"
-source = "git+https://github.com/Rimeeeeee/alloy?branch=feat%2Feip8141-transaction#cae842d5917e5217d2981e7260c5b5677b12ac5f"
+source = "git+https://github.com/Rimeeeeee/alloy?branch=feat%2Feip8141-transaction#b73a6aa28c96d0d29594c5a6d871ec3821cfb3fc"
 dependencies = [
  "alloy-eip2124",
  "alloy-eip2930",
@@ -323,7 +323,7 @@ dependencies = [
 [[package]]
 name = "alloy-genesis"
 version = "2.4.1"
-source = "git+https://github.com/Rimeeeeee/alloy?branch=feat%2Feip8141-transaction#cae842d5917e5217d2981e7260c5b5677b12ac5f"
+source = "git+https://github.com/Rimeeeeee/alloy?branch=feat%2Feip8141-transaction#b73a6aa28c96d0d29594c5a6d871ec3821cfb3fc"
 dependencies = [
  "alloy-eips",
  "alloy-primitives",
@@ -376,7 +376,7 @@ dependencies = [
 [[package]]
 name = "alloy-json-rpc"
 version = "2.4.1"
-source = "git+https://github.com/Rimeeeeee/alloy?branch=feat%2Feip8141-transaction#cae842d5917e5217d2981e7260c5b5677b12ac5f"
+source = "git+https://github.com/Rimeeeeee/alloy?branch=feat%2Feip8141-transaction#b73a6aa28c96d0d29594c5a6d871ec3821cfb3fc"
 dependencies = [
  "alloy-primitives",
  "alloy-sol-types",
@@ -390,7 +390,7 @@ dependencies = [
 [[package]]
 name = "alloy-network"
 version = "2.4.1"
-source = "git+https://github.com/Rimeeeeee/alloy?branch=feat%2Feip8141-transaction#cae842d5917e5217d2981e7260c5b5677b12ac5f"
+source = "git+https://github.com/Rimeeeeee/alloy?branch=feat%2Feip8141-transaction#b73a6aa28c96d0d29594c5a6d871ec3821cfb3fc"
 dependencies = [
  "alloy-consensus",
  "alloy-consensus-any",
@@ -415,7 +415,7 @@ dependencies = [
 [[package]]
 name = "alloy-network-primitives"
 version = "2.4.1"
-source = "git+https://github.com/Rimeeeeee/alloy?branch=feat%2Feip8141-transaction#cae842d5917e5217d2981e7260c5b5677b12ac5f"
+source = "git+https://github.com/Rimeeeeee/alloy?branch=feat%2Feip8141-transaction#b73a6aa28c96d0d29594c5a6d871ec3821cfb3fc"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -427,7 +427,7 @@ dependencies = [
 [[package]]
 name = "alloy-node-bindings"
 version = "2.4.1"
-source = "git+https://github.com/Rimeeeeee/alloy?branch=feat%2Feip8141-transaction#cae842d5917e5217d2981e7260c5b5677b12ac5f"
+source = "git+https://github.com/Rimeeeeee/alloy?branch=feat%2Feip8141-transaction#b73a6aa28c96d0d29594c5a6d871ec3821cfb3fc"
 dependencies = [
  "alloy-genesis",
  "alloy-hardforks 0.2.13",
@@ -480,7 +480,7 @@ dependencies = [
 [[package]]
 name = "alloy-provider"
 version = "2.4.1"
-source = "git+https://github.com/Rimeeeeee/alloy?branch=feat%2Feip8141-transaction#cae842d5917e5217d2981e7260c5b5677b12ac5f"
+source = "git+https://github.com/Rimeeeeee/alloy?branch=feat%2Feip8141-transaction#b73a6aa28c96d0d29594c5a6d871ec3821cfb3fc"
 dependencies = [
  "alloy-chains",
  "alloy-consensus",
@@ -524,7 +524,7 @@ dependencies = [
 [[package]]
 name = "alloy-pubsub"
 version = "2.4.1"
-source = "git+https://github.com/Rimeeeeee/alloy?branch=feat%2Feip8141-transaction#cae842d5917e5217d2981e7260c5b5677b12ac5f"
+source = "git+https://github.com/Rimeeeeee/alloy?branch=feat%2Feip8141-transaction#b73a6aa28c96d0d29594c5a6d871ec3821cfb3fc"
 dependencies = [
  "alloy-json-rpc",
  "alloy-primitives",
@@ -567,7 +567,7 @@ dependencies = [
 [[package]]
 name = "alloy-rpc-client"
 version = "2.4.1"
-source = "git+https://github.com/Rimeeeeee/alloy?branch=feat%2Feip8141-transaction#cae842d5917e5217d2981e7260c5b5677b12ac5f"
+source = "git+https://github.com/Rimeeeeee/alloy?branch=feat%2Feip8141-transaction#b73a6aa28c96d0d29594c5a6d871ec3821cfb3fc"
 dependencies = [
  "alloy-json-rpc",
  "alloy-primitives",
@@ -592,7 +592,7 @@ dependencies = [
 [[package]]
 name = "alloy-rpc-types"
 version = "2.4.1"
-source = "git+https://github.com/Rimeeeeee/alloy?branch=feat%2Feip8141-transaction#cae842d5917e5217d2981e7260c5b5677b12ac5f"
+source = "git+https://github.com/Rimeeeeee/alloy?branch=feat%2Feip8141-transaction#b73a6aa28c96d0d29594c5a6d871ec3821cfb3fc"
 dependencies = [
  "alloy-primitives",
  "alloy-rpc-types-engine",
@@ -604,7 +604,7 @@ dependencies = [
 [[package]]
 name = "alloy-rpc-types-admin"
 version = "2.4.1"
-source = "git+https://github.com/Rimeeeeee/alloy?branch=feat%2Feip8141-transaction#cae842d5917e5217d2981e7260c5b5677b12ac5f"
+source = "git+https://github.com/Rimeeeeee/alloy?branch=feat%2Feip8141-transaction#b73a6aa28c96d0d29594c5a6d871ec3821cfb3fc"
 dependencies = [
  "alloy-genesis",
  "alloy-primitives",
@@ -615,7 +615,7 @@ dependencies = [
 [[package]]
 name = "alloy-rpc-types-anvil"
 version = "2.4.1"
-source = "git+https://github.com/Rimeeeeee/alloy?branch=feat%2Feip8141-transaction#cae842d5917e5217d2981e7260c5b5677b12ac5f"
+source = "git+https://github.com/Rimeeeeee/alloy?branch=feat%2Feip8141-transaction#b73a6aa28c96d0d29594c5a6d871ec3821cfb3fc"
 dependencies = [
  "alloy-primitives",
  "alloy-rpc-types-eth",
@@ -626,7 +626,7 @@ dependencies = [
 [[package]]
 name = "alloy-rpc-types-any"
 version = "2.4.1"
-source = "git+https://github.com/Rimeeeeee/alloy?branch=feat%2Feip8141-transaction#cae842d5917e5217d2981e7260c5b5677b12ac5f"
+source = "git+https://github.com/Rimeeeeee/alloy?branch=feat%2Feip8141-transaction#b73a6aa28c96d0d29594c5a6d871ec3821cfb3fc"
 dependencies = [
  "alloy-consensus-any",
  "alloy-network-primitives",
@@ -640,7 +640,7 @@ dependencies = [
 [[package]]
 name = "alloy-rpc-types-beacon"
 version = "2.4.1"
-source = "git+https://github.com/Rimeeeeee/alloy?branch=feat%2Feip8141-transaction#cae842d5917e5217d2981e7260c5b5677b12ac5f"
+source = "git+https://github.com/Rimeeeeee/alloy?branch=feat%2Feip8141-transaction#b73a6aa28c96d0d29594c5a6d871ec3821cfb3fc"
 dependencies = [
  "alloy-eips",
  "alloy-primitives",
@@ -659,7 +659,7 @@ dependencies = [
 [[package]]
 name = "alloy-rpc-types-debug"
 version = "2.4.1"
-source = "git+https://github.com/Rimeeeeee/alloy?branch=feat%2Feip8141-transaction#cae842d5917e5217d2981e7260c5b5677b12ac5f"
+source = "git+https://github.com/Rimeeeeee/alloy?branch=feat%2Feip8141-transaction#b73a6aa28c96d0d29594c5a6d871ec3821cfb3fc"
 dependencies = [
  "alloy-primitives",
  "alloy-rlp",
@@ -671,7 +671,7 @@ dependencies = [
 [[package]]
 name = "alloy-rpc-types-engine"
 version = "2.4.1"
-source = "git+https://github.com/Rimeeeeee/alloy?branch=feat%2Feip8141-transaction#cae842d5917e5217d2981e7260c5b5677b12ac5f"
+source = "git+https://github.com/Rimeeeeee/alloy?branch=feat%2Feip8141-transaction#b73a6aa28c96d0d29594c5a6d871ec3821cfb3fc"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -691,7 +691,7 @@ dependencies = [
 [[package]]
 name = "alloy-rpc-types-eth"
 version = "2.4.1"
-source = "git+https://github.com/Rimeeeeee/alloy?branch=feat%2Feip8141-transaction#cae842d5917e5217d2981e7260c5b5677b12ac5f"
+source = "git+https://github.com/Rimeeeeee/alloy?branch=feat%2Feip8141-transaction#b73a6aa28c96d0d29594c5a6d871ec3821cfb3fc"
 dependencies = [
  "alloy-consensus",
  "alloy-consensus-any",
@@ -712,7 +712,7 @@ dependencies = [
 [[package]]
 name = "alloy-rpc-types-mev"
 version = "2.4.1"
-source = "git+https://github.com/Rimeeeeee/alloy?branch=feat%2Feip8141-transaction#cae842d5917e5217d2981e7260c5b5677b12ac5f"
+source = "git+https://github.com/Rimeeeeee/alloy?branch=feat%2Feip8141-transaction#b73a6aa28c96d0d29594c5a6d871ec3821cfb3fc"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -726,7 +726,7 @@ dependencies = [
 [[package]]
 name = "alloy-rpc-types-trace"
 version = "2.4.1"
-source = "git+https://github.com/Rimeeeeee/alloy?branch=feat%2Feip8141-transaction#cae842d5917e5217d2981e7260c5b5677b12ac5f"
+source = "git+https://github.com/Rimeeeeee/alloy?branch=feat%2Feip8141-transaction#b73a6aa28c96d0d29594c5a6d871ec3821cfb3fc"
 dependencies = [
  "alloy-primitives",
  "alloy-rpc-types-eth",
@@ -739,7 +739,7 @@ dependencies = [
 [[package]]
 name = "alloy-rpc-types-txpool"
 version = "2.4.1"
-source = "git+https://github.com/Rimeeeeee/alloy?branch=feat%2Feip8141-transaction#cae842d5917e5217d2981e7260c5b5677b12ac5f"
+source = "git+https://github.com/Rimeeeeee/alloy?branch=feat%2Feip8141-transaction#b73a6aa28c96d0d29594c5a6d871ec3821cfb3fc"
 dependencies = [
  "alloy-primitives",
  "alloy-rpc-types-eth",
@@ -750,7 +750,7 @@ dependencies = [
 [[package]]
 name = "alloy-serde"
 version = "2.4.1"
-source = "git+https://github.com/Rimeeeeee/alloy?branch=feat%2Feip8141-transaction#cae842d5917e5217d2981e7260c5b5677b12ac5f"
+source = "git+https://github.com/Rimeeeeee/alloy?branch=feat%2Feip8141-transaction#b73a6aa28c96d0d29594c5a6d871ec3821cfb3fc"
 dependencies = [
  "alloy-primitives",
  "arbitrary",
@@ -761,7 +761,7 @@ dependencies = [
 [[package]]
 name = "alloy-signer"
 version = "2.4.1"
-source = "git+https://github.com/Rimeeeeee/alloy?branch=feat%2Feip8141-transaction#cae842d5917e5217d2981e7260c5b5677b12ac5f"
+source = "git+https://github.com/Rimeeeeee/alloy?branch=feat%2Feip8141-transaction#b73a6aa28c96d0d29594c5a6d871ec3821cfb3fc"
 dependencies = [
  "alloy-primitives",
  "async-trait",
@@ -775,7 +775,7 @@ dependencies = [
 [[package]]
 name = "alloy-signer-local"
 version = "2.4.1"
-source = "git+https://github.com/Rimeeeeee/alloy?branch=feat%2Feip8141-transaction#cae842d5917e5217d2981e7260c5b5677b12ac5f"
+source = "git+https://github.com/Rimeeeeee/alloy?branch=feat%2Feip8141-transaction#b73a6aa28c96d0d29594c5a6d871ec3821cfb3fc"
 dependencies = [
  "alloy-consensus",
  "alloy-network",
@@ -863,7 +863,7 @@ dependencies = [
 [[package]]
 name = "alloy-transport"
 version = "2.4.1"
-source = "git+https://github.com/Rimeeeeee/alloy?branch=feat%2Feip8141-transaction#cae842d5917e5217d2981e7260c5b5677b12ac5f"
+source = "git+https://github.com/Rimeeeeee/alloy?branch=feat%2Feip8141-transaction#b73a6aa28c96d0d29594c5a6d871ec3821cfb3fc"
 dependencies = [
  "alloy-json-rpc",
  "auto_impl",
@@ -885,7 +885,7 @@ dependencies = [
 [[package]]
 name = "alloy-transport-http"
 version = "2.4.1"
-source = "git+https://github.com/Rimeeeeee/alloy?branch=feat%2Feip8141-transaction#cae842d5917e5217d2981e7260c5b5677b12ac5f"
+source = "git+https://github.com/Rimeeeeee/alloy?branch=feat%2Feip8141-transaction#b73a6aa28c96d0d29594c5a6d871ec3821cfb3fc"
 dependencies = [
  "alloy-json-rpc",
  "alloy-transport",
@@ -900,7 +900,7 @@ dependencies = [
 [[package]]
 name = "alloy-transport-ipc"
 version = "2.4.1"
-source = "git+https://github.com/Rimeeeeee/alloy?branch=feat%2Feip8141-transaction#cae842d5917e5217d2981e7260c5b5677b12ac5f"
+source = "git+https://github.com/Rimeeeeee/alloy?branch=feat%2Feip8141-transaction#b73a6aa28c96d0d29594c5a6d871ec3821cfb3fc"
 dependencies = [
  "alloy-json-rpc",
  "alloy-pubsub",
@@ -919,7 +919,7 @@ dependencies = [
 [[package]]
 name = "alloy-transport-ws"
 version = "2.4.1"
-source = "git+https://github.com/Rimeeeeee/alloy?branch=feat%2Feip8141-transaction#cae842d5917e5217d2981e7260c5b5677b12ac5f"
+source = "git+https://github.com/Rimeeeeee/alloy?branch=feat%2Feip8141-transaction#b73a6aa28c96d0d29594c5a6d871ec3821cfb3fc"
 dependencies = [
  "alloy-pubsub",
  "alloy-transport",
@@ -957,7 +957,7 @@ dependencies = [
 [[package]]
 name = "alloy-tx-macros"
 version = "2.4.1"
-source = "git+https://github.com/Rimeeeeee/alloy?branch=feat%2Feip8141-transaction#cae842d5917e5217d2981e7260c5b5677b12ac5f"
+source = "git+https://github.com/Rimeeeeee/alloy?branch=feat%2Feip8141-transaction#b73a6aa28c96d0d29594c5a6d871ec3821cfb3fc"
 dependencies = [
  "darling 0.23.0",
  "proc-macro2",
@@ -1016,7 +1016,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1027,7 +1027,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3412,7 +3412,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5156,7 +5156,7 @@ checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
 dependencies = [
  "hermit-abi",
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6224,7 +6224,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7255,7 +7255,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.59.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -10789,7 +10789,7 @@ dependencies = [
 [[package]]
 name = "revm"
 version = "42.0.1"
-source = "git+https://github.com/Soubhik-10/revm?branch=feat%2Feip8141-frame-transactions#ade240c5388c00df28ee4e197b6d52c64a49832e"
+source = "git+https://github.com/Soubhik-10/revm?branch=feat%2Feip8141-frame-transactions#131de49c3e0f5695144afb4572f26ed8f9a8d042"
 dependencies = [
  "revm-bytecode",
  "revm-context",
@@ -10807,7 +10807,7 @@ dependencies = [
 [[package]]
 name = "revm-bytecode"
 version = "42.0.0"
-source = "git+https://github.com/Soubhik-10/revm?branch=feat%2Feip8141-frame-transactions#ade240c5388c00df28ee4e197b6d52c64a49832e"
+source = "git+https://github.com/Soubhik-10/revm?branch=feat%2Feip8141-frame-transactions#131de49c3e0f5695144afb4572f26ed8f9a8d042"
 dependencies = [
  "bitvec",
  "paste",
@@ -10819,7 +10819,7 @@ dependencies = [
 [[package]]
 name = "revm-context"
 version = "42.0.0"
-source = "git+https://github.com/Soubhik-10/revm?branch=feat%2Feip8141-frame-transactions#ade240c5388c00df28ee4e197b6d52c64a49832e"
+source = "git+https://github.com/Soubhik-10/revm?branch=feat%2Feip8141-frame-transactions#131de49c3e0f5695144afb4572f26ed8f9a8d042"
 dependencies = [
  "alloy-eip8141",
  "bitvec",
@@ -10837,7 +10837,7 @@ dependencies = [
 [[package]]
 name = "revm-context-interface"
 version = "42.0.0"
-source = "git+https://github.com/Soubhik-10/revm?branch=feat%2Feip8141-frame-transactions#ade240c5388c00df28ee4e197b6d52c64a49832e"
+source = "git+https://github.com/Soubhik-10/revm?branch=feat%2Feip8141-frame-transactions#131de49c3e0f5695144afb4572f26ed8f9a8d042"
 dependencies = [
  "alloy-eip2930",
  "alloy-eip7702",
@@ -10853,7 +10853,7 @@ dependencies = [
 [[package]]
 name = "revm-database"
 version = "42.0.0"
-source = "git+https://github.com/Soubhik-10/revm?branch=feat%2Feip8141-frame-transactions#ade240c5388c00df28ee4e197b6d52c64a49832e"
+source = "git+https://github.com/Soubhik-10/revm?branch=feat%2Feip8141-frame-transactions#131de49c3e0f5695144afb4572f26ed8f9a8d042"
 dependencies = [
  "alloy-eips",
  "derive_more",
@@ -10868,7 +10868,7 @@ dependencies = [
 [[package]]
 name = "revm-database-interface"
 version = "42.0.0"
-source = "git+https://github.com/Soubhik-10/revm?branch=feat%2Feip8141-frame-transactions#ade240c5388c00df28ee4e197b6d52c64a49832e"
+source = "git+https://github.com/Soubhik-10/revm?branch=feat%2Feip8141-frame-transactions#131de49c3e0f5695144afb4572f26ed8f9a8d042"
 dependencies = [
  "auto_impl",
  "either",
@@ -10881,7 +10881,7 @@ dependencies = [
 [[package]]
 name = "revm-handler"
 version = "42.0.1"
-source = "git+https://github.com/Soubhik-10/revm?branch=feat%2Feip8141-frame-transactions#ade240c5388c00df28ee4e197b6d52c64a49832e"
+source = "git+https://github.com/Soubhik-10/revm?branch=feat%2Feip8141-frame-transactions#131de49c3e0f5695144afb4572f26ed8f9a8d042"
 dependencies = [
  "alloy-eip8141",
  "auto_impl",
@@ -10901,7 +10901,7 @@ dependencies = [
 [[package]]
 name = "revm-inspector"
 version = "42.0.1"
-source = "git+https://github.com/Soubhik-10/revm?branch=feat%2Feip8141-frame-transactions#ade240c5388c00df28ee4e197b6d52c64a49832e"
+source = "git+https://github.com/Soubhik-10/revm?branch=feat%2Feip8141-frame-transactions#131de49c3e0f5695144afb4572f26ed8f9a8d042"
 dependencies = [
  "auto_impl",
  "either",
@@ -10938,7 +10938,7 @@ dependencies = [
 [[package]]
 name = "revm-interpreter"
 version = "42.0.0"
-source = "git+https://github.com/Soubhik-10/revm?branch=feat%2Feip8141-frame-transactions#ade240c5388c00df28ee4e197b6d52c64a49832e"
+source = "git+https://github.com/Soubhik-10/revm?branch=feat%2Feip8141-frame-transactions#131de49c3e0f5695144afb4572f26ed8f9a8d042"
 dependencies = [
  "revm-bytecode",
  "revm-context-interface",
@@ -10951,7 +10951,7 @@ dependencies = [
 [[package]]
 name = "revm-precompile"
 version = "42.0.1"
-source = "git+https://github.com/Soubhik-10/revm?branch=feat%2Feip8141-frame-transactions#ade240c5388c00df28ee4e197b6d52c64a49832e"
+source = "git+https://github.com/Soubhik-10/revm?branch=feat%2Feip8141-frame-transactions#131de49c3e0f5695144afb4572f26ed8f9a8d042"
 dependencies = [
  "ark-bls12-381",
  "ark-bn254",
@@ -10977,7 +10977,7 @@ dependencies = [
 [[package]]
 name = "revm-primitives"
 version = "42.0.0"
-source = "git+https://github.com/Soubhik-10/revm?branch=feat%2Feip8141-frame-transactions#ade240c5388c00df28ee4e197b6d52c64a49832e"
+source = "git+https://github.com/Soubhik-10/revm?branch=feat%2Feip8141-frame-transactions#131de49c3e0f5695144afb4572f26ed8f9a8d042"
 dependencies = [
  "alloy-primitives",
  "once_cell",
@@ -10987,7 +10987,7 @@ dependencies = [
 [[package]]
 name = "revm-state"
 version = "42.0.0"
-source = "git+https://github.com/Soubhik-10/revm?branch=feat%2Feip8141-frame-transactions#ade240c5388c00df28ee4e197b6d52c64a49832e"
+source = "git+https://github.com/Soubhik-10/revm?branch=feat%2Feip8141-frame-transactions#131de49c3e0f5695144afb4572f26ed8f9a8d042"
 dependencies = [
  "alloy-eip7928",
  "bitflags 2.13.0",
@@ -11000,7 +11000,7 @@ dependencies = [
 [[package]]
 name = "revmc"
 version = "0.1.0"
-source = "git+https://github.com/Soubhik-10/revmc?branch=fix%2Feip8141-layout#830b48f0b74b95adac6424be7b87bcaee7bf193c"
+source = "git+https://github.com/Soubhik-10/revmc?branch=fix%2Feip8141-layout#61fa6892c53dc67f0943625d0f6153134319da00"
 dependencies = [
  "revm-bytecode",
  "revm-context-interface",
@@ -11020,7 +11020,7 @@ dependencies = [
 [[package]]
 name = "revmc-backend"
 version = "0.1.0"
-source = "git+https://github.com/Soubhik-10/revmc?branch=fix%2Feip8141-layout#830b48f0b74b95adac6424be7b87bcaee7bf193c"
+source = "git+https://github.com/Soubhik-10/revmc?branch=fix%2Feip8141-layout#61fa6892c53dc67f0943625d0f6153134319da00"
 dependencies = [
  "eyre",
  "ruint",
@@ -11029,12 +11029,12 @@ dependencies = [
 [[package]]
 name = "revmc-build"
 version = "0.1.0"
-source = "git+https://github.com/Soubhik-10/revmc?branch=fix%2Feip8141-layout#830b48f0b74b95adac6424be7b87bcaee7bf193c"
+source = "git+https://github.com/Soubhik-10/revmc?branch=fix%2Feip8141-layout#61fa6892c53dc67f0943625d0f6153134319da00"
 
 [[package]]
 name = "revmc-builtins"
 version = "0.1.0"
-source = "git+https://github.com/Soubhik-10/revmc?branch=fix%2Feip8141-layout#830b48f0b74b95adac6424be7b87bcaee7bf193c"
+source = "git+https://github.com/Soubhik-10/revmc?branch=fix%2Feip8141-layout#61fa6892c53dc67f0943625d0f6153134319da00"
 dependencies = [
  "paste",
  "revm-bytecode",
@@ -11049,7 +11049,7 @@ dependencies = [
 [[package]]
 name = "revmc-codegen"
 version = "0.1.0"
-source = "git+https://github.com/Soubhik-10/revmc?branch=fix%2Feip8141-layout#830b48f0b74b95adac6424be7b87bcaee7bf193c"
+source = "git+https://github.com/Soubhik-10/revmc?branch=fix%2Feip8141-layout#61fa6892c53dc67f0943625d0f6153134319da00"
 dependencies = [
  "alloy-primitives",
  "bitflags 2.13.0",
@@ -11080,7 +11080,7 @@ dependencies = [
 [[package]]
 name = "revmc-context"
 version = "0.1.0"
-source = "git+https://github.com/Soubhik-10/revmc?branch=fix%2Feip8141-layout#830b48f0b74b95adac6424be7b87bcaee7bf193c"
+source = "git+https://github.com/Soubhik-10/revmc?branch=fix%2Feip8141-layout#61fa6892c53dc67f0943625d0f6153134319da00"
 dependencies = [
  "revm-context",
  "revm-context-interface",
@@ -11095,7 +11095,7 @@ dependencies = [
 [[package]]
 name = "revmc-llvm"
 version = "0.1.0"
-source = "git+https://github.com/Soubhik-10/revmc?branch=fix%2Feip8141-layout#830b48f0b74b95adac6424be7b87bcaee7bf193c"
+source = "git+https://github.com/Soubhik-10/revmc?branch=fix%2Feip8141-layout#61fa6892c53dc67f0943625d0f6153134319da00"
 dependencies = [
  "alloy-primitives",
  "cc",
@@ -11108,7 +11108,7 @@ dependencies = [
 [[package]]
 name = "revmc-runtime"
 version = "0.1.0"
-source = "git+https://github.com/Soubhik-10/revmc?branch=fix%2Feip8141-layout#830b48f0b74b95adac6424be7b87bcaee7bf193c"
+source = "git+https://github.com/Soubhik-10/revmc?branch=fix%2Feip8141-layout#61fa6892c53dc67f0943625d0f6153134319da00"
 dependencies = [
  "alloy-evm",
  "alloy-primitives",
@@ -11357,7 +11357,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -11437,7 +11437,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs 1.0.7",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -12070,7 +12070,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "52d1cfed4120b4d927bf7c0f86d2087a4a7d6027c906d9f9d525a80573b9be51"
 dependencies = [
  "libc",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -12329,7 +12329,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -13592,7 +13592,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
