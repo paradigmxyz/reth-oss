@@ -291,127 +291,135 @@ jobs:
         # ethereum/rpc to be deprecated:
         # https://github.com/ethereum/hive/pull/1117
         scenario:
-          - sim: smoke/genesis
-          - sim: smoke/network
-          - sim: ethereum/sync
-          - sim: devp2p
-            limit: discv4
-          # started failing after https://github.com/ethereum/go-ethereum/pull/31843, no
-          # action on our side, remove from here when we get unexpected passes on these tests
+          # Bogota is currently narrowed to the EIP-8141 fixtures only.
+          - sim: ethereum/eels/consume-engine
+            limit: '.*8141.*'
+            include: []
+          # The remaining Bogota simulations are intentionally disabled while EIP-8141 is being
+          # debugged. Keep the entries commented so they can be restored without reconstructing
+          # the broader Bogota matrix.
+          #
+          # - sim: smoke/genesis
+          # - sim: smoke/network
+          # - sim: ethereum/sync
           # - sim: devp2p
-          #  limit: eth
-          #  include:
-          #    - MaliciousHandshake
-          #    # failures tracked in https://github.com/paradigmxyz/reth/issues/14825
-          #    - Status
-          #    - GetBlockHeaders
-          #    - ZeroRequestID
-          #    - GetBlockBodies
-          #    - Transaction
-          #    - NewPooledTxs
-          - sim: devp2p
-            limit: discv5
-            include:
-              # failures tracked at https://github.com/paradigmxyz/reth/issues/14825
-              - PingLargeRequestID
-          - sim: ethereum/engine
-            limit: engine-exchange-capabilities
-          - sim: ethereum/engine
-            limit: engine-withdrawals
-          - sim: ethereum/engine
-            limit: engine-auth
-          - sim: ethereum/engine
-            limit: engine-api
-          - sim: ethereum/engine
-            limit: cancun
-          # eth_ rpc methods
-          - sim: ethereum/rpc-compat
-            include:
-              - eth_blockNumber
-              - eth_call
-              - eth_chainId
-              - eth_createAccessList
-              - eth_estimateGas
-              - eth_feeHistory
-              - eth_getBalance
-              - eth_getBlockBy
-              - eth_getBlockTransactionCountBy
-              - eth_getCode
-              - eth_getProof
-              - eth_getStorage
-              - eth_getTransactionBy
-              - eth_getTransactionCount
-              - eth_getTransactionReceipt
-              - eth_sendRawTransaction
-              - eth_syncing
-              # debug_ rpc methods
-              - debug_
-
-          # consume-engine
-          - sim: ethereum/eels/consume-engine
-            limit: '.*tests/amsterdam/(?!eip8141_frame_transactions).*'
-          - sim: ethereum/eels/consume-engine
-            limit: .*tests/osaka.*
-          - sim: ethereum/eels/consume-engine
-            limit: .*tests/prague.*
-          - sim: ethereum/eels/consume-engine
-            limit: .*tests/cancun.*
-          - sim: ethereum/eels/consume-engine
-            limit: .*tests/shanghai.*
-          - sim: ethereum/eels/consume-engine
-            limit: .*tests/berlin.*
-          - sim: ethereum/eels/consume-engine
-            limit: .*tests/istanbul.*
-          - sim: ethereum/eels/consume-engine
-            limit: .*tests/homestead.*
-          - sim: ethereum/eels/consume-engine
-            limit: .*tests/frontier.*
-          - sim: ethereum/eels/consume-engine
-            limit: .*tests/paris.*
-
-          # Focused EIP-8141 frame cases for engine debugging.
-          - sim: ethereum/eels/consume-engine
-            limit: '.*tests/amsterdam/eip8141_frame_transactions/.*(test_target_resolution\.py::test_dead_target_entry_charge\[fork_Bogota-blockchain_test_engine_from_state_test-(affordable|unaffordable)\]|test_expiry_verifier\.py::test_expiry_verifier_frame\[fork_Bogota-blockchain_test_engine_from_state_test-(future_expiry|expiry_at_block_timestamp)\]|test_target_resolution\.py::test_delegated_to_precompile_target\[fork_Bogota-blockchain_test_engine_from_state_test\]|test_target_resolution\.py::test_verify_frame_delegated_to_precompile_target\[fork_Bogota-blockchain_test_engine_from_state_test\]|test_admission_validity\.py::test_admission_constraints\[fork_Bogota-blockchain_test_engine_from_state_test-max_cost_within_bound\]|test_frame_transactions\.py::test_atomic_batch_rollback\[fork_Bogota-blockchain_test_engine_from_state_test-unrolls_executed_frames\]|test_block_access_lists\.py::test_bal_unaffordable_designation_absent\[fork_Bogota-blockchain_test_engine\]|test_block_access_lists\.py::test_bal_atomic_batch_write\[fork_Bogota-blockchain_test_engine-unrolled\]).*'
-
-          # Focused EIP-8141 frame cases for RLP debugging.
-          - sim: ethereum/eels/consume-rlp
-            limit: '.*tests/amsterdam/eip8141_frame_transactions/.*(test_target_resolution\.py::test_dead_target_entry_charge\[fork_Bogota-blockchain_test_engine_from_state_test-(affordable|unaffordable)\]|test_expiry_verifier\.py::test_expiry_verifier_frame\[fork_Bogota-blockchain_test_engine_from_state_test-(future_expiry|expiry_at_block_timestamp)\]|test_target_resolution\.py::test_delegated_to_precompile_target\[fork_Bogota-blockchain_test_engine_from_state_test\]|test_target_resolution\.py::test_verify_frame_delegated_to_precompile_target\[fork_Bogota-blockchain_test_engine_from_state_test\]|test_admission_validity\.py::test_admission_constraints\[fork_Bogota-blockchain_test_engine_from_state_test-max_cost_within_bound\]|test_frame_transactions\.py::test_atomic_batch_rollback\[fork_Bogota-blockchain_test_engine_from_state_test-unrolls_executed_frames\]|test_block_access_lists\.py::test_bal_unaffordable_designation_absent\[fork_Bogota-blockchain_test_engine\]|test_block_access_lists\.py::test_bal_atomic_batch_write\[fork_Bogota-blockchain_test_engine-unrolled\]).*'
-
-          # EIP-8141 frame transactions
-          - sim: ethereum/eels/consume-engine
-            # Keep valid frame cases; the fixture's explicit rejection cases are covered by the
-            # transaction validation tests and are not useful for execution debugging.
-            limit: '^(?!.*(?:test_admission_validity\.py::test_admission_constraints.*max_cost_overflow|test_expiry_verifier\.py::test_expiry_verifier_frame.*expired|test_frame_transactions\.py::test_sender_frame_before_approval|test_frame_transactions\.py::test_verify_frame_reverts|test_target_resolution\.py::test_verify_frame_precompile_target|test_static_validity\.py::test_expiry_verifier_constraints.*(?:expiry_data_empty|expiry_data_too_long|expiry_data_too_short|expiry_frame_with_flags|expiry_frame_with_value|multiple_expiry_frames)|test_static_validity\.py::test_frame_constraints.*(?:approve_execution_frame_with_foreign_target|atomic_batch_followed_by_verify_frame|atomic_flag_on_last_frame|atomic_flag_on_verify_frame|default_frame_with_value|frame_gas_above_64_bits|frame_gas_sum_overflows|reserved_frame_flag|reserved_frame_flag_high|undefined_frame_mode|undefined_frame_mode_high|verify_frame_with_value)|test_static_validity\.py::test_gas_limit_cap_from_(?:calldata_floor|frame_gas).*above_cap|test_static_validity\.py::test_invalid_tx_fields.*(?:blob_count_above_max|blob_fee_without_blobs|frame_count_above_max|invalid_blob_hash_version|max_fee_overflow|no_frames|nonce_overflow|priority_fee_above_max_fee|priority_fee_overflow)|test_static_validity\.py::test_signature_constraints.*(?:arbitrary_with_signer|msg_all_zeros|msg_single_byte|msg_too_long|msg_too_short|p256_high_s|p256_not_on_curve|p256_r_at_curve_order|p256_r_zero|p256_s_zero|p256_signature_over_different_digest|p256_signature_too_long|p256_signature_too_short|p256_signer_mismatch|secp256k1_high_s|secp256k1_r_at_curve_order|secp256k1_r_zero|secp256k1_s_zero|secp256k1_signature_empty|secp256k1_signature_too_long|secp256k1_signature_too_short|secp256k1_signer_mismatch|secp256k1_v_27|secp256k1_v_2|secp256k1_wrong_key|signer_too_long|signer_too_short|undefined_signature_scheme|undefined_signature_scheme_high))).*tests/amsterdam/eip8141_frame_transactions.*'
-
-          # consume-rlp
-          - sim: ethereum/eels/consume-rlp
-            limit: '.*tests/amsterdam/(?!eip8141_frame_transactions).*'
-          - sim: ethereum/eels/consume-rlp
-            limit: .*tests/osaka.*
-          - sim: ethereum/eels/consume-rlp
-            limit: .*tests/prague.*
-          - sim: ethereum/eels/consume-rlp
-            limit: .*tests/cancun.*
-          - sim: ethereum/eels/consume-rlp
-            limit: .*tests/shanghai.*
-          - sim: ethereum/eels/consume-rlp
-            limit: .*tests/berlin.*
-          - sim: ethereum/eels/consume-rlp
-            limit: .*tests/istanbul.*
-          - sim: ethereum/eels/consume-rlp
-            limit: .*tests/homestead.*
-          - sim: ethereum/eels/consume-rlp
-            limit: .*tests/frontier.*
-          - sim: ethereum/eels/consume-rlp
-            limit: .*tests/paris.*
-          - sim: ethereum/eels/consume-rlp
-            limit: '^(?!.*(?:test_admission_validity\.py::test_admission_constraints.*max_cost_overflow|test_expiry_verifier\.py::test_expiry_verifier_frame.*expired|test_frame_transactions\.py::test_sender_frame_before_approval|test_frame_transactions\.py::test_verify_frame_reverts|test_target_resolution\.py::test_verify_frame_precompile_target|test_static_validity\.py::test_expiry_verifier_constraints.*(?:expiry_data_empty|expiry_data_too_long|expiry_data_too_short|expiry_frame_with_flags|expiry_frame_with_value|multiple_expiry_frames)|test_static_validity\.py::test_frame_constraints.*(?:approve_execution_frame_with_foreign_target|atomic_batch_followed_by_verify_frame|atomic_flag_on_last_frame|atomic_flag_on_verify_frame|default_frame_with_value|frame_gas_above_64_bits|frame_gas_sum_overflows|reserved_frame_flag|reserved_frame_flag_high|undefined_frame_mode|undefined_frame_mode_high|verify_frame_with_value)|test_static_validity\.py::test_gas_limit_cap_from_(?:calldata_floor|frame_gas).*above_cap|test_static_validity\.py::test_invalid_tx_fields.*(?:blob_count_above_max|blob_fee_without_blobs|frame_count_above_max|invalid_blob_hash_version|max_fee_overflow|no_frames|nonce_overflow|priority_fee_above_max_fee|priority_fee_overflow)|test_static_validity\.py::test_signature_constraints.*(?:arbitrary_with_signer|msg_all_zeros|msg_single_byte|msg_too_long|msg_too_short|p256_high_s|p256_not_on_curve|p256_r_at_curve_order|p256_r_zero|p256_s_zero|p256_signature_over_different_digest|p256_signature_too_long|p256_signature_too_short|p256_signer_mismatch|secp256k1_high_s|secp256k1_r_at_curve_order|secp256k1_r_zero|secp256k1_s_zero|secp256k1_signature_empty|secp256k1_signature_too_long|secp256k1_signature_too_short|secp256k1_signer_mismatch|secp256k1_v_27|secp256k1_v_2|secp256k1_wrong_key|signer_too_long|signer_too_short|undefined_signature_scheme|undefined_signature_scheme_high))).*tests/amsterdam/eip8141_frame_transactions.*'
-
-          # execute-blobs
-          - sim: ethereum/eels/execute-blobs
-            limit: .*tests/amsterdam.*
-          - sim: ethereum/eels/execute-blobs
-            limit: .*tests/osaka.*
+          # limit: discv4
+          # # started failing after https://github.com/ethereum/go-ethereum/pull/31843, no
+          # # action on our side, remove from here when we get unexpected passes on these tests
+          # # - sim: devp2p
+          # #  limit: eth
+          # #  include:
+          # #    - MaliciousHandshake
+          # #    # failures tracked in https://github.com/paradigmxyz/reth/issues/14825
+          # #    - Status
+          # #    - GetBlockHeaders
+          # #    - ZeroRequestID
+          # #    - GetBlockBodies
+          # #    - Transaction
+          # #    - NewPooledTxs
+          # - sim: devp2p
+          # limit: discv5
+          # include:
+          # # failures tracked at https://github.com/paradigmxyz/reth/issues/14825
+          # - PingLargeRequestID
+          # - sim: ethereum/engine
+          # limit: engine-exchange-capabilities
+          # - sim: ethereum/engine
+          # limit: engine-withdrawals
+          # - sim: ethereum/engine
+          # limit: engine-auth
+          # - sim: ethereum/engine
+          # limit: engine-api
+          # - sim: ethereum/engine
+          # limit: cancun
+          # # eth_ rpc methods
+          # - sim: ethereum/rpc-compat
+          # include:
+          # - eth_blockNumber
+          # - eth_call
+          # - eth_chainId
+          # - eth_createAccessList
+          # - eth_estimateGas
+          # - eth_feeHistory
+          # - eth_getBalance
+          # - eth_getBlockBy
+          # - eth_getBlockTransactionCountBy
+          # - eth_getCode
+          # - eth_getProof
+          # - eth_getStorage
+          # - eth_getTransactionBy
+          # - eth_getTransactionCount
+          # - eth_getTransactionReceipt
+          # - eth_sendRawTransaction
+          # - eth_syncing
+          # # debug_ rpc methods
+          # - debug_
+          #
+          # # consume-engine
+          # - sim: ethereum/eels/consume-engine
+          # limit: '.*tests/amsterdam/(?!eip8141_frame_transactions).*'
+          # - sim: ethereum/eels/consume-engine
+          # limit: .*tests/osaka.*
+          # - sim: ethereum/eels/consume-engine
+          # limit: .*tests/prague.*
+          # - sim: ethereum/eels/consume-engine
+          # limit: .*tests/cancun.*
+          # - sim: ethereum/eels/consume-engine
+          # limit: .*tests/shanghai.*
+          # - sim: ethereum/eels/consume-engine
+          # limit: .*tests/berlin.*
+          # - sim: ethereum/eels/consume-engine
+          # limit: .*tests/istanbul.*
+          # - sim: ethereum/eels/consume-engine
+          # limit: .*tests/homestead.*
+          # - sim: ethereum/eels/consume-engine
+          # limit: .*tests/frontier.*
+          # - sim: ethereum/eels/consume-engine
+          # limit: .*tests/paris.*
+          #
+          # # Focused EIP-8141 frame cases for engine debugging.
+          # - sim: ethereum/eels/consume-engine
+          # limit: '.*tests/amsterdam/eip8141_frame_transactions/.*(test_target_resolution\.py::test_dead_target_entry_charge\[fork_Bogota-blockchain_test_engine_from_state_test-(affordable|unaffordable)\]|test_expiry_verifier\.py::test_expiry_verifier_frame\[fork_Bogota-blockchain_test_engine_from_state_test-(future_expiry|expiry_at_block_timestamp)\]|test_target_resolution\.py::test_delegated_to_precompile_target\[fork_Bogota-blockchain_test_engine_from_state_test\]|test_target_resolution\.py::test_verify_frame_delegated_to_precompile_target\[fork_Bogota-blockchain_test_engine_from_state_test\]|test_admission_validity\.py::test_admission_constraints\[fork_Bogota-blockchain_test_engine_from_state_test-max_cost_within_bound\]|test_frame_transactions\.py::test_atomic_batch_rollback\[fork_Bogota-blockchain_test_engine_from_state_test-unrolls_executed_frames\]|test_block_access_lists\.py::test_bal_unaffordable_designation_absent\[fork_Bogota-blockchain_test_engine\]|test_block_access_lists\.py::test_bal_atomic_batch_write\[fork_Bogota-blockchain_test_engine-unrolled\]).*'
+          #
+          # # Focused EIP-8141 frame cases for RLP debugging.
+          # - sim: ethereum/eels/consume-rlp
+          # limit: '.*tests/amsterdam/eip8141_frame_transactions/.*(test_target_resolution\.py::test_dead_target_entry_charge\[fork_Bogota-blockchain_test_engine_from_state_test-(affordable|unaffordable)\]|test_expiry_verifier\.py::test_expiry_verifier_frame\[fork_Bogota-blockchain_test_engine_from_state_test-(future_expiry|expiry_at_block_timestamp)\]|test_target_resolution\.py::test_delegated_to_precompile_target\[fork_Bogota-blockchain_test_engine_from_state_test\]|test_target_resolution\.py::test_verify_frame_delegated_to_precompile_target\[fork_Bogota-blockchain_test_engine_from_state_test\]|test_admission_validity\.py::test_admission_constraints\[fork_Bogota-blockchain_test_engine_from_state_test-max_cost_within_bound\]|test_frame_transactions\.py::test_atomic_batch_rollback\[fork_Bogota-blockchain_test_engine_from_state_test-unrolls_executed_frames\]|test_block_access_lists\.py::test_bal_unaffordable_designation_absent\[fork_Bogota-blockchain_test_engine\]|test_block_access_lists\.py::test_bal_atomic_batch_write\[fork_Bogota-blockchain_test_engine-unrolled\]).*'
+          #
+          # # EIP-8141 frame transactions
+          # - sim: ethereum/eels/consume-engine
+          # # Keep valid frame cases; the fixture's explicit rejection cases are covered by the
+          # # transaction validation tests and are not useful for execution debugging.
+          # limit: '^(?!.*(?:test_admission_validity\.py::test_admission_constraints.*max_cost_overflow|test_expiry_verifier\.py::test_expiry_verifier_frame.*expired|test_frame_transactions\.py::test_sender_frame_before_approval|test_frame_transactions\.py::test_verify_frame_reverts|test_target_resolution\.py::test_verify_frame_precompile_target|test_static_validity\.py::test_expiry_verifier_constraints.*(?:expiry_data_empty|expiry_data_too_long|expiry_data_too_short|expiry_frame_with_flags|expiry_frame_with_value|multiple_expiry_frames)|test_static_validity\.py::test_frame_constraints.*(?:approve_execution_frame_with_foreign_target|atomic_batch_followed_by_verify_frame|atomic_flag_on_last_frame|atomic_flag_on_verify_frame|default_frame_with_value|frame_gas_above_64_bits|frame_gas_sum_overflows|reserved_frame_flag|reserved_frame_flag_high|undefined_frame_mode|undefined_frame_mode_high|verify_frame_with_value)|test_static_validity\.py::test_gas_limit_cap_from_(?:calldata_floor|frame_gas).*above_cap|test_static_validity\.py::test_invalid_tx_fields.*(?:blob_count_above_max|blob_fee_without_blobs|frame_count_above_max|invalid_blob_hash_version|max_fee_overflow|no_frames|nonce_overflow|priority_fee_above_max_fee|priority_fee_overflow)|test_static_validity\.py::test_signature_constraints.*(?:arbitrary_with_signer|msg_all_zeros|msg_single_byte|msg_too_long|msg_too_short|p256_high_s|p256_not_on_curve|p256_r_at_curve_order|p256_r_zero|p256_s_zero|p256_signature_over_different_digest|p256_signature_too_long|p256_signature_too_short|p256_signer_mismatch|secp256k1_high_s|secp256k1_r_at_curve_order|secp256k1_r_zero|secp256k1_s_zero|secp256k1_signature_empty|secp256k1_signature_too_long|secp256k1_signature_too_short|secp256k1_signer_mismatch|secp256k1_v_27|secp256k1_v_2|secp256k1_wrong_key|signer_too_long|signer_too_short|undefined_signature_scheme|undefined_signature_scheme_high))).*tests/amsterdam/eip8141_frame_transactions.*'
+          #
+          # # consume-rlp
+          # - sim: ethereum/eels/consume-rlp
+          # limit: '.*tests/amsterdam/(?!eip8141_frame_transactions).*'
+          # - sim: ethereum/eels/consume-rlp
+          # limit: .*tests/osaka.*
+          # - sim: ethereum/eels/consume-rlp
+          # limit: .*tests/prague.*
+          # - sim: ethereum/eels/consume-rlp
+          # limit: .*tests/cancun.*
+          # - sim: ethereum/eels/consume-rlp
+          # limit: .*tests/shanghai.*
+          # - sim: ethereum/eels/consume-rlp
+          # limit: .*tests/berlin.*
+          # - sim: ethereum/eels/consume-rlp
+          # limit: .*tests/istanbul.*
+          # - sim: ethereum/eels/consume-rlp
+          # limit: .*tests/homestead.*
+          # - sim: ethereum/eels/consume-rlp
+          # limit: .*tests/frontier.*
+          # - sim: ethereum/eels/consume-rlp
+          # limit: .*tests/paris.*
+          # - sim: ethereum/eels/consume-rlp
+          # limit: '^(?!.*(?:test_admission_validity\.py::test_admission_constraints.*max_cost_overflow|test_expiry_verifier\.py::test_expiry_verifier_frame.*expired|test_frame_transactions\.py::test_sender_frame_before_approval|test_frame_transactions\.py::test_verify_frame_reverts|test_target_resolution\.py::test_verify_frame_precompile_target|test_static_validity\.py::test_expiry_verifier_constraints.*(?:expiry_data_empty|expiry_data_too_long|expiry_data_too_short|expiry_frame_with_flags|expiry_frame_with_value|multiple_expiry_frames)|test_static_validity\.py::test_frame_constraints.*(?:approve_execution_frame_with_foreign_target|atomic_batch_followed_by_verify_frame|atomic_flag_on_last_frame|atomic_flag_on_verify_frame|default_frame_with_value|frame_gas_above_64_bits|frame_gas_sum_overflows|reserved_frame_flag|reserved_frame_flag_high|undefined_frame_mode|undefined_frame_mode_high|verify_frame_with_value)|test_static_validity\.py::test_gas_limit_cap_from_(?:calldata_floor|frame_gas).*above_cap|test_static_validity\.py::test_invalid_tx_fields.*(?:blob_count_above_max|blob_fee_without_blobs|frame_count_above_max|invalid_blob_hash_version|max_fee_overflow|no_frames|nonce_overflow|priority_fee_above_max_fee|priority_fee_overflow)|test_static_validity\.py::test_signature_constraints.*(?:arbitrary_with_signer|msg_all_zeros|msg_single_byte|msg_too_long|msg_too_short|p256_high_s|p256_not_on_curve|p256_r_at_curve_order|p256_r_zero|p256_s_zero|p256_signature_over_different_digest|p256_signature_too_long|p256_signature_too_short|p256_signer_mismatch|secp256k1_high_s|secp256k1_r_at_curve_order|secp256k1_r_zero|secp256k1_s_zero|secp256k1_signature_empty|secp256k1_signature_too_long|secp256k1_signature_too_short|secp256k1_signer_mismatch|secp256k1_v_27|secp256k1_v_2|secp256k1_wrong_key|signer_too_long|signer_too_short|undefined_signature_scheme|undefined_signature_scheme_high))).*tests/amsterdam/eip8141_frame_transactions.*'
+          #
+          # # execute-blobs
+          # - sim: ethereum/eels/execute-blobs
+          # limit: .*tests/amsterdam.*
+          # - sim: ethereum/eels/execute-blobs
+          # limit: .*tests/osaka.*
     needs:
       - build-reth
       - prepare-hive
