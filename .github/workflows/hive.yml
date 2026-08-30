@@ -100,8 +100,6 @@ jobs:
         # https://github.com/ethereum/hive/pull/1117
         scenario:
           - sim: smoke/genesis
-            limit: ''
-            include: []
           # - sim: smoke/network
           # - sim: ethereum/sync
           # - sim: devp2p
@@ -389,8 +387,6 @@ jobs:
         # https://github.com/ethereum/hive/pull/1117
         scenario:
           - sim: smoke/genesis
-            limit: ''
-            include: []
           # - sim: smoke/network
           # - sim: ethereum/sync
           # - sim: devp2p
