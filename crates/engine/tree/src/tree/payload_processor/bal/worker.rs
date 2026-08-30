@@ -86,7 +86,15 @@ pub(super) fn spawn_worker<'scope, Evm, Tx, Err, DB, MakeDb>(
                         Err(_) => break,
                     },
                 };
-                let tx = tx.map_err(|e| BalWorkerError::Transaction(Box::new(e)))?;
+                let tx = tx.map_err(|err| {
+                    tracing::info!(
+                        target: "engine::tree::payload_processor::bal",
+                        tx_index = index,
+                        %err,
+                        "BAL worker transaction conversion failed"
+                    );
+                    BalWorkerError::Transaction(Box::new(err))
+                })?;
                 let signer = *tx.signer();
                 let tx_gas_limit = tx.tx().gas_limit();
 
