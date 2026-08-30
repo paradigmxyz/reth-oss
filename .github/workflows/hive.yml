@@ -122,8 +122,8 @@ jobs:
           #   include:
           #     # failures tracked at https://github.com/paradigmxyz/reth/issues/14825
           #     - PingLargeRequestID
-          # - sim: ethereum/engine
-          #   limit: engine-exchange-capabilities
+          - sim: ethereum/engine
+            limit: engine-exchange-capabilities
           # - sim: ethereum/engine
           #   limit: engine-withdrawals
           # - sim: ethereum/engine
@@ -133,11 +133,11 @@ jobs:
           # - sim: ethereum/engine
           #   limit: cancun
           # # eth_ rpc methods
-          # - sim: ethereum/rpc-compat
-          #   include:
+          - sim: ethereum/rpc-compat
+            include:
           #     - eth_blockNumber
           #     - eth_call
-          #     - eth_chainId
+              - eth_chainId
           #     - eth_createAccessList
           #     - eth_estimateGas
           #     - eth_feeHistory
@@ -409,8 +409,8 @@ jobs:
           #   include:
           #     # failures tracked at https://github.com/paradigmxyz/reth/issues/14825
           #     - PingLargeRequestID
-          # - sim: ethereum/engine
-          #   limit: engine-exchange-capabilities
+          - sim: ethereum/engine
+            limit: engine-exchange-capabilities
           # - sim: ethereum/engine
           #   limit: engine-withdrawals
           # - sim: ethereum/engine
@@ -420,11 +420,11 @@ jobs:
           # - sim: ethereum/engine
           #   limit: cancun
           # # eth_ rpc methods
-          # - sim: ethereum/rpc-compat
-          #   include:
+          - sim: ethereum/rpc-compat
+            include:
           #     - eth_blockNumber
           #     - eth_call
-          #     - eth_chainId
+              - eth_chainId
           #     - eth_createAccessList
           #     - eth_estimateGas
           #     - eth_feeHistory
