@@ -2,6 +2,7 @@
 set -eo pipefail
 
 fixture_variant="${1:-amsterdam}"
+# Cache-bump when the frame execution-specs ref changes.
 
 case "${fixture_variant}" in
     amsterdam)
