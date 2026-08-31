@@ -606,13 +606,19 @@ where
 
         // Get an iterator over the transactions in the payload
         let txs = self.tx_iterator_for(&input)?;
+        let has_eip8141_transactions = matches!(
+            &input,
+            BlockOrPayload::Payload(payload) if payload.has_eip8141_transactions()
+        );
 
         // Create overlay factory for state-root tasks that need multiproofs.
         let provider_factory = self.provider.clone();
         let overlay_builder = ctx.state().tree_state.overlay_manager.overlay_builder(parent_hash);
         let overlay_factory = OverlayStateProviderFactory::new(provider_factory, overlay_builder);
 
-        let parallel_bal_execution = ensure_ok!(self.bal_path_eligible(env.decoded_bal.as_deref()));
+        let parallel_bal_execution = ensure_ok!(
+            self.bal_path_eligible(env.decoded_bal.as_deref(), has_eip8141_transactions,)
+        );
 
         info!(
             target: "engine::tree::payload_validator",
@@ -620,6 +626,7 @@ where
             transactions = env.transaction_count,
             parallel_bal_execution,
             has_bal = env.decoded_bal.is_some(),
+            has_eip8141_transactions,
             "Prepared payload execution environment"
         );
 
@@ -1119,9 +1126,17 @@ where
     //   - Tx-count threshold (`bal_execute_path_min_tx_count`): below the parallelism break-even
     //     point, provider setup and worker scheduling overhead can exceed the gain. Tune
     //     empirically once workers are parallel; meaningless while the commit loop is sequential.
-    fn bal_path_eligible(&self, bal: Option<&DecodedBal>) -> Result<bool, InsertBlockErrorKind> {
+    fn bal_path_eligible(
+        &self,
+        bal: Option<&DecodedBal>,
+        has_eip8141_transactions: bool,
+    ) -> Result<bool, InsertBlockErrorKind> {
         let has_bal = bal.is_some();
-        let parallel_execution = has_bal && !self.config.disable_bal_parallel_execution();
+        // EIP-8141 static validation must be able to report transaction errors before requiring
+        // sender state. The strict BAL worker resolves all accounts up front, which turns an
+        // intentionally absent sender designation into a BAL error for invalid transactions.
+        let parallel_execution =
+            has_bal && !has_eip8141_transactions && !self.config.disable_bal_parallel_execution();
         if parallel_execution && self.config.disable_bal_parallel_state_root() {
             return Err(InsertBlockErrorKind::Other(
                 "disabling parallel state root is impossible when parallel execution is enabled"
