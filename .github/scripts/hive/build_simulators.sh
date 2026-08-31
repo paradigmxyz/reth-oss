@@ -2,6 +2,7 @@
 set -eo pipefail
 
 fixture_variant="${1:-amsterdam}"
+eels_repo="https://github.com/ethereum/execution-specs.git"
 
 case "${fixture_variant}" in
     amsterdam)
@@ -18,6 +19,7 @@ case "${fixture_variant}" in
         eels_fixtures="https://github.com/ethereum/execution-specs/releases/download/tests-frames-devnet@v0.0.0/fixtures_frames-devnet.tar.gz"
         eels_branch="devnets/frames/0"
         eels_fork="Bogota"
+        eels_repo="https://github.com/Soubhik-10/execution-specs.git"
         ;;
     *)
         echo "unknown hive fixture variant: ${fixture_variant}"
@@ -38,14 +40,17 @@ echo "Building images"
 ./hive -client reth --sim "ethereum/eels/consume-engine" \
     --sim.buildarg fixtures="${eels_fixtures}" \
     --sim.buildarg branch="${eels_branch}" \
+    --sim.buildarg eels_repo="${eels_repo}" \
     --sim.timelimit 1s || true &
 ./hive -client reth --sim "ethereum/eels/consume-rlp" \
     --sim.buildarg fixtures="${eels_fixtures}" \
     --sim.buildarg branch="${eels_branch}" \
+    --sim.buildarg eels_repo="${eels_repo}" \
     --sim.timelimit 1s || true &
 ./hive -client reth --sim "ethereum/eels/execute-blobs" \
     --sim.buildarg branch="${eels_branch}" \
     --sim.buildarg fork="${eels_fork}" \
+    --sim.buildarg eels_repo="${eels_repo}" \
     --sim.timelimit 1s || true &
 ./hive -client reth --sim "ethereum/engine" -sim.timelimit 1s || true &
 ./hive -client reth --sim "devp2p" -sim.timelimit 1s || true &
