@@ -101,8 +101,6 @@ jobs:
         # https://github.com/ethereum/hive/pull/1117
         scenario:
           - sim: smoke/genesis
-            limit: ""
-            include: []
           # - sim: smoke/network
           # - sim: ethereum/sync
           # - sim: devp2p
@@ -127,7 +125,6 @@ jobs:
           #     - PingLargeRequestID
           - sim: ethereum/engine
             limit: engine-exchange-capabilities
-            include: []
           # - sim: ethereum/engine
           #   limit: engine-withdrawals
           # - sim: ethereum/engine
@@ -138,7 +135,6 @@ jobs:
           #   limit: cancun
           # # eth_ rpc methods
           - sim: ethereum/rpc-compat
-            limit: ""
             include:
           #     - eth_blockNumber
           #     - eth_call
@@ -392,8 +388,6 @@ jobs:
         # https://github.com/ethereum/hive/pull/1117
         scenario:
           - sim: smoke/genesis
-            limit: ""
-            include: []
           # - sim: smoke/network
           # - sim: ethereum/sync
           # - sim: devp2p
@@ -418,7 +412,6 @@ jobs:
           #     - PingLargeRequestID
           - sim: ethereum/engine
             limit: engine-exchange-capabilities
-            include: []
           # - sim: ethereum/engine
           #   limit: engine-withdrawals
           # - sim: ethereum/engine
@@ -429,7 +422,6 @@ jobs:
           #   limit: cancun
           # # eth_ rpc methods
           - sim: ethereum/rpc-compat
-            limit: ""
             include:
           #     - eth_blockNumber
           #     - eth_call
