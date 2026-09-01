@@ -7,7 +7,6 @@ IMAGES=(
     "/tmp/devp2p.tar"
     "/tmp/engine.tar"
     "/tmp/rpc_compat.tar"
-    "/tmp/pyspec.tar"
     "/tmp/smoke_genesis.tar"
     "/tmp/smoke_network.tar"
     "/tmp/ethereum_sync.tar"

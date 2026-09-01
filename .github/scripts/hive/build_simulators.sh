@@ -34,16 +34,17 @@ go build .
 
 ./hive -client reth # first builds and caches the client
 
-# Run each hive command in the background for each simulator and wait
+# Build the fixture-heavy EELS images serially to avoid exhausting the runner
+# while both builds download and unpack the same large fixture archive.
 echo "Building images"
 ./hive -client reth --sim "ethereum/eels/consume-engine" \
     --sim.buildarg fixtures="${eels_fixtures}" \
     --sim.buildarg branch="${eels_branch}" \
-    --sim.timelimit 1s || true &
+    --sim.timelimit 1s || true
 ./hive -client reth --sim "ethereum/eels/consume-rlp" \
     --sim.buildarg fixtures="${eels_fixtures}" \
     --sim.buildarg branch="${eels_branch}" \
-    --sim.timelimit 1s || true &
+    --sim.timelimit 1s || true
 ./hive -client reth --sim "ethereum/eels/execute-blobs" \
     --sim.buildarg branch="${eels_branch}" \
     --sim.buildarg fork="${eels_fork}" \
@@ -55,6 +56,12 @@ echo "Building images"
 ./hive -client reth --sim "smoke/network" -sim.timelimit 1s || true &
 ./hive -client reth --sim "ethereum/sync" -sim.timelimit 1s || true &
 wait
+
+for image in \
+    hive/simulators/ethereum/eels/consume-engine:latest \
+    hive/simulators/ethereum/eels/consume-rlp:latest; do
+    docker image inspect "${image}" >/dev/null
+done
 
 # Run docker save in parallel, wait and exit on error
 echo "Saving images"

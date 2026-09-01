@@ -40,7 +40,7 @@ jobs:
         variant:
           - amsterdam
           - bogota
-          - osaka
+          # - osaka
     name: Prepare Hive - ${{ matrix.variant == 'amsterdam' && 'Amsterdam' || matrix.variant == 'bogota' && 'Bogota' || 'Osaka' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -380,6 +380,8 @@ jobs:
         run: .github/scripts/hive/print_client_logs.sh
 
   test-osaka:
+    # Temporarily disabled while the Bogota EELS fixture build is being stabilized.
+    if: false
     timeout-minutes: 120
     strategy:
       fail-fast: false
