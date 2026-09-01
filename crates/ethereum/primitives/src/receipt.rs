@@ -383,7 +383,7 @@ mod tests {
     use alloy_consensus::{ReceiptWithBloom, TxType};
     use alloy_eips::{
         eip2718::{Decodable2718, Encodable2718},
-        eip8141::{FrameReceipt, FrameStatus},
+        eip8141::{FrameGasUsed, FrameReceipt, FrameStatus},
     };
     #[cfg(feature = "reth-codec")]
     use alloy_primitives::Bytes;
@@ -514,7 +514,7 @@ mod tests {
             payer: address!("0x0000000000000000000000000000000000000022"),
             frame_receipts: vec![FrameReceipt {
                 status: FrameStatus::Success,
-                gas_used: 21_000,
+                gas_used: FrameGasUsed { execution: 21_000, state: 0 },
                 logs: vec![log.clone()],
             }],
         });
