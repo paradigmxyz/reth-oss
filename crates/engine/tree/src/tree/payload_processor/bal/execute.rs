@@ -167,10 +167,16 @@ where
                 tx_index = output.index,
                 signer = ?output.signer,
                 tx_gas_limit = output.tx_gas_limit,
+                execution_gas_reservation = output.execution_gas_reservation,
+                state_gas_reservation = output.state_gas_reservation,
                 "Committing BAL worker transaction in canonical order"
             );
 
-            gas_tracker.validate_tx_limit(output.tx_gas_limit)?;
+            gas_tracker.validate_tx_reservations(
+                output.tx_gas_limit,
+                output.execution_gas_reservation,
+                output.state_gas_reservation,
+            )?;
             gas_tracker.record_result(output.result.result());
             canonical_executor.evm_mut().db_mut().bump_bal_index();
 
@@ -293,8 +299,8 @@ impl BlockGasTracker {
         }
     }
 
-    /// Verifies that the transaction's gas limit fits the block's remaining gas budget(s): the
-    /// admission check `EthBlockExecutor::execute_transaction_without_commit` performs before
+    /// Verifies that a transaction's gas reservations fit the block's remaining gas budget(s):
+    /// the admission check `EthBlockExecutor::execute_transaction_without_commit` performs before
     /// executing a transaction.
     ///
     /// The commit loop never calls that entry point — workers execute speculatively and their
@@ -306,18 +312,32 @@ impl BlockGasTracker {
     ///
     /// Amsterdam (EIP-8037) splits gas into two lanes, each budgeted at `block_gas_limit`:
     /// - regular: the capped tx gas limit must fit the remaining regular budget
-    /// - state: the full, uncapped tx gas limit must fit the remaining state budget, since state
-    ///   gas is drawn from the reservoir above `tx_gas_limit_cap` (execution-specs
+    /// - state: the full, uncapped tx gas limit must fit the remaining state budget for standard
+    ///   transactions; frame transactions use their explicit state reservation (execution-specs
     ///   `check_block_gas_capacity`)
     fn validate_tx_limit(&self, tx_gas_limit: u64) -> Result<(), BlockExecutionError> {
+        let execution_gas_reservation =
+            self.tx_gas_limit_cap.map_or(tx_gas_limit, |cap| tx_gas_limit.min(cap));
+        self.validate_tx_reservations(tx_gas_limit, execution_gas_reservation, tx_gas_limit)
+    }
+
+    fn validate_tx_reservations(
+        &self,
+        tx_gas_limit: u64,
+        execution_gas_reservation: u64,
+        state_gas_reservation: u64,
+    ) -> Result<(), BlockExecutionError> {
         let block_gas_used = if self.enable_amsterdam_eip8037 {
             self.block_regular_gas_used
         } else {
             self.cumulative_tx_gas_used
         };
         let block_available_gas = self.block_gas_limit.saturating_sub(block_gas_used);
-        let tx_min_gas_limit =
-            self.tx_gas_limit_cap.map_or(tx_gas_limit, |cap| tx_gas_limit.min(cap));
+        let tx_min_gas_limit = if self.enable_amsterdam_eip8037 {
+            execution_gas_reservation
+        } else {
+            self.tx_gas_limit_cap.map_or(tx_gas_limit, |cap| tx_gas_limit.min(cap))
+        };
 
         if tx_min_gas_limit > block_available_gas {
             return Err(BlockValidationError::TransactionGasLimitMoreThanAvailableBlockGas {
@@ -330,7 +350,7 @@ impl BlockGasTracker {
         if self.enable_amsterdam_eip8037 {
             let state_gas_available =
                 self.block_gas_limit.saturating_sub(self.block_state_gas_used);
-            if tx_gas_limit > state_gas_available {
+            if state_gas_reservation > state_gas_available {
                 return Err(BlockValidationError::TransactionGasLimitMoreThanAvailableBlockGas {
                     transaction_gas_limit: tx_gas_limit,
                     block_available_gas: state_gas_available,
