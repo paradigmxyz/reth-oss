@@ -1036,9 +1036,17 @@ where
         T: PayloadTypes<BuiltPayload: BuiltPayload<Primitives = N>>,
         Evm: ConfigureEngineEvm<T::ExecutionData, Primitives = N>,
     {
-        debug!(target: "engine::tree::payload_validator", "Executing block");
-
         let has_bal = input.has_block_access_list();
+        let block_hash = env.hash;
+        info!(
+            target: "engine::tree::payload_validator",
+            block = ?block_hash,
+            parent = ?env.parent_hash,
+            transactions = input.transaction_count(),
+            has_bal,
+            "Executing block"
+        );
+
         let mut db = debug_span!(target: "engine::tree", "build_state_db").in_scope(|| {
             State::builder()
                 .with_database(StateProviderDatabase::new(state_provider))
@@ -1093,6 +1101,7 @@ where
             &receipt_tx,
             &executed_tx_index,
             has_bal,
+            block_hash,
         )?;
         drop(receipt_tx);
 
@@ -1113,7 +1122,14 @@ where
         let execution_duration = execution_start.elapsed();
         self.metrics.record_block_execution(&output, execution_duration);
         self.metrics.record_block_execution_gas_bucket(output.result.gas_used, execution_duration);
-        debug!(target: "engine::tree::payload_validator", elapsed = ?execution_duration, "Executed block");
+        info!(
+            target: "engine::tree::payload_validator",
+            block = ?block_hash,
+            gas_used = output.result.gas_used,
+            receipts = output.result.receipts.len(),
+            elapsed = ?execution_duration,
+            "Executed block"
+        );
 
         Ok((output, senders, result_rx, built_bal))
     }
@@ -1181,7 +1197,15 @@ where
         T: PayloadTypes<BuiltPayload: BuiltPayload<Primitives = N>>,
         V: PayloadValidator<T, Block = N::Block>,
     {
-        debug!(target: "engine::tree::payload_validator", "Executing block via BAL path");
+        let block_hash = env.hash;
+        info!(
+            target: "engine::tree::payload_validator",
+            block = ?block_hash,
+            parent = ?env.parent_hash,
+            transactions = env.transaction_count,
+            has_bal = env.decoded_bal.is_some(),
+            "Executing block via BAL path"
+        );
 
         let (receipt_tx, result_rx) = self.spawn_receipt_root_task(env.transaction_count);
         let input_bal = env.decoded_bal.ok_or_else(|| {
@@ -1211,8 +1235,11 @@ where
 
         self.metrics.record_block_execution(&output, execution_duration);
         self.metrics.record_block_execution_gas_bucket(output.result.gas_used, execution_duration);
-        debug!(
+        info!(
             target: "engine::tree::payload_validator",
+            block = ?block_hash,
+            gas_used = output.result.gas_used,
+            receipts = output.result.receipts.len(),
             elapsed = ?execution_duration,
             "Executed block via BAL path",
         );
@@ -1250,6 +1277,7 @@ where
         receipt_tx: &crossbeam_channel::Sender<IndexedReceipt<N::Receipt>>,
         executed_tx_index: &AtomicUsize,
         has_bal: bool,
+        block_hash: B256,
     ) -> Result<(E, Vec<Address>), BlockExecutionError>
     where
         E: BlockExecutor<Receipt = N::Receipt, Evm: alloy_evm::Evm<DB = &'a mut State<DB>>>,
@@ -1302,6 +1330,15 @@ where
             if tracing::enabled!(target: "engine::tree", Level::TRACE) {
                 trace!(target: "engine::tree", "Executing transaction");
             }
+
+            info!(
+                target: "engine::tree::payload_validator",
+                block = ?block_hash,
+                tx_index = senders.len() - 1,
+                tx_hash = ?tx.tx().tx_hash(),
+                sender = ?tx_signer,
+                "Executing transaction"
+            );
 
             let tx_start = Instant::now();
             executor.execute_transaction(tx)?;

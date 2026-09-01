@@ -2,7 +2,7 @@
 
 use crate::{ConfigureEvm, Database, OnStateHook, TxEnvFor};
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
-use alloy_consensus::{BlockHeader, Header};
+use alloy_consensus::{transaction::TxHashRef, BlockHeader, Header};
 use alloy_eip7928::{compute_block_access_list_hash, BlockAccessList};
 use alloy_eips::eip2718::WithEncoded;
 pub use alloy_evm::block::{BlockExecutor, BlockExecutorFactory, GasOutput};
@@ -622,7 +622,15 @@ where
         }
 
         for (tx_index, tx) in block.transactions_recovered().enumerate() {
-            info!(target: "reth::evm", tx_index, "Executing transaction");
+            info!(
+                target: "reth::evm",
+                block = ?block.hash(),
+                block_number = block.header().number(),
+                tx_index,
+                tx_hash = ?tx.tx_hash(),
+                sender = ?tx.signer(),
+                "Executing transaction"
+            );
             executor.execute_transaction(tx)?;
             if has_bal {
                 executor.evm_mut().db_mut().bump_bal_index();

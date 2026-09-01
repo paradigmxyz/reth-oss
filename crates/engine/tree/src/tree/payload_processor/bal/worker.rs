@@ -98,6 +98,15 @@ pub(super) fn spawn_worker<'scope, Evm, Tx, Err, DB, MakeDb>(
                 let signer = *tx.signer();
                 let tx_gas_limit = tx.tx().gas_limit();
 
+                tracing::info!(
+                    target: "engine::tree::payload_processor::bal",
+                    tx_index = index,
+                    tx_hash = ?tx.tx_hash(),
+                    sender = ?signer,
+                    tx_gas_limit,
+                    "Executing BAL worker transaction"
+                );
+
                 executor.evm_mut().db_mut().set_bal_index(BlockAccessIndex::new(index as u64 + 1));
                 let result = executor
                     .execute_transaction_without_commit(tx)

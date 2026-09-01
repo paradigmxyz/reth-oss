@@ -296,16 +296,62 @@ jobs:
         scenario:
           # Bogota is currently narrowed to the EIP-8141 fixtures only.
           - sim: ethereum/eels/consume-engine
+            name: all
             limit: '.*8141.*'
             include: []
           # consume-rlp
           - sim: ethereum/eels/consume-rlp
+            name: all
             limit: '.*8141.*'
             include: []
+          # Run the valid EIP-8141 cases separately so expected-invalid cases do not obscure
+          # failures in transactions that should execute successfully.
+          - sim: ethereum/eels/consume-engine
+            name: valid
+            limit: '.*8141.*'
+            include:
+              - 'test_admission_validity\.py::(test_admission_constraints.*max_cost_within_bound|test_nonce_at_maximum|test_block_capacity_reservations.*(execution_reservation_at_limit|state_reservation_at_limit)).*'
+              - 'test_block_access_lists\.py::.*'
+              - 'test_expiry_verifier\.py::test_expiry_verifier_frame.*(future_expiry|expiry_at_block_timestamp).*'
+              - 'test_frame_transactions\.py::(test_transfer_with_default_code|test_contract_sender_approves|test_eoa_paymaster|test_atomic_batch_rollback|test_frame_revert_discards_the_approval_it_granted.*returns|test_refused_approval_reverts_only_its_call_frame).*'
+              - 'test_gas_settlement\.py::.*'
+              - 'test_introspection\.py::.*'
+              - 'test_state_gas\.py::(test_same_frame_refill|test_cross_frame_refill|test_state_gas_exhaustion|test_approve_creates_sender|test_refill_after_intermediate_modification|test_batch_unroll_restores_refilled_receipt|test_frame_revert_restores_refilled_receipt).*'
+              - 'test_static_validity\.py::test_invalid_tx_fields(_transaction)?\[.*(priority_fee_equals_max_fee|frame_count_at_max)\].*'
+              - 'test_static_validity\.py::test_frame_constraints(_transaction)?\[.*(sender_frame_with_value|approve_execution_frame_with_explicit_sender_target|atomic_batch_of_default_frames|approval_scope_after_batch_terminator)\].*'
+              - 'test_static_validity\.py::test_expiry_verifier_constraints(_transaction)?\[.*(default_frame_targeting_expiry_verifier|verify_frame_with_expiry_data_to_other_target)\].*'
+              - 'test_static_validity\.py::test_signature_constraints(_transaction)?\[.*(secp256k1_digest_entry|arbitrary_entry|p256_valid_entry)\].*'
+              - 'test_static_validity\.py::test_gas_limit_cap_from_frame_gas(_transaction)?\[.*at_cap\].*'
+              - 'test_static_validity\.py::test_gas_limit_cap_exempts_state_gas(_transaction)?(\[.*\])?.*'
+              - 'test_static_validity\.py::test_gas_limit_cap_from_calldata_floor(_transaction)?\[.*below_cap\].*'
+              - 'test_target_resolution\.py::(test_precompile_target|test_precompile_target_rejecting_its_input|test_verify_frame_target_above_the_precompile_gap|test_delegated_target_entry_charge|test_dead_target_entry_charge|test_delegated_to_precompile_target|test_frame_entry_gas_boundary|test_entry_charge_halt_unrolls_batch|test_default_code_entry_gas_shortfall.*affordable|test_verify_frame_delegated_to_precompile_target).*'
+              - 'test_value_transfer\.py::test_value_transfer\[.*'
+              - 'test_warmth\.py::.*'
+          - sim: ethereum/eels/consume-rlp
+            name: valid
+            limit: '.*8141.*'
+            include:
+              - 'test_admission_validity\.py::(test_admission_constraints.*max_cost_within_bound|test_nonce_at_maximum|test_block_capacity_reservations.*(execution_reservation_at_limit|state_reservation_at_limit)).*'
+              - 'test_block_access_lists\.py::.*'
+              - 'test_expiry_verifier\.py::test_expiry_verifier_frame.*(future_expiry|expiry_at_block_timestamp).*'
+              - 'test_frame_transactions\.py::(test_transfer_with_default_code|test_contract_sender_approves|test_eoa_paymaster|test_atomic_batch_rollback|test_frame_revert_discards_the_approval_it_granted.*returns|test_refused_approval_reverts_only_its_call_frame).*'
+              - 'test_gas_settlement\.py::.*'
+              - 'test_introspection\.py::.*'
+              - 'test_state_gas\.py::(test_same_frame_refill|test_cross_frame_refill|test_state_gas_exhaustion|test_approve_creates_sender|test_refill_after_intermediate_modification|test_batch_unroll_restores_refilled_receipt|test_frame_revert_restores_refilled_receipt).*'
+              - 'test_static_validity\.py::test_invalid_tx_fields(_transaction)?\[.*(priority_fee_equals_max_fee|frame_count_at_max)\].*'
+              - 'test_static_validity\.py::test_frame_constraints(_transaction)?\[.*(sender_frame_with_value|approve_execution_frame_with_explicit_sender_target|atomic_batch_of_default_frames|approval_scope_after_batch_terminator)\].*'
+              - 'test_static_validity\.py::test_expiry_verifier_constraints(_transaction)?\[.*(default_frame_targeting_expiry_verifier|verify_frame_with_expiry_data_to_other_target)\].*'
+              - 'test_static_validity\.py::test_signature_constraints(_transaction)?\[.*(secp256k1_digest_entry|arbitrary_entry|p256_valid_entry)\].*'
+              - 'test_static_validity\.py::test_gas_limit_cap_from_frame_gas(_transaction)?\[.*at_cap\].*'
+              - 'test_static_validity\.py::test_gas_limit_cap_exempts_state_gas(_transaction)?(\[.*\])?.*'
+              - 'test_static_validity\.py::test_gas_limit_cap_from_calldata_floor(_transaction)?\[.*below_cap\].*'
+              - 'test_target_resolution\.py::(test_precompile_target|test_precompile_target_rejecting_its_input|test_verify_frame_target_above_the_precompile_gap|test_delegated_target_entry_charge|test_dead_target_entry_charge|test_delegated_to_precompile_target|test_frame_entry_gas_boundary|test_entry_charge_halt_unrolls_batch|test_default_code_entry_gas_shortfall.*affordable|test_verify_frame_delegated_to_precompile_target).*'
+              - 'test_value_transfer\.py::test_value_transfer\[.*'
+              - 'test_warmth\.py::.*'
     needs:
       - build-reth
       - prepare-hive
-    name: Hive-Bogota / ${{ matrix.scenario.sim }}${{ matrix.scenario.limit && format(' - {0}', matrix.scenario.limit) }}
+    name: Hive-Bogota / ${{ matrix.scenario.name }} / ${{ matrix.scenario.sim }}${{ matrix.scenario.limit && format(' - {0}', matrix.scenario.limit) }}
     # Use larger runners for eels tests to avoid OOM runner crashes
     runs-on: ${{ github.repository == 'paradigmxyz/reth-oss' && (contains(matrix.scenario.sim, 'eels') && 'depot-ubuntu-latest-8' || 'depot-ubuntu-latest-4') || 'ubuntu-latest' }}
     permissions:
