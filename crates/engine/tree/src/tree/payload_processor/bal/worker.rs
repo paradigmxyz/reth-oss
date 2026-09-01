@@ -101,7 +101,6 @@ pub(super) fn spawn_worker<'scope, Evm, Tx, Err, DB, MakeDb>(
                 tracing::info!(
                     target: "engine::tree::payload_processor::bal",
                     tx_index = index,
-                    tx_hash = ?tx.tx_hash(),
                     sender = ?signer,
                     tx_gas_limit,
                     "Executing BAL worker transaction"
