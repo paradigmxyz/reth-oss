@@ -12,7 +12,7 @@ use crossbeam_channel::Receiver;
 use reth_primitives_traits::Receipt;
 use reth_trie_common::ordered_root::OrderedTrieRootEncodedBuilder;
 use tokio::sync::oneshot;
-use tracing::debug_span;
+use tracing::{debug_span, info};
 
 const RECEIPT_ENCODE_BUF_INITIAL_CAPACITY: usize = 512;
 
@@ -83,11 +83,33 @@ impl<R: Receipt> ReceiptRootTaskHandle<R> {
         let mut next = 0usize;
         let mut pending = HashMap::new();
 
-        let mut push = |receipt: R| {
+        let mut push = |index: usize, receipt: R| {
+            let tx_type = receipt.ty();
+            if tx_type == 0x06 {
+                info!(
+                    target: "engine::tree::payload_processor",
+                    receipt_index = index,
+                    tx_type,
+                    cumulative_gas_used = receipt.cumulative_gas_used(),
+                    log_count = receipt.logs().len(),
+                    receipt = ?receipt,
+                    "Preparing EIP-8141 receipt for receipt root"
+                );
+            }
+
             let receipt_with_bloom = receipt.with_bloom_ref();
 
             encode_buf.clear();
             receipt_with_bloom.encode_2718(&mut encode_buf);
+
+            info!(
+                target: "engine::tree::payload_processor",
+                receipt_index = index,
+                tx_type,
+                encoded_length = encode_buf.len(),
+                encoded_receipt = %alloy_primitives::hex::encode(&encode_buf),
+                "Encoded receipt for receipt root"
+            );
 
             aggregated_bloom |= *receipt_with_bloom.bloom_ref();
             builder.push_next(&encode_buf);
@@ -95,11 +117,11 @@ impl<R: Receipt> ReceiptRootTaskHandle<R> {
 
         for indexed_receipt in self.receipt_rx {
             if indexed_receipt.index == next {
-                push(indexed_receipt.receipt);
+                push(indexed_receipt.index, indexed_receipt.receipt);
                 next += 1;
 
                 while let Some(receipt) = pending.remove(&next) {
-                    push(receipt);
+                    push(next, receipt);
                     next += 1;
                 }
             } else {
