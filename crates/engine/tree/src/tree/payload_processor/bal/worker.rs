@@ -3,7 +3,7 @@ use alloy_consensus::Transaction;
 use alloy_eip7928::BlockAccessIndex;
 use alloy_evm::{
     block::{BlockExecutionError, BlockExecutor, BlockExecutorFactory},
-    eth::block::transaction_gas_reservation,
+    eth::transaction_gas_reservation,
     Evm, RecoveredTx,
 };
 use alloy_primitives::Address;
