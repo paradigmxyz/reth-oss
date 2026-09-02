@@ -2,11 +2,9 @@ use super::BalExecutionError;
 use alloy_consensus::Transaction;
 use alloy_eip7928::BlockAccessIndex;
 use alloy_evm::{
-    block::{
-        transaction_gas_reservation, BlockExecutionError, BlockExecutor, BlockExecutorFactory,
-        ExecutableTxParts,
-    },
-    Evm,
+    block::{BlockExecutionError, BlockExecutor, BlockExecutorFactory},
+    eth::block::transaction_gas_reservation,
+    Evm, RecoveredTx,
 };
 use alloy_primitives::Address;
 use crossbeam_channel::{Receiver, Sender};
