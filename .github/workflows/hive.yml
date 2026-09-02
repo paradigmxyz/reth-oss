@@ -304,6 +304,95 @@ jobs:
             name: all
             limit: '.*8141.*'
             include: []
+          # Isolate EIP-8141 failures by test module.
+          - sim: ethereum/eels/consume-engine
+            name: admission-validity
+            limit: '.*tests/amsterdam/eip8141_frame_transactions/test_admission_validity\.py.*'
+            include: []
+          - sim: ethereum/eels/consume-rlp
+            name: admission-validity
+            limit: '.*tests/amsterdam/eip8141_frame_transactions/test_admission_validity\.py.*'
+            include: []
+          - sim: ethereum/eels/consume-engine
+            name: block-access-lists
+            limit: '.*tests/amsterdam/eip8141_frame_transactions/test_block_access_lists\.py.*'
+            include: []
+          - sim: ethereum/eels/consume-rlp
+            name: block-access-lists
+            limit: '.*tests/amsterdam/eip8141_frame_transactions/test_block_access_lists\.py.*'
+            include: []
+          - sim: ethereum/eels/consume-engine
+            name: expiry-verifier
+            limit: '.*tests/amsterdam/eip8141_frame_transactions/test_expiry_verifier\.py.*'
+            include: []
+          - sim: ethereum/eels/consume-rlp
+            name: expiry-verifier
+            limit: '.*tests/amsterdam/eip8141_frame_transactions/test_expiry_verifier\.py.*'
+            include: []
+          - sim: ethereum/eels/consume-engine
+            name: frame-transactions
+            limit: '.*tests/amsterdam/eip8141_frame_transactions/test_frame_transactions\.py.*'
+            include: []
+          - sim: ethereum/eels/consume-rlp
+            name: frame-transactions
+            limit: '.*tests/amsterdam/eip8141_frame_transactions/test_frame_transactions\.py.*'
+            include: []
+          - sim: ethereum/eels/consume-engine
+            name: gas-settlement
+            limit: '.*tests/amsterdam/eip8141_frame_transactions/test_gas_settlement\.py.*'
+            include: []
+          - sim: ethereum/eels/consume-rlp
+            name: gas-settlement
+            limit: '.*tests/amsterdam/eip8141_frame_transactions/test_gas_settlement\.py.*'
+            include: []
+          - sim: ethereum/eels/consume-engine
+            name: introspection
+            limit: '.*tests/amsterdam/eip8141_frame_transactions/test_introspection\.py.*'
+            include: []
+          - sim: ethereum/eels/consume-rlp
+            name: introspection
+            limit: '.*tests/amsterdam/eip8141_frame_transactions/test_introspection\.py.*'
+            include: []
+          - sim: ethereum/eels/consume-engine
+            name: state-gas
+            limit: '.*tests/amsterdam/eip8141_frame_transactions/test_state_gas\.py.*'
+            include: []
+          - sim: ethereum/eels/consume-rlp
+            name: state-gas
+            limit: '.*tests/amsterdam/eip8141_frame_transactions/test_state_gas\.py.*'
+            include: []
+          - sim: ethereum/eels/consume-engine
+            name: static-validity
+            limit: '.*tests/amsterdam/eip8141_frame_transactions/test_static_validity\.py.*'
+            include: []
+          - sim: ethereum/eels/consume-rlp
+            name: static-validity
+            limit: '.*tests/amsterdam/eip8141_frame_transactions/test_static_validity\.py.*'
+            include: []
+          - sim: ethereum/eels/consume-engine
+            name: target-resolution
+            limit: '.*tests/amsterdam/eip8141_frame_transactions/test_target_resolution\.py.*'
+            include: []
+          - sim: ethereum/eels/consume-rlp
+            name: target-resolution
+            limit: '.*tests/amsterdam/eip8141_frame_transactions/test_target_resolution\.py.*'
+            include: []
+          - sim: ethereum/eels/consume-engine
+            name: value-transfer
+            limit: '.*tests/amsterdam/eip8141_frame_transactions/test_value_transfer\.py.*'
+            include: []
+          - sim: ethereum/eels/consume-rlp
+            name: value-transfer
+            limit: '.*tests/amsterdam/eip8141_frame_transactions/test_value_transfer\.py.*'
+            include: []
+          - sim: ethereum/eels/consume-engine
+            name: warmth
+            limit: '.*tests/amsterdam/eip8141_frame_transactions/test_warmth\.py.*'
+            include: []
+          - sim: ethereum/eels/consume-rlp
+            name: warmth
+            limit: '.*tests/amsterdam/eip8141_frame_transactions/test_warmth\.py.*'
+            include: []
           # Run the valid EIP-8141 cases separately so expected-invalid cases do not obscure
           # failures in transactions that should execute successfully.
           - sim: ethereum/eels/consume-engine
