@@ -17,8 +17,9 @@ use reth_rpc_server_types::result::{
     block_id_to_str, internal_rpc_err, invalid_params_rpc_err, rpc_err, rpc_error_with_code,
 };
 use reth_transaction_pool::error::{
-    Eip4844PoolTransactionError, Eip7702PoolTransactionError, InvalidPoolTransactionError,
-    PoolError, PoolErrorKind, PoolTransactionError, RawPoolTransactionError,
+    Eip4844PoolTransactionError, Eip7702PoolTransactionError, Eip8141PoolTransactionError,
+    InvalidPoolTransactionError, PoolError, PoolErrorKind, PoolTransactionError,
+    RawPoolTransactionError,
 };
 use revm::{
     context_interface::result::{
@@ -1063,6 +1064,9 @@ pub enum RpcPoolError {
     /// EIP-7702 related error
     #[error(transparent)]
     Eip7702(#[from] Eip7702PoolTransactionError),
+    /// EIP-8141 related error
+    #[error(transparent)]
+    Eip8141(#[from] Eip8141PoolTransactionError),
     /// Thrown if a conflicting transaction type is already in the pool
     ///
     /// In other words, thrown if a transaction with the same sender that violates the exclusivity
@@ -1094,6 +1098,7 @@ impl From<RpcPoolError> for jsonrpsee_types::error::ErrorObject<'static> {
             RpcPoolError::PoolTransactionError(_) |
             RpcPoolError::Eip4844(_) |
             RpcPoolError::Eip7702(_) |
+            RpcPoolError::Eip8141(_) |
             RpcPoolError::AddressAlreadyReserved => {
                 rpc_error_with_code(EthRpcErrorCode::InvalidInput.code(), error.to_string())
             }
@@ -1143,6 +1148,7 @@ impl From<InvalidPoolTransactionError> for RpcPoolError {
             InvalidPoolTransactionError::Other(err) => Self::PoolTransactionError(err),
             InvalidPoolTransactionError::Eip4844(err) => Self::Eip4844(err),
             InvalidPoolTransactionError::Eip7702(err) => Self::Eip7702(err),
+            InvalidPoolTransactionError::Eip8141(err) => Self::Eip8141(err),
             InvalidPoolTransactionError::Overdraft { cost, balance } => {
                 Self::Invalid(RpcInvalidTransactionError::InsufficientFunds { cost, balance })
             }
