@@ -60,8 +60,12 @@ impl Receipt {
     /// Converts this receipt into its consensus envelope.
     pub fn to_envelope(&self) -> ReceiptEnvelope {
         match &self.inner {
-            EthereumReceipt::Standard(data) => data.clone().into(),
-            EthereumReceipt::Frame { payload, .. } => ReceiptEnvelope::Eip8141(payload.clone()),
+            EthereumReceipt::Standard(data) => {
+                data.clone().try_into().expect("standard receipt conversion cannot fail")
+            }
+            EthereumReceipt::Frame { payload, .. } => {
+                ReceiptEnvelope::Eip8141(payload.clone().into())
+            }
         }
     }
 
