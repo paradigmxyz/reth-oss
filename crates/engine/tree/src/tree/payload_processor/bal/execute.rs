@@ -315,6 +315,7 @@ impl BlockGasTracker {
     /// - state: the full, uncapped tx gas limit must fit the remaining state budget for standard
     ///   transactions; frame transactions use their explicit state reservation (execution-specs
     ///   `check_block_gas_capacity`)
+    #[cfg(test)]
     fn validate_tx_limit(&self, tx_gas_limit: u64) -> Result<(), BlockExecutionError> {
         let execution_gas_reservation =
             self.tx_gas_limit_cap.map_or(tx_gas_limit, |cap| tx_gas_limit.min(cap));
