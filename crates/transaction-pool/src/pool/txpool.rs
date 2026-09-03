@@ -1893,6 +1893,7 @@ impl<T: PoolTransaction> AllTransactions<T> {
         on_chain_balance: U256,
         ancestor: Option<TransactionId>,
     ) -> Result<ValidPoolTransaction<T>, InsertErr<T>> {
+        let enforce_sender_balance = !new_blob_tx.transaction.is_eip8141();
         if let Some(ancestor) = ancestor {
             let Some(ancestor_tx) = self.txs.get(&ancestor) else {
                 // ancestor tx is missing, so we can't insert the new blob
@@ -1910,7 +1911,7 @@ impl<T: PoolTransaction> AllTransactions<T> {
             let mut cumulative_cost = ancestor_tx.next_cumulative_cost() + new_blob_tx.cost();
 
             // check if the new blob would go into overdraft
-            if cumulative_cost > on_chain_balance {
+            if enforce_sender_balance && cumulative_cost > on_chain_balance {
                 // the transaction would go into overdraft
                 return Err(InsertErr::Overdraft { transaction: Arc::new(new_blob_tx) })
             }
@@ -1928,13 +1929,16 @@ impl<T: PoolTransaction> AllTransactions<T> {
                 // check if any of descendant blob transactions should be shifted into overdraft
                 for (_, tx) in descendants {
                     cumulative_cost += tx.transaction.cost();
-                    if tx.transaction.is_eip4844() && cumulative_cost > on_chain_balance {
+                    if enforce_sender_balance &&
+                        tx.transaction.is_blob_transaction() &&
+                        cumulative_cost > on_chain_balance
+                    {
                         // the transaction would shift
                         return Err(InsertErr::Overdraft { transaction: Arc::new(new_blob_tx) })
                     }
                 }
             }
-        } else if new_blob_tx.cost() > &on_chain_balance {
+        } else if enforce_sender_balance && new_blob_tx.cost() > &on_chain_balance {
             // the transaction would go into overdraft
             return Err(InsertErr::Overdraft { transaction: Arc::new(new_blob_tx) })
         }
@@ -2001,7 +2005,7 @@ impl<T: PoolTransaction> AllTransactions<T> {
 
         // before attempting to insert a blob transaction, we need to ensure that additional
         // constraints are met that only apply to blob transactions
-        if transaction.is_eip4844() {
+        if transaction.is_blob_transaction() {
             state.insert(TxState::BLOB_TRANSACTION);
 
             transaction =
@@ -2115,11 +2119,11 @@ impl<T: PoolTransaction> AllTransactions<T> {
                 // Update for next transaction
                 cumulative_cost = tx.next_cumulative_cost();
 
-                if cumulative_cost > on_chain_balance {
+                if tx.transaction.transaction.is_eip8141() || cumulative_cost <= on_chain_balance {
+                    tx.state.insert(TxState::ENOUGH_BALANCE);
+                } else {
                     // sender lacks sufficient funds to pay for this transaction
                     tx.state.remove(TxState::ENOUGH_BALANCE);
-                } else {
-                    tx.state.insert(TxState::ENOUGH_BALANCE);
                 }
 
                 // Update ancestor condition.
@@ -2335,7 +2339,11 @@ pub(crate) struct PoolInternalTransaction<T: PoolTransaction> {
 
 impl<T: PoolTransaction> PoolInternalTransaction<T> {
     fn next_cumulative_cost(&self) -> U256 {
-        self.cumulative_cost + self.transaction.cost()
+        if self.transaction.transaction.is_eip8141() {
+            self.cumulative_cost
+        } else {
+            self.cumulative_cost + self.transaction.cost()
+        }
     }
 }
 

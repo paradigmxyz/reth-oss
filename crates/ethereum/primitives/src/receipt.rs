@@ -521,7 +521,8 @@ mod tests {
                 gas_used: FrameGasUsed { execution: 21_000, state: 0 },
                 logs: vec![log.clone()],
             }],
-        });
+        }
+        .into());
 
         let receipt = Receipt::from_envelope(envelope.clone());
         assert_eq!(receipt.logs(), &[log]);

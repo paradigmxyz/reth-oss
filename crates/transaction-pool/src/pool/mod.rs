@@ -96,7 +96,7 @@ use parking_lot::{Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use reth_eth_wire_types::HandleMempoolData;
 use reth_execution_types::ChangedAccount;
 
-use alloy_eips::{eip7594::BlobTransactionSidecarVariant, Typed2718};
+use alloy_eips::eip7594::BlobTransactionSidecarVariant;
 use reth_primitives_traits::Recovered;
 use rustc_hash::FxHashMap;
 use std::{
@@ -484,9 +484,9 @@ where
     where
         <V as TransactionValidator>::Transaction: EthPoolTransaction,
     {
-        if transaction.is_eip4844() {
+        if transaction.is_blob_transaction() {
             let sidecar = self.blob_store.get(*transaction.hash()).ok()??;
-            transaction.transaction.clone().try_into_pooled_eip4844(sidecar)
+            transaction.transaction.clone().try_into_pooled_blob(sidecar)
         } else {
             transaction
                 .transaction
@@ -598,8 +598,8 @@ where
                     ValidTransaction::Valid(tx) => (tx, None),
                     ValidTransaction::ValidWithSidecar { transaction, sidecar } => {
                         debug_assert!(
-                            transaction.is_eip4844(),
-                            "validator returned sidecar for non EIP-4844 transaction"
+                            transaction.is_blob_transaction(),
+                            "validator returned sidecar for a transaction without blobs"
                         );
                         (transaction, Some(sidecar))
                     }
@@ -1340,7 +1340,7 @@ where
     ) {
         let blob_txs = transactions
             .into_iter()
-            .filter(|tx| tx.transaction.is_eip4844())
+            .filter(|tx| tx.transaction.is_blob_transaction())
             .map(|tx| *tx.hash())
             .collect();
         self.delete_blobs(blob_txs);
@@ -1489,7 +1489,9 @@ impl<T: PoolTransaction> AddedTransaction<T> {
 
     /// Returns the hash of the replaced transaction if it is a blob transaction.
     pub(crate) fn replaced_blob_transaction(&self) -> Option<B256> {
-        self.replaced().filter(|tx| tx.transaction.is_eip4844()).map(|tx| *tx.transaction.hash())
+        self.replaced()
+            .filter(|tx| tx.transaction.is_blob_transaction())
+            .map(|tx| *tx.transaction.hash())
     }
 
     /// Returns the hash of the transaction

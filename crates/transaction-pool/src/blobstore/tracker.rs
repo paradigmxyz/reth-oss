@@ -1,6 +1,6 @@
 //! Support for maintaining the blob pool.
 
-use alloy_consensus::{transaction::TxHashRef, Typed2718};
+use alloy_consensus::{transaction::TxHashRef, Transaction};
 use alloy_primitives::{BlockNumber, B256};
 use reth_execution_types::ChainBlocks;
 use reth_primitives_traits::{Block, BlockBody, SignedTransaction};
@@ -48,7 +48,7 @@ impl BlobStoreCanonTracker {
                 .body()
                 .transactions()
                 .iter()
-                .filter(|tx| tx.is_eip4844())
+                .filter(|tx| (*tx).blob_count().is_some_and(|count| count > 0))
                 .map(|tx| *tx.tx_hash());
             (*num, iter)
         });

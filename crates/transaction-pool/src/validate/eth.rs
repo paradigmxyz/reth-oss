@@ -4,7 +4,8 @@ use super::constants::DEFAULT_MAX_TX_INPUT_BYTES;
 use crate::{
     blobstore::{BlobStore, PooledBlobSidecar},
     error::{
-        Eip4844PoolTransactionError, Eip7702PoolTransactionError, InvalidPoolTransactionError,
+        Eip4844PoolTransactionError, Eip7702PoolTransactionError,
+        Eip8141PoolTransactionError, InvalidPoolTransactionError,
     },
     metrics::TxPoolValidationMetrics,
     traits::TransactionOrigin,
@@ -491,6 +492,19 @@ where
             _ => {}
         };
 
+        if transaction.is_eip8141() {
+            transaction
+                .validate_eip8141_structure()
+                .map_err(Eip8141PoolTransactionError::InvalidTransaction)?;
+
+            // EIP-8141 public admission requires simulating the transaction's validation frames.
+            // Until the pool has that context, only explicitly local/private transactions are
+            // retained and none are propagated.
+            if origin.is_external() {
+                return Err(Eip8141PoolTransactionError::PublicMempoolValidationUnavailable.into())
+            }
+        }
+
         // Reject transactions with a nonce equal to U64::max according to EIP-2681
         let tx_nonce = transaction.nonce();
         if tx_nonce == u64::MAX {
@@ -509,6 +523,14 @@ where
                     .map(|access_list| access_list.length())
                     .unwrap_or_default(),
             );
+            if tx_size > self.max_tx_input_bytes {
+                return Err(InvalidPoolTransactionError::OversizedData {
+                    size: tx_size,
+                    limit: self.max_tx_input_bytes,
+                })
+            }
+        } else if transaction.is_blob_transaction() {
+            let tx_size = transaction.encoded_2718_consensus().len();
             if tx_size > self.max_tx_input_bytes {
                 return Err(InvalidPoolTransactionError::OversizedData {
                     size: tx_size,
@@ -674,11 +696,13 @@ where
         };
 
         // check for bytecode
-        match self.validate_sender_bytecode(&transaction, &account, &state) {
-            Err(outcome) => return outcome,
-            Ok(Err(err)) => return TransactionValidationOutcome::Invalid(transaction, err),
-            _ => {}
-        };
+        if !transaction.is_eip8141() {
+            match self.validate_sender_bytecode(&transaction, &account, &state) {
+                Err(outcome) => return outcome,
+                Ok(Err(err)) => return TransactionValidationOutcome::Invalid(transaction, err),
+                _ => {}
+            };
+        }
 
         // Checks for nonce
         if transaction.requires_nonce_check() &&
@@ -688,8 +712,10 @@ where
         }
 
         // checks for max cost not exceedng account_balance
-        if let Err(err) = self.validate_sender_balance(&transaction, &account) {
-            return TransactionValidationOutcome::Invalid(transaction, err)
+        if !transaction.is_eip8141() {
+            if let Err(err) = self.validate_sender_balance(&transaction, &account) {
+                return TransactionValidationOutcome::Invalid(transaction, err)
+            }
         }
 
         // heavy blob tx validation
@@ -706,6 +732,7 @@ where
         }
 
         let authorities = self.recover_authorities(&transaction);
+        let is_eip8141 = transaction.is_eip8141();
         // Return the valid transaction
         TransactionValidationOutcome::Valid {
             balance: account.balance,
@@ -713,12 +740,16 @@ where
             bytecode_hash: account.bytecode_hash,
             transaction: ValidTransaction::new(transaction, maybe_blob_sidecar),
             // by this point assume all external transactions should be propagated
-            propagate: match origin {
-                TransactionOrigin::External => true,
-                TransactionOrigin::Local => {
-                    self.local_transactions_config.propagate_local_transactions
+            propagate: if is_eip8141 {
+                false
+            } else {
+                match origin {
+                    TransactionOrigin::External => true,
+                    TransactionOrigin::Local => {
+                        self.local_transactions_config.propagate_local_transactions
+                    }
+                    TransactionOrigin::Private => false,
                 }
-                TransactionOrigin::Private => false,
             },
             authorities,
         }
@@ -805,7 +836,7 @@ where
         let mut maybe_blob_sidecar = None;
 
         // heavy blob tx validation
-        if transaction.is_eip4844() {
+        if transaction.is_blob_transaction() {
             // extract the blob from the transaction
             match transaction.take_blob() {
                 EthBlobTransactionSidecar::None => {
@@ -1587,12 +1618,13 @@ mod tests {
         blobstore::InMemoryBlobStore, error::PoolErrorKind, test_utils::TransactionBuilder,
         traits::PoolTransaction, CoinbaseTipOrdering, EthPooledTransaction, Pool, TransactionPool,
     };
-    use alloy_consensus::Transaction;
+    use alloy_consensus::{Transaction, TxEip8141};
     use alloy_eips::{
         eip2718::{Decodable2718, Encodable2718},
         eip2930::{AccessList, AccessListItem},
+        eip8141::{Frame, TransactionFees},
     };
-    use alloy_primitives::{hex, Address, Bytes, B256, U256};
+    use alloy_primitives::{hex, Address, Bytes, Sealable, B256, U256};
     use reth_ethereum_primitives::PooledTransactionVariant;
     use reth_evm_ethereum::EthEvmConfig;
     use reth_primitives_traits::SignedTransaction;
@@ -1636,6 +1668,61 @@ mod tests {
             alloy_consensus::transaction::Recovered::new_unchecked(signed, sender),
             200,
         )
+    }
+
+    fn eip8141_tx(chain_id: u64, sender: Address) -> EthPooledTransaction {
+        let tx = TxEip8141 {
+            chain_id,
+            sender,
+            frames: vec![Frame::default()],
+            fees: TransactionFees {
+                max_priority_fee_per_gas: U256::ZERO,
+                max_fee_per_gas: U256::from(1),
+                max_fee_per_blob_gas: U256::ZERO,
+            },
+            ..Default::default()
+        };
+        let encoded_length = tx.eip2718_encoded_length();
+        let tx = reth_ethereum_primitives::TransactionSigned::Eip8141(tx.seal_slow());
+        EthPooledTransaction::new(
+            alloy_consensus::transaction::Recovered::new_unchecked(tx, sender),
+            encoded_length,
+        )
+    }
+
+    #[test]
+    fn eip8141_external_transactions_require_public_validation() {
+        let provider = MockEthProvider::default().with_genesis_block();
+        let validator = EthTransactionValidatorBuilder::new(provider, test_evm_config())
+            .set_bogota(true)
+            .build(InMemoryBlobStore::default());
+        let transaction = eip8141_tx(validator.chain_id(), Address::repeat_byte(0x41));
+
+        assert!(matches!(
+            validator.validate_stateless(TransactionOrigin::External, &transaction),
+            Err(InvalidPoolTransactionError::Eip8141(
+                Eip8141PoolTransactionError::PublicMempoolValidationUnavailable
+            ))
+        ));
+    }
+
+    #[test]
+    fn eip8141_local_transaction_skips_eoa_and_sender_balance_checks() {
+        let sender = Address::repeat_byte(0x41);
+        let provider = MockEthProvider::default().with_genesis_block();
+        provider.add_account(
+            sender,
+            ExtendedAccount::new(0, U256::ZERO).with_bytecode(Bytes::from_static(&[0x60, 0x00])),
+        );
+        let validator = EthTransactionValidatorBuilder::new(provider, test_evm_config())
+            .set_bogota(true)
+            .build(InMemoryBlobStore::default());
+        let transaction = eip8141_tx(validator.chain_id(), sender);
+
+        assert!(matches!(
+            validator.validate_one(TransactionOrigin::Local, transaction),
+            TransactionValidationOutcome::Valid { propagate: false, .. }
+        ));
     }
 
     /// EIP-2780 replaces the flat 21k intrinsic base with a decomposed one: 12k base, plus a cold

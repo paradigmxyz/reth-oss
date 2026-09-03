@@ -937,6 +937,7 @@ impl EthPoolTransaction for MockTransaction {
         let (tx, signer) = self.into_consensus().into_parts();
         tx.try_into_pooled_eip4844(Arc::unwrap_or_clone(sidecar))
             .map(|tx| tx.with_signer(signer))
+            .map(|tx| tx.map(Into::into))
             .ok()
     }
 
@@ -948,6 +949,7 @@ impl EthPoolTransaction for MockTransaction {
         tx.try_into_pooled_eip4844(sidecar)
             .map(|tx| tx.with_signer(signer))
             .ok()
+            .map(|tx| tx.map(Into::into))
             .map(Self::from_pooled)
     }
 
