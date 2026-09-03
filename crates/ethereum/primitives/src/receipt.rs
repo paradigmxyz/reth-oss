@@ -513,16 +513,18 @@ mod tests {
             vec![],
             bytes!("8141"),
         );
-        let envelope = ReceiptEnvelope::Eip8141(FrameReceiptPayload {
-            cumulative_gas_used: 42_000,
-            payer: address!("0x0000000000000000000000000000000000000022"),
-            frame_receipts: vec![FrameReceipt {
-                status: FrameStatus::Success,
-                gas_used: FrameGasUsed { execution: 21_000, state: 0 },
-                logs: vec![log.clone()],
-            }],
-        }
-        .into());
+        let envelope = ReceiptEnvelope::Eip8141(
+            FrameReceiptPayload {
+                cumulative_gas_used: 42_000,
+                payer: address!("0x0000000000000000000000000000000000000022"),
+                frame_receipts: vec![FrameReceipt {
+                    status: FrameStatus::Success,
+                    gas_used: FrameGasUsed { execution: 21_000, state: 0 },
+                    logs: vec![log.clone()],
+                }],
+            }
+            .into(),
+        );
 
         let receipt = Receipt::from_envelope(envelope.clone());
         assert_eq!(receipt.logs(), &[log]);

@@ -4,8 +4,8 @@ use super::constants::DEFAULT_MAX_TX_INPUT_BYTES;
 use crate::{
     blobstore::{BlobStore, PooledBlobSidecar},
     error::{
-        Eip4844PoolTransactionError, Eip7702PoolTransactionError,
-        Eip8141PoolTransactionError, InvalidPoolTransactionError,
+        Eip4844PoolTransactionError, Eip7702PoolTransactionError, Eip8141PoolTransactionError,
+        InvalidPoolTransactionError,
     },
     metrics::TxPoolValidationMetrics,
     traits::TransactionOrigin,

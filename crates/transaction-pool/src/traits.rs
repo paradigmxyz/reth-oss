@@ -1684,9 +1684,8 @@ impl PoolTransaction for EthPooledTransaction {
                         (tx, Some(sidecar))
                     }
                 };
-                let tx = TransactionSigned::Eip8141(alloy_primitives::Sealed::new_unchecked(
-                    tx, hash,
-                ));
+                let tx =
+                    TransactionSigned::Eip8141(alloy_primitives::Sealed::new_unchecked(tx, hash));
                 let tx = Recovered::new_unchecked(tx, signer);
                 let mut pooled = Self::new(tx, encoded_length);
                 if let (Some(blob), Some(availability)) =
@@ -1850,8 +1849,7 @@ impl EthPoolTransaction for EthPooledTransaction {
         let (signed_transaction, signer) = self.into_consensus().into_parts();
         let pooled_transaction = match signed_transaction {
             TransactionSigned::Eip8141(tx) => {
-                let BlobTransactionSidecarVariant::Eip7594(sidecar) =
-                    Arc::unwrap_or_clone(sidecar)
+                let BlobTransactionSidecarVariant::Eip7594(sidecar) = Arc::unwrap_or_clone(sidecar)
                 else {
                     return None
                 };
@@ -1862,10 +1860,7 @@ impl EthPoolTransaction for EthPooledTransaction {
                     hash,
                 ))
             }
-            tx => tx
-                .try_into_pooled_eip4844(Arc::unwrap_or_clone(sidecar))
-                .ok()?
-                .into(),
+            tx => tx.try_into_pooled_eip4844(Arc::unwrap_or_clone(sidecar)).ok()?.into(),
         };
 
         Some(Recovered::new_unchecked(pooled_transaction, signer))
@@ -1889,23 +1884,20 @@ impl EthPoolTransaction for EthPooledTransaction {
     ) -> Option<Self> {
         let tx = match tx.into_parts() {
             (TransactionSigned::Eip8141(tx), signer) => {
-                let BlobTransactionSidecarVariant::Eip7594(sidecar) = sidecar else {
-                    return None
-                };
+                let BlobTransactionSidecarVariant::Eip7594(sidecar) = sidecar else { return None };
                 let (tx, hash) = tx.into_parts();
                 let tx = TxEip8141WithSidecar::new(tx, sidecar);
                 Recovered::new_unchecked(
-                    PooledTransactionVariant::Eip8141(
-                        alloy_primitives::Sealed::new_unchecked(tx.into(), hash),
-                    ),
+                    PooledTransactionVariant::Eip8141(alloy_primitives::Sealed::new_unchecked(
+                        tx.into(),
+                        hash,
+                    )),
                     signer,
                 )
             }
-            (tx, signer) => tx
-                .try_into_pooled_eip4844(sidecar)
-                .ok()?
-                .with_signer(signer)
-                .map(Into::into),
+            (tx, signer) => {
+                tx.try_into_pooled_eip4844(sidecar).ok()?.with_signer(signer).map(Into::into)
+            }
         };
         Some(Self::from_pooled(tx))
     }

@@ -402,9 +402,7 @@ pub async fn maintain_transaction_pool<N, Client, P, St>(
                                 .flatten()
                                 .map(Arc::unwrap_or_clone)
                                 .and_then(|sidecar| {
-                                    <P as TransactionPool>::Transaction::try_from_blob(
-                                        tx, sidecar,
-                                    )
+                                    <P as TransactionPool>::Transaction::try_from_blob(tx, sidecar)
                                 })
                         } else {
                             <P as TransactionPool>::Transaction::try_from_consensus(tx).ok()

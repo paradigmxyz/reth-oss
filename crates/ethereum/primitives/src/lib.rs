@@ -21,8 +21,8 @@ pub use receipt::*;
 mod pooled;
 pub use pooled::*;
 
-pub use alloy_consensus::{transaction::PooledTransaction, TxType};
 use alloy_consensus::TxEip4844;
+pub use alloy_consensus::{transaction::PooledTransaction, TxType};
 
 /// Typed Transaction type without a signature
 pub type Transaction = alloy_consensus::EthereumTypedTransaction<TxEip4844>;

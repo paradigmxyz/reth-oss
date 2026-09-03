@@ -1,90 +1,14 @@
 //! Ethereum pooled transaction representation used by Reth across supported forks.
 
-use alloy_consensus::{
-    error::ValueError,
-    transaction::{
-        SignerRecoverable, TxEip4844Sidecar, TxEip8141Variant, TxEip8141WithSidecar, TxHashRef,
-    },
-    EthereumTxEnvelope, InMemorySize, Signed, TransactionEnvelope, TxEip1559, TxEip2930,
-    TxEip4844WithSidecar, TxEip7702, TxLegacy,
-};
-use alloy_eips::eip7594::{
-    BlobTransactionSidecarEip7594, BlobTransactionSidecarVariant,
-};
-use alloy_primitives::{Sealable, Sealed};
+use alloy_consensus::{error::ValueError, transaction::TxEip8141Variant, Signed};
+use alloy_primitives::Sealed;
 
 use crate::TransactionSigned;
 
-/// Ethereum pooled transaction representation used by Reth across supported forks.
+/// Reth's fork-aware pooled transaction representation.
 ///
-/// EIP-4844 uses [`BlobTransactionSidecarVariant`] so nodes can operate on either side of Osaka.
-/// EIP-8141 activates after EIP-7594 and therefore always carries the EIP-7594 sidecar when the
-/// transaction references blobs.
-#[derive(Clone, Debug, TransactionEnvelope)]
-#[envelope(
-    alloy_consensus = alloy_consensus,
-    tx_type_name = PooledTxType,
-    typed = PooledTypedTransaction,
-    arbitrary_cfg(feature = "arbitrary")
-)]
-pub enum PooledTransactionVariant {
-    /// An untagged legacy transaction.
-    #[envelope(ty = 0)]
-    Legacy(Signed<TxLegacy>),
-    /// An EIP-2930 transaction.
-    #[envelope(ty = 1)]
-    Eip2930(Signed<TxEip2930>),
-    /// An EIP-1559 transaction.
-    #[envelope(ty = 2)]
-    Eip1559(Signed<TxEip1559>),
-    /// An EIP-4844 transaction with a fork-appropriate blob sidecar.
-    #[envelope(ty = 3)]
-    Eip4844(Signed<TxEip4844WithSidecar<BlobTransactionSidecarVariant>>),
-    /// An EIP-7702 transaction.
-    #[envelope(ty = 4)]
-    Eip7702(Signed<TxEip7702>),
-    /// An EIP-8141 transaction, optionally with its EIP-7594 sidecar.
-    #[envelope(ty = 6)]
-    Eip8141(Sealed<TxEip8141Variant<BlobTransactionSidecarEip7594>>),
-}
-
-impl PooledTransactionVariant {
-    /// Returns the EIP-8141 transaction, if this is one.
-    pub const fn as_eip8141(
-        &self,
-    ) -> Option<&Sealed<TxEip8141Variant<BlobTransactionSidecarEip7594>>> {
-        match self {
-            Self::Eip8141(tx) => Some(tx),
-            _ => None,
-        }
-    }
-}
-
-impl From<TxEip8141WithSidecar<BlobTransactionSidecarEip7594>> for PooledTransactionVariant {
-    fn from(value: TxEip8141WithSidecar<BlobTransactionSidecarEip7594>) -> Self {
-        Self::Eip8141(TxEip8141Variant::from(value).seal_slow())
-    }
-}
-
-impl From<EthereumTxEnvelope<TxEip4844WithSidecar<BlobTransactionSidecarVariant>>>
-    for PooledTransactionVariant
-{
-    fn from(
-        value: EthereumTxEnvelope<TxEip4844WithSidecar<BlobTransactionSidecarVariant>>,
-    ) -> Self {
-        match value {
-            EthereumTxEnvelope::Legacy(tx) => Self::Legacy(tx),
-            EthereumTxEnvelope::Eip2930(tx) => Self::Eip2930(tx),
-            EthereumTxEnvelope::Eip1559(tx) => Self::Eip1559(tx),
-            EthereumTxEnvelope::Eip4844(tx) => Self::Eip4844(tx),
-            EthereumTxEnvelope::Eip7702(tx) => Self::Eip7702(tx),
-            EthereumTxEnvelope::Eip8141(tx) => {
-                let (tx, hash) = tx.into_parts();
-                Self::Eip8141(Sealed::new_unchecked(tx.into(), hash))
-            }
-        }
-    }
-}
+/// The protocol representation is defined in Alloy; this alias keeps the Reth API stable.
+pub type PooledTransactionVariant = alloy_consensus::PooledTransactionWithSidecarVariant;
 
 impl TryFrom<TransactionSigned> for PooledTransactionVariant {
     type Error = ValueError<TransactionSigned>;
@@ -131,74 +55,16 @@ impl From<PooledTransactionVariant> for TransactionSigned {
     }
 }
 
-impl TxHashRef for PooledTransactionVariant {
-    fn tx_hash(&self) -> &alloy_primitives::TxHash {
-        match self {
-            Self::Legacy(tx) => tx.tx_hash(),
-            Self::Eip2930(tx) => tx.tx_hash(),
-            Self::Eip1559(tx) => tx.tx_hash(),
-            Self::Eip4844(tx) => tx.tx_hash(),
-            Self::Eip7702(tx) => tx.tx_hash(),
-            Self::Eip8141(tx) => tx.hash_ref(),
-        }
-    }
-}
-
-impl SignerRecoverable for PooledTransactionVariant {
-    fn recover_signer(
-        &self,
-    ) -> Result<alloy_primitives::Address, alloy_consensus::crypto::RecoveryError> {
-        match self {
-            Self::Legacy(tx) => SignerRecoverable::recover_signer(tx),
-            Self::Eip2930(tx) => SignerRecoverable::recover_signer(tx),
-            Self::Eip1559(tx) => SignerRecoverable::recover_signer(tx),
-            Self::Eip4844(tx) => SignerRecoverable::recover_signer(tx),
-            Self::Eip7702(tx) => SignerRecoverable::recover_signer(tx),
-            Self::Eip8141(tx) => Ok(tx.tx().sender),
-        }
-    }
-
-    fn recover_signer_unchecked(
-        &self,
-    ) -> Result<alloy_primitives::Address, alloy_consensus::crypto::RecoveryError> {
-        match self {
-            Self::Legacy(tx) => SignerRecoverable::recover_signer_unchecked(tx),
-            Self::Eip2930(tx) => SignerRecoverable::recover_signer_unchecked(tx),
-            Self::Eip1559(tx) => SignerRecoverable::recover_signer_unchecked(tx),
-            Self::Eip4844(tx) => SignerRecoverable::recover_signer_unchecked(tx),
-            Self::Eip7702(tx) => SignerRecoverable::recover_signer_unchecked(tx),
-            Self::Eip8141(tx) => Ok(tx.tx().sender),
-        }
-    }
-}
-
-impl InMemorySize for PooledTransactionVariant {
-    fn size(&self) -> usize {
-        match self {
-            Self::Legacy(tx) => tx.size(),
-            Self::Eip2930(tx) => tx.size(),
-            Self::Eip1559(tx) => tx.size(),
-            Self::Eip4844(tx) => tx.size(),
-            Self::Eip7702(tx) => tx.size(),
-            Self::Eip8141(tx) => {
-                tx.tx().size() +
-                    tx.sidecar().map_or(0, TxEip4844Sidecar::size) +
-                    core::mem::size_of::<alloy_primitives::B256>()
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_consensus::TxEip8141;
+    use alloy_consensus::{TxEip8141, TxEip8141WithSidecar};
     use alloy_eips::{
         eip2718::{Decodable2718, Encodable2718},
         eip4844::{Blob, Bytes48},
-        eip7594::CELLS_PER_EXT_BLOB,
+        eip7594::{BlobTransactionSidecarEip7594, CELLS_PER_EXT_BLOB},
     };
-    use alloy_primitives::{Address, B256};
+    use alloy_primitives::{Address, Sealable, B256};
 
     #[test]
     fn eip8141_consensus_pooled_roundtrip() {
