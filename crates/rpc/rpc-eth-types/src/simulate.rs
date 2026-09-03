@@ -391,7 +391,7 @@ where
 
         let mut tx_regular_gas_used = 0;
         let gas_output = builder.execute_transaction_with_result_closure(tx, |result| {
-            tx_regular_gas_used = result.result().result.gas().block_regular_gas_used();
+            tx_regular_gas_used = result.result().result.block_regular_gas_used();
             results.push(result.result().result.clone())
         })?;
 
@@ -573,7 +573,7 @@ where
             ExecutionResult::FrameTransaction { gas, logs, .. } => SimCallResult {
                 return_data: Bytes::new(),
                 error: None,
-                gas_used: gas.tx_gas_used(),
+                gas_used: gas.frame_tx_gas_used(),
                 max_used_gas: Some(gas.total_gas_spent().max(gas.floor_gas())),
                 logs: logs
                     .into_iter()
