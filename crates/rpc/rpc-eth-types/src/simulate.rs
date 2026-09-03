@@ -7,13 +7,18 @@ use crate::{
 use alloy_chains::Chain;
 use alloy_consensus::{transaction::TxHashRef, BlockHeader, Transaction as _};
 use alloy_eips::eip2718::WithEncoded;
-use alloy_evm::{block::TxResult, precompiles::PrecompilesMap};
+use alloy_evm::{
+    block::TxResult,
+    precompiles::{DynPrecompile, Precompile, PrecompilesMap},
+};
 use alloy_network::{NetworkTransactionBuilder, TransactionBuilder};
+use alloy_primitives::{Log, LogData, B256};
 use alloy_rpc_types_eth::{
     simulate::{SimBlock, SimCallResult, SimulateError, SimulatedBlock},
     state::StateOverride,
     BlockId, BlockOverrides, BlockTransactionsKind,
 };
+use alloy_sol_types::SolValue;
 use jsonrpsee_types::{error::INTERNAL_ERROR_CODE, ErrorObject};
 use reth_evm::{
     execute::{BlockBuilder, BlockBuilderOutcome, BlockExecutor},
@@ -31,6 +36,10 @@ use revm::{
     primitives::{Address, Bytes, TxKind, U256},
     Database,
 };
+use revm_inspectors::transfer::{
+    TransferInspector, TransferOperation, TRANSFER_EVENT_TOPIC, TRANSFER_LOG_EMITTER,
+};
+use std::{collections::HashMap, sync::Arc};
 
 /// Fallback seconds added between simulated block timestamps when neither the user nor the chain
 /// hint provides a value.
@@ -266,9 +275,9 @@ where
 
 /// Applies precompile move overrides from state overrides to the EVM's precompiles map.
 ///
-/// This function processes `movePrecompileToAddress` entries from the state overrides and
-/// moves precompiles from their original addresses to new addresses. The original address
-/// is cleared (precompile removed) and the precompile is installed at the destination address.
+/// Moved destinations are resolved dynamically instead of being added to the map's address set.
+/// This keeps them callable while preventing the pre-execution warmup from treating them as
+/// canonical precompiles.
 pub fn apply_precompile_overrides(
     state_overrides: &StateOverride,
     precompiles: &mut PrecompilesMap,
@@ -289,13 +298,83 @@ pub fn apply_precompile_overrides(
         }
     }
 
-    precompiles.move_precompiles(moves).map_err(
-        |alloy_evm::precompiles::MovePrecompileError::NotAPrecompile(addr)| {
-            EthSimulateError::NotAPrecompile(addr)
-        },
-    )?;
+    for (source, _) in &moves {
+        if precompiles.get(source).is_none() {
+            return Err(EthSimulateError::NotAPrecompile(*source))
+        }
+    }
+
+    let mut extracted = Vec::with_capacity(moves.len());
+    for (source, dest) in moves {
+        let mut moved_precompile = None;
+        precompiles.apply_precompile(&source, |existing| {
+            moved_precompile = existing;
+            None
+        });
+        if let Some(precompile) = moved_precompile {
+            extracted.push((dest, precompile));
+        }
+    }
+
+    if !extracted.is_empty() {
+        let mut moved_precompiles = HashMap::with_capacity(extracted.len());
+        for (dest, precompile) in extracted {
+            // Dynamic lookups are only consulted for addresses absent from the main map.
+            precompiles.apply_precompile(&dest, |_| None);
+            moved_precompiles.insert(dest, Arc::new(precompile));
+        }
+
+        precompiles.set_precompile_lookup(move |address: &Address| -> Option<DynPrecompile> {
+            moved_precompiles
+                .get(address)
+                .map(|precompile| shared_precompile(Arc::clone(precompile)))
+        });
+    }
 
     Ok(())
+}
+
+fn shared_precompile(precompile: Arc<DynPrecompile>) -> DynPrecompile {
+    let id = precompile.precompile_id().clone();
+    if precompile.supports_caching() {
+        DynPrecompile::new(id, move |input| precompile.call(input))
+    } else {
+        DynPrecompile::new_stateful(id, move |input| precompile.call(input))
+    }
+}
+
+/// Appends synthetic ETH-transfer logs to the RPC result without adding them to the EVM journal.
+pub fn append_transfer_logs<HaltReasonTy>(
+    inspector: &TransferInspector,
+    result: &mut ExecutionResult<HaltReasonTy>,
+    next_transfer: &mut usize,
+) -> u64 {
+    let transfers = inspector.transfers();
+    if *next_transfer >= transfers.len() {
+        return 0
+    }
+
+    let transfer_count = (transfers.len() - *next_transfer) as u64;
+
+    let ExecutionResult::Success { logs, .. } = result else {
+        *next_transfer = transfers.len();
+        return transfer_count
+    };
+
+    logs.extend(transfers[*next_transfer..].iter().map(transfer_to_log));
+    *next_transfer = transfers.len();
+    transfer_count
+}
+
+fn transfer_to_log(transfer: &TransferOperation) -> Log {
+    let from = B256::from_slice(&transfer.from.abi_encode());
+    let to = B256::from_slice(&transfer.to.abi_encode());
+    let data = transfer.value.abi_encode();
+
+    Log {
+        address: TRANSFER_LOG_EMITTER,
+        data: LogData::new_unchecked(vec![TRANSFER_EVENT_TOPIC, from, to], data.into()),
+    }
 }
 
 /// Converts all [`TransactionRequest`]s into [`Recovered`] transactions and applies them to the
@@ -311,7 +390,7 @@ pub fn apply_precompile_overrides(
 /// [`TransactionRequest`]: alloy_rpc_types_eth::TransactionRequest
 #[expect(clippy::type_complexity)]
 pub fn execute_transactions<S, T>(
-    mut builder: S,
+    builder: S,
     state_provider: impl StateProvider,
     calls: Vec<RpcTxReq<T::Network>>,
     remaining_call_gas_limit: &mut Option<u64>,
@@ -328,6 +407,88 @@ pub fn execute_transactions<S, T>(
 where
     S: BlockBuilder<Executor: BlockExecutor<Evm: Evm<DB: Database<Error: Into<EthApiError>>>>>,
     T: RpcConvert<Primitives = S::Primitives>,
+{
+    execute_transactions_with_result_hook(
+        builder,
+        state_provider,
+        calls,
+        remaining_call_gas_limit,
+        chain_id,
+        compute_state_root,
+        converter,
+        |_, _| {},
+    )
+}
+
+/// Executes transactions and appends synthetic ETH-transfer logs to the RPC results.
+#[expect(clippy::type_complexity)]
+pub fn execute_transactions_with_transfer_logs<S, T>(
+    builder: S,
+    state_provider: impl StateProvider,
+    calls: Vec<RpcTxReq<T::Network>>,
+    remaining_call_gas_limit: &mut Option<u64>,
+    chain_id: u64,
+    compute_state_root: bool,
+    converter: &T,
+) -> Result<
+    (
+        BlockBuilderOutcome<S::Primitives>,
+        Vec<ExecutionResult<<<S::Executor as BlockExecutor>::Evm as Evm>::HaltReason>>,
+        Vec<u64>,
+    ),
+    EthApiError,
+>
+where
+    S: BlockBuilder<Executor: BlockExecutor<Evm: Evm<DB: Database<Error: Into<EthApiError>>>>>,
+    <S::Executor as BlockExecutor>::Evm: Evm<Inspector = TransferInspector>,
+    T: RpcConvert<Primitives = S::Primitives>,
+{
+    let mut next_transfer = 0;
+    let mut log_counts = Vec::new();
+    let (block, results) = execute_transactions_with_result_hook(
+        builder,
+        state_provider,
+        calls,
+        remaining_call_gas_limit,
+        chain_id,
+        compute_state_root,
+        converter,
+        |evm, result| {
+            let transfer_count = append_transfer_logs(evm.inspector(), result, &mut next_transfer);
+            let log_count = match result {
+                ExecutionResult::Success { logs, .. } => logs.len() as u64,
+                ExecutionResult::Halt { .. } | ExecutionResult::Revert { .. } => transfer_count,
+            };
+            log_counts.push(log_count);
+        },
+    )?;
+    Ok((block, results, log_counts))
+}
+
+#[expect(clippy::type_complexity)]
+fn execute_transactions_with_result_hook<S, T, F>(
+    mut builder: S,
+    state_provider: impl StateProvider,
+    calls: Vec<RpcTxReq<T::Network>>,
+    remaining_call_gas_limit: &mut Option<u64>,
+    chain_id: u64,
+    compute_state_root: bool,
+    converter: &T,
+    mut process_result: F,
+) -> Result<
+    (
+        BlockBuilderOutcome<S::Primitives>,
+        Vec<ExecutionResult<<<S::Executor as BlockExecutor>::Evm as Evm>::HaltReason>>,
+    ),
+    EthApiError,
+>
+where
+    S: BlockBuilder<Executor: BlockExecutor<Evm: Evm<DB: Database<Error: Into<EthApiError>>>>>,
+    T: RpcConvert<Primitives = S::Primitives>,
+    F: FnMut(
+        &<S::Executor as BlockExecutor>::Evm,
+        &mut ExecutionResult<<<S::Executor as BlockExecutor>::Evm as Evm>::HaltReason>,
+    ),
 {
     builder.apply_pre_execution_changes()?;
 
@@ -394,6 +555,10 @@ where
             tx_regular_gas_used = result.result().result.gas().block_regular_gas_used();
             results.push(result.result().result.clone())
         })?;
+
+        if let Some(result) = results.last_mut() {
+            process_result(builder.evm(), result);
+        }
 
         let gas_used = gas_output.tx_gas_used();
         if let Some(remaining_call_gas_limit) = remaining_call_gas_limit.as_mut() {
@@ -502,6 +667,7 @@ pub fn build_simulated_block<Err, T>(
     block: RecoveredBlock<BlockTy<T::Primitives>>,
     results: Vec<ExecutionResult<HaltReasonFor<T::Evm>>>,
     txs_kind: BlockTransactionsKind,
+    trace_log_counts: Option<&[u64]>,
     converter: &T,
 ) -> Result<SimulatedBlock<RpcBlock<T::Network>>, Err>
 where
@@ -516,6 +682,7 @@ where
 
     let mut log_index = 0;
     for (index, (result, tx)) in results.into_iter().zip(block.body().transactions()).enumerate() {
+        let log_index_start = log_index;
         let call = match result {
             ExecutionResult::Halt { reason, gas, .. } => {
                 let error = Err::from_evm_halt(reason, tx.gas_limit());
@@ -571,6 +738,10 @@ where
                 status: true,
             },
         };
+
+        if let Some(trace_log_counts) = trace_log_counts {
+            log_index = log_index_start + trace_log_counts[index];
+        }
 
         calls.push(call);
     }

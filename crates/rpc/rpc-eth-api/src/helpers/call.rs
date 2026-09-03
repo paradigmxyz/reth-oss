@@ -202,10 +202,10 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                         }
                     };
 
-                    let (result, results) = if trace_transfers {
-                        // prepare inspector to capture transfer inside the evm so they are recorded
-                        // and included in logs
-                        let inspector = TransferInspector::new(false).with_logs(true);
+                    let (result, results, trace_log_counts) = if trace_transfers {
+                        // Collect transfer operations without inserting synthetic logs into the
+                        // journal; they are appended only to the RPC simulation result.
+                        let inspector = TransferInspector::new(false);
                         let evm = this
                             .evm_config()
                             .evm_with_env_and_inspector(&mut db, evm_env, inspector);
@@ -219,16 +219,18 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                             .map_err(|e| Self::Error::from_eth_err(EthApiError::other(e)))?;
                         }
 
-                        simulate::execute_transactions(
-                            builder,
-                            &state_provider,
-                            calls,
-                            &mut remaining_call_gas_limit,
-                            chain_id,
-                            this.compute_state_root_for_eth_simulate(),
-                            this.converter(),
-                        )
-                        .map_err(map_err)?
+                        let (result, results, log_counts) =
+                            simulate::execute_transactions_with_transfer_logs(
+                                builder,
+                                &state_provider,
+                                calls,
+                                &mut remaining_call_gas_limit,
+                                chain_id,
+                                this.compute_state_root_for_eth_simulate(),
+                                this.converter(),
+                            )
+                            .map_err(map_err)?;
+                        (result, results, Some(log_counts))
                     } else {
                         let evm = this.evm_config().evm_with_env(&mut db, evm_env);
                         let mut builder = this.evm_config().create_block_builder(evm, &parent, ctx);
@@ -241,7 +243,7 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                             .map_err(|e| Self::Error::from_eth_err(EthApiError::other(e)))?;
                         }
 
-                        simulate::execute_transactions(
+                        let (result, results) = simulate::execute_transactions(
                             builder,
                             &state_provider,
                             calls,
@@ -250,7 +252,8 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                             this.compute_state_root_for_eth_simulate(),
                             this.converter(),
                         )
-                        .map_err(map_err)?
+                        .map_err(map_err)?;
+                        (result, results, None)
                     };
 
                     let simulated_header = result.block.clone_sealed_header();
@@ -264,6 +267,7 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                         result.block,
                         results,
                         return_full_transactions.into(),
+                        trace_log_counts.as_deref(),
                         this.converter(),
                     )?;
 
