@@ -760,6 +760,10 @@ impl PoolTransaction for MockTransaction {
     fn encoded_length(&self) -> usize {
         self.size()
     }
+
+    fn is_blob_transaction(&self) -> bool {
+        matches!(self, Self::Eip4844 { .. })
+    }
 }
 
 impl InMemorySize for MockTransaction {
