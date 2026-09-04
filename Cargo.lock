@@ -1016,7 +1016,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1027,7 +1027,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3466,7 +3466,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4567,9 +4567,9 @@ dependencies = [
 
 [[package]]
 name = "hickory-net"
-version = "0.26.1"
+version = "0.26.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e2295ed2f9c31e471e1428a8f88a3f0e1f4b27c15049592138d1eebe9c35b183"
+checksum = "084e7bd6a377435d568f652153e571b50970d7ccc1d1eeec0519f834632287e1"
 dependencies = [
  "async-trait",
  "cfg-if",
@@ -4591,9 +4591,9 @@ dependencies = [
 
 [[package]]
 name = "hickory-proto"
-version = "0.26.1"
+version = "0.26.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0bab31817bfb44672a252e97fe81cd0c18d1b2cf892108922f6818820df8c643"
+checksum = "7e2da0694c15b44c6f68a6b05e0233617008c54080e31d6eb848d858a9c5b38d"
 dependencies = [
  "data-encoding",
  "idna",
@@ -4612,9 +4612,9 @@ dependencies = [
 
 [[package]]
 name = "hickory-resolver"
-version = "0.26.1"
+version = "0.26.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f0d58d28879ceecde6607729660c2667a081ccdc082e082675042793960f178c"
+checksum = "0e4f9f4603319422d482738f3f6fe5aac03157fdbfed1cd85a3ff45adb09072f"
 dependencies = [
  "cfg-if",
  "futures-util",
@@ -5146,9 +5146,9 @@ dependencies = [
 
 [[package]]
 name = "interprocess"
-version = "2.4.3"
+version = "2.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "798de1433ba514cc6c04c4144c2469af81396e4906195218737c776d47769572"
+checksum = "6cb02ffbf25e8ef0f4a95bff054eef75f6d1bf16919474cf2caa63b21997478a"
 dependencies = [
  "doctest-file",
  "futures-core",
@@ -5198,7 +5198,7 @@ checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
 dependencies = [
  "hermit-abi",
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6310,7 +6310,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7354,7 +7354,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -10878,7 +10878,7 @@ dependencies = [
 [[package]]
 name = "revm"
 version = "43.0.0"
-source = "git+https://github.com/Soubhik-10/revm?branch=feat%2Feip8141-frame-transactions#4226a42d0e064548884b272abd3de84749c8fda5"
+source = "git+https://github.com/Soubhik-10/revm?branch=feat%2Feip8141-frame-transactions#9a18c23fd6d7b1985ce08c320d4960ab66596b41"
 dependencies = [
  "revm-bytecode",
  "revm-context",
@@ -10896,7 +10896,7 @@ dependencies = [
 [[package]]
 name = "revm-bytecode"
 version = "43.0.0"
-source = "git+https://github.com/Soubhik-10/revm?branch=feat%2Feip8141-frame-transactions#4226a42d0e064548884b272abd3de84749c8fda5"
+source = "git+https://github.com/Soubhik-10/revm?branch=feat%2Feip8141-frame-transactions#9a18c23fd6d7b1985ce08c320d4960ab66596b41"
 dependencies = [
  "bitvec",
  "paste",
@@ -10908,7 +10908,7 @@ dependencies = [
 [[package]]
 name = "revm-context"
 version = "43.0.1"
-source = "git+https://github.com/Soubhik-10/revm?branch=feat%2Feip8141-frame-transactions#4226a42d0e064548884b272abd3de84749c8fda5"
+source = "git+https://github.com/Soubhik-10/revm?branch=feat%2Feip8141-frame-transactions#9a18c23fd6d7b1985ce08c320d4960ab66596b41"
 dependencies = [
  "alloy-eip8141",
  "bitvec",
@@ -10926,7 +10926,7 @@ dependencies = [
 [[package]]
 name = "revm-context-interface"
 version = "43.0.0"
-source = "git+https://github.com/Soubhik-10/revm?branch=feat%2Feip8141-frame-transactions#4226a42d0e064548884b272abd3de84749c8fda5"
+source = "git+https://github.com/Soubhik-10/revm?branch=feat%2Feip8141-frame-transactions#9a18c23fd6d7b1985ce08c320d4960ab66596b41"
 dependencies = [
  "alloy-eip2930",
  "alloy-eip7702",
@@ -10942,7 +10942,7 @@ dependencies = [
 [[package]]
 name = "revm-database"
 version = "43.0.0"
-source = "git+https://github.com/Soubhik-10/revm?branch=feat%2Feip8141-frame-transactions#4226a42d0e064548884b272abd3de84749c8fda5"
+source = "git+https://github.com/Soubhik-10/revm?branch=feat%2Feip8141-frame-transactions#9a18c23fd6d7b1985ce08c320d4960ab66596b41"
 dependencies = [
  "alloy-eips",
  "derive_more",
@@ -10957,7 +10957,7 @@ dependencies = [
 [[package]]
 name = "revm-database-interface"
 version = "43.0.0"
-source = "git+https://github.com/Soubhik-10/revm?branch=feat%2Feip8141-frame-transactions#4226a42d0e064548884b272abd3de84749c8fda5"
+source = "git+https://github.com/Soubhik-10/revm?branch=feat%2Feip8141-frame-transactions#9a18c23fd6d7b1985ce08c320d4960ab66596b41"
 dependencies = [
  "auto_impl",
  "either",
@@ -10970,7 +10970,7 @@ dependencies = [
 [[package]]
 name = "revm-handler"
 version = "43.0.0"
-source = "git+https://github.com/Soubhik-10/revm?branch=feat%2Feip8141-frame-transactions#4226a42d0e064548884b272abd3de84749c8fda5"
+source = "git+https://github.com/Soubhik-10/revm?branch=feat%2Feip8141-frame-transactions#9a18c23fd6d7b1985ce08c320d4960ab66596b41"
 dependencies = [
  "alloy-eip8141",
  "auto_impl",
@@ -10990,7 +10990,7 @@ dependencies = [
 [[package]]
 name = "revm-inspector"
 version = "43.0.0"
-source = "git+https://github.com/Soubhik-10/revm?branch=feat%2Feip8141-frame-transactions#4226a42d0e064548884b272abd3de84749c8fda5"
+source = "git+https://github.com/Soubhik-10/revm?branch=feat%2Feip8141-frame-transactions#9a18c23fd6d7b1985ce08c320d4960ab66596b41"
 dependencies = [
  "auto_impl",
  "either",
@@ -11027,7 +11027,7 @@ dependencies = [
 [[package]]
 name = "revm-interpreter"
 version = "43.0.0"
-source = "git+https://github.com/Soubhik-10/revm?branch=feat%2Feip8141-frame-transactions#4226a42d0e064548884b272abd3de84749c8fda5"
+source = "git+https://github.com/Soubhik-10/revm?branch=feat%2Feip8141-frame-transactions#9a18c23fd6d7b1985ce08c320d4960ab66596b41"
 dependencies = [
  "revm-bytecode",
  "revm-context-interface",
@@ -11040,7 +11040,7 @@ dependencies = [
 [[package]]
 name = "revm-precompile"
 version = "43.0.1"
-source = "git+https://github.com/Soubhik-10/revm?branch=feat%2Feip8141-frame-transactions#4226a42d0e064548884b272abd3de84749c8fda5"
+source = "git+https://github.com/Soubhik-10/revm?branch=feat%2Feip8141-frame-transactions#9a18c23fd6d7b1985ce08c320d4960ab66596b41"
 dependencies = [
  "ark-bls12-381",
  "ark-bn254",
@@ -11066,7 +11066,7 @@ dependencies = [
 [[package]]
 name = "revm-primitives"
 version = "43.0.0"
-source = "git+https://github.com/Soubhik-10/revm?branch=feat%2Feip8141-frame-transactions#4226a42d0e064548884b272abd3de84749c8fda5"
+source = "git+https://github.com/Soubhik-10/revm?branch=feat%2Feip8141-frame-transactions#9a18c23fd6d7b1985ce08c320d4960ab66596b41"
 dependencies = [
  "alloy-primitives",
  "once_cell",
@@ -11076,7 +11076,7 @@ dependencies = [
 [[package]]
 name = "revm-state"
 version = "43.0.0"
-source = "git+https://github.com/Soubhik-10/revm?branch=feat%2Feip8141-frame-transactions#4226a42d0e064548884b272abd3de84749c8fda5"
+source = "git+https://github.com/Soubhik-10/revm?branch=feat%2Feip8141-frame-transactions#9a18c23fd6d7b1985ce08c320d4960ab66596b41"
 dependencies = [
  "alloy-eip7928",
  "bitflags 2.13.1",
@@ -11437,7 +11437,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -11517,7 +11517,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs 1.0.9",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -12130,7 +12130,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
 dependencies = [
  "libc",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -12389,7 +12389,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -12641,9 +12641,9 @@ dependencies = [
 
 [[package]]
 name = "tinyvec"
-version = "1.12.0"
+version = "1.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bb4ebadaa0af04fab11ae01eb5f9fdb5f9c5b875506e210e71c07873528baa7f"
+checksum = "4cf0ded5c4e56918d8f8a339e1bb67d038d3bc6d144ac407904015ba2e4cde9b"
 dependencies = [
  "tinyvec_macros",
 ]
@@ -13610,7 +13610,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
