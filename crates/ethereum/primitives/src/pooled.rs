@@ -47,6 +47,16 @@ pub enum PooledTransactionVariant {
 }
 
 impl PooledTransactionVariant {
+    /// Returns the EIP-4844 transaction, if this is one.
+    pub const fn as_eip4844(
+        &self,
+    ) -> Option<&Signed<TxEip4844WithSidecar<BlobTransactionSidecarVariant>>> {
+        match self {
+            Self::Eip4844(tx) => Some(tx),
+            _ => None,
+        }
+    }
+
     /// Returns the EIP-8141 transaction, if this is one.
     pub const fn as_eip8141(
         &self,

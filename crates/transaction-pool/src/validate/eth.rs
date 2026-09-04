@@ -711,10 +711,10 @@ where
         }
 
         // checks for max cost not exceedng account_balance
-        if !transaction.is_eip8141() {
-            if let Err(err) = self.validate_sender_balance(&transaction, &account) {
-                return TransactionValidationOutcome::Invalid(transaction, err)
-            }
+        if !transaction.is_eip8141() &&
+            let Err(err) = self.validate_sender_balance(&transaction, &account)
+        {
+            return TransactionValidationOutcome::Invalid(transaction, err)
         }
 
         // heavy blob tx validation
