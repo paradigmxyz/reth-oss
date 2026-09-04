@@ -304,6 +304,17 @@ jobs:
             name: all
             limit: '.*8141.*'
             include: []
+          # Frames devnet v0.2.0 also rewrites eligible StateTests into
+          # `_frame_tx` variants. Their originating suites do not necessarily
+          # mention EIP-8141, so they need dedicated selectors.
+          - sim: ethereum/eels/consume-engine
+            name: frame-variants
+            limit: '.*_frame_tx.*'
+            include: []
+          - sim: ethereum/eels/consume-rlp
+            name: frame-variants
+            limit: '.*_frame_tx.*'
+            include: []
           # Isolate EIP-8141 failures by test module.
           - sim: ethereum/eels/consume-engine
             name: admission-validity
