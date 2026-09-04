@@ -12,7 +12,7 @@ use reth_provider::{
 };
 use reth_rpc_eth_api::{helpers::EthTransactions, EthApiServer};
 use reth_tasks::Runtime;
-use std::{num::NonZeroUsize, sync::Arc, time::Duration};
+use std::{num::NonZeroUsize, sync::Arc};
 
 #[tokio::test]
 async fn can_run_dev_node() -> eyre::Result<()> {
@@ -34,18 +34,9 @@ async fn can_run_dev_node() -> eyre::Result<()> {
 
     assert_chain_advances(&node).await;
 
-    let expected = Some(node.provider.chain_info()?.into());
-    tokio::time::timeout(Duration::from_secs(1), async {
-        loop {
-            if node.provider.safe_block_num_hash()? == expected &&
-                node.provider.finalized_block_num_hash()? == expected
-            {
-                return Ok(())
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await??;
+    let chain_info = node.provider.chain_info()?;
+    assert_eq!(node.provider.safe_block_num_hash()?, Some(chain_info.into()));
+    assert_eq!(node.provider.finalized_block_num_hash()?, Some(chain_info.into()));
 
     Ok(())
 }
