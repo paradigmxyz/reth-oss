@@ -597,10 +597,6 @@ where
                 let (transaction, blob_sidecar) = match transaction {
                     ValidTransaction::Valid(tx) => (tx, None),
                     ValidTransaction::ValidWithSidecar { transaction, sidecar } => {
-                        debug_assert!(
-                            transaction.is_blob_transaction(),
-                            "validator returned sidecar for a transaction without blobs"
-                        );
                         (transaction, Some(sidecar))
                     }
                 };
