@@ -319,7 +319,8 @@ where
             .beacon_consensus
             .new_payload_with_inclusion_list(payload, inclusion_list_transactions)
             .await?;
-        let inclusion_list_satisfied = if payload_status.is_valid() {
+        // Set the inclusion list satisfied field if the payload is valid or invalid both cases.
+        let inclusion_list_satisfied = if payload_status.is_valid() || payload_status.is_invalid() {
             self.inner
                 .beacon_consensus
                 .inclusion_list_status(block_hash)
