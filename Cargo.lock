@@ -10878,7 +10878,7 @@ dependencies = [
 [[package]]
 name = "revm"
 version = "43.0.0"
-source = "git+https://github.com/Soubhik-10/revm?branch=feat%2Feip8141-frame-transactions#9a18c23fd6d7b1985ce08c320d4960ab66596b41"
+source = "git+https://github.com/Soubhik-10/revm?branch=feat%2Feip8141-frame-transactions#5b6929da16e27542f404e7ff09852bb3e3c6f010"
 dependencies = [
  "revm-bytecode",
  "revm-context",
@@ -10896,7 +10896,7 @@ dependencies = [
 [[package]]
 name = "revm-bytecode"
 version = "43.0.0"
-source = "git+https://github.com/Soubhik-10/revm?branch=feat%2Feip8141-frame-transactions#9a18c23fd6d7b1985ce08c320d4960ab66596b41"
+source = "git+https://github.com/Soubhik-10/revm?branch=feat%2Feip8141-frame-transactions#5b6929da16e27542f404e7ff09852bb3e3c6f010"
 dependencies = [
  "bitvec",
  "paste",
@@ -10908,7 +10908,7 @@ dependencies = [
 [[package]]
 name = "revm-context"
 version = "43.0.1"
-source = "git+https://github.com/Soubhik-10/revm?branch=feat%2Feip8141-frame-transactions#9a18c23fd6d7b1985ce08c320d4960ab66596b41"
+source = "git+https://github.com/Soubhik-10/revm?branch=feat%2Feip8141-frame-transactions#5b6929da16e27542f404e7ff09852bb3e3c6f010"
 dependencies = [
  "alloy-eip8141",
  "bitvec",
@@ -10926,7 +10926,7 @@ dependencies = [
 [[package]]
 name = "revm-context-interface"
 version = "43.0.0"
-source = "git+https://github.com/Soubhik-10/revm?branch=feat%2Feip8141-frame-transactions#9a18c23fd6d7b1985ce08c320d4960ab66596b41"
+source = "git+https://github.com/Soubhik-10/revm?branch=feat%2Feip8141-frame-transactions#5b6929da16e27542f404e7ff09852bb3e3c6f010"
 dependencies = [
  "alloy-eip2930",
  "alloy-eip7702",
@@ -10942,7 +10942,7 @@ dependencies = [
 [[package]]
 name = "revm-database"
 version = "43.0.0"
-source = "git+https://github.com/Soubhik-10/revm?branch=feat%2Feip8141-frame-transactions#9a18c23fd6d7b1985ce08c320d4960ab66596b41"
+source = "git+https://github.com/Soubhik-10/revm?branch=feat%2Feip8141-frame-transactions#5b6929da16e27542f404e7ff09852bb3e3c6f010"
 dependencies = [
  "alloy-eips",
  "derive_more",
@@ -10957,7 +10957,7 @@ dependencies = [
 [[package]]
 name = "revm-database-interface"
 version = "43.0.0"
-source = "git+https://github.com/Soubhik-10/revm?branch=feat%2Feip8141-frame-transactions#9a18c23fd6d7b1985ce08c320d4960ab66596b41"
+source = "git+https://github.com/Soubhik-10/revm?branch=feat%2Feip8141-frame-transactions#5b6929da16e27542f404e7ff09852bb3e3c6f010"
 dependencies = [
  "auto_impl",
  "either",
@@ -10970,7 +10970,7 @@ dependencies = [
 [[package]]
 name = "revm-handler"
 version = "43.0.0"
-source = "git+https://github.com/Soubhik-10/revm?branch=feat%2Feip8141-frame-transactions#9a18c23fd6d7b1985ce08c320d4960ab66596b41"
+source = "git+https://github.com/Soubhik-10/revm?branch=feat%2Feip8141-frame-transactions#5b6929da16e27542f404e7ff09852bb3e3c6f010"
 dependencies = [
  "alloy-eip8141",
  "auto_impl",
@@ -10990,7 +10990,7 @@ dependencies = [
 [[package]]
 name = "revm-inspector"
 version = "43.0.0"
-source = "git+https://github.com/Soubhik-10/revm?branch=feat%2Feip8141-frame-transactions#9a18c23fd6d7b1985ce08c320d4960ab66596b41"
+source = "git+https://github.com/Soubhik-10/revm?branch=feat%2Feip8141-frame-transactions#5b6929da16e27542f404e7ff09852bb3e3c6f010"
 dependencies = [
  "auto_impl",
  "either",
@@ -11027,7 +11027,7 @@ dependencies = [
 [[package]]
 name = "revm-interpreter"
 version = "43.0.0"
-source = "git+https://github.com/Soubhik-10/revm?branch=feat%2Feip8141-frame-transactions#9a18c23fd6d7b1985ce08c320d4960ab66596b41"
+source = "git+https://github.com/Soubhik-10/revm?branch=feat%2Feip8141-frame-transactions#5b6929da16e27542f404e7ff09852bb3e3c6f010"
 dependencies = [
  "revm-bytecode",
  "revm-context-interface",
@@ -11040,7 +11040,7 @@ dependencies = [
 [[package]]
 name = "revm-precompile"
 version = "43.0.1"
-source = "git+https://github.com/Soubhik-10/revm?branch=feat%2Feip8141-frame-transactions#9a18c23fd6d7b1985ce08c320d4960ab66596b41"
+source = "git+https://github.com/Soubhik-10/revm?branch=feat%2Feip8141-frame-transactions#5b6929da16e27542f404e7ff09852bb3e3c6f010"
 dependencies = [
  "ark-bls12-381",
  "ark-bn254",
@@ -11066,7 +11066,7 @@ dependencies = [
 [[package]]
 name = "revm-primitives"
 version = "43.0.0"
-source = "git+https://github.com/Soubhik-10/revm?branch=feat%2Feip8141-frame-transactions#9a18c23fd6d7b1985ce08c320d4960ab66596b41"
+source = "git+https://github.com/Soubhik-10/revm?branch=feat%2Feip8141-frame-transactions#5b6929da16e27542f404e7ff09852bb3e3c6f010"
 dependencies = [
  "alloy-primitives",
  "once_cell",
@@ -11076,7 +11076,7 @@ dependencies = [
 [[package]]
 name = "revm-state"
 version = "43.0.0"
-source = "git+https://github.com/Soubhik-10/revm?branch=feat%2Feip8141-frame-transactions#9a18c23fd6d7b1985ce08c320d4960ab66596b41"
+source = "git+https://github.com/Soubhik-10/revm?branch=feat%2Feip8141-frame-transactions#5b6929da16e27542f404e7ff09852bb3e3c6f010"
 dependencies = [
  "alloy-eip7928",
  "bitflags 2.13.1",
