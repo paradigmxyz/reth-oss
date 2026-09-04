@@ -2,7 +2,7 @@
 set -eo pipefail
 
 fixture_variant="${1:-amsterdam}"
-# Cache-bump for the EELS frame-mapping update (55cd44bdf).
+# Cache-bump for the EELS frame-mapping update (a1945ddfd).
 
 case "${fixture_variant}" in
     amsterdam)
