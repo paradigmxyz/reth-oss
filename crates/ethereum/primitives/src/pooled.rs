@@ -47,6 +47,23 @@ pub enum PooledTransactionVariant {
 }
 
 impl PooledTransactionVariant {
+    /// Returns the transaction hash.
+    pub fn tx_hash(&self) -> &alloy_primitives::TxHash {
+        match self {
+            Self::Legacy(tx) => tx.tx_hash(),
+            Self::Eip2930(tx) => tx.tx_hash(),
+            Self::Eip1559(tx) => tx.tx_hash(),
+            Self::Eip4844(tx) => tx.tx_hash(),
+            Self::Eip7702(tx) => tx.tx_hash(),
+            Self::Eip8141(tx) => tx.hash_ref(),
+        }
+    }
+
+    /// Returns the transaction hash.
+    pub fn hash(&self) -> &alloy_primitives::TxHash {
+        self.tx_hash()
+    }
+
     /// Returns the EIP-4844 transaction, if this is one.
     pub const fn as_eip4844(
         &self,
@@ -141,14 +158,7 @@ impl From<PooledTransactionVariant> for TransactionSigned {
 
 impl TxHashRef for PooledTransactionVariant {
     fn tx_hash(&self) -> &alloy_primitives::TxHash {
-        match self {
-            Self::Legacy(tx) => tx.tx_hash(),
-            Self::Eip2930(tx) => tx.tx_hash(),
-            Self::Eip1559(tx) => tx.tx_hash(),
-            Self::Eip4844(tx) => tx.tx_hash(),
-            Self::Eip7702(tx) => tx.tx_hash(),
-            Self::Eip8141(tx) => tx.hash_ref(),
-        }
+        self.tx_hash()
     }
 }
 
