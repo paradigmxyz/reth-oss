@@ -1346,7 +1346,7 @@ pub trait PoolTransaction:
     /// Returns whether the transaction references blobs and therefore requires a sidecar in its
     /// pooled representation.
     fn is_blob_transaction(&self) -> bool {
-        self.blob_versioned_hashes().is_some_and(|hashes| !hashes.is_empty())
+        self.is_eip4844() || self.blob_versioned_hashes().is_some_and(|hashes| !hashes.is_empty())
     }
 
     /// Define a method to convert from the `Consensus` type to `Self`
