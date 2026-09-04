@@ -1,7 +1,11 @@
 //! Implements the `GetReceipts` and `Receipts` message types.
 
 use alloc::vec::Vec;
+#[cfg(any(test, feature = "arbitrary"))]
+use alloy_consensus::TxType;
 use alloy_consensus::{ReceiptWithBloom, RlpDecodableReceipt, RlpEncodableReceipt, TxReceipt};
+#[cfg(any(test, feature = "arbitrary"))]
+use alloy_eips::Typed2718;
 use alloy_primitives::B256;
 use alloy_rlp::{RlpDecodableWrapper, RlpEncodableWrapper};
 use derive_more::{Deref, IntoIterator};
@@ -68,12 +72,30 @@ impl alloy_rlp::Decodable for GetReceipts70 {
 /// requested.
 #[derive(Clone, Debug, PartialEq, Eq, Default, Deref, IntoIterator)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-#[cfg_attr(any(test, feature = "arbitrary"), derive(arbitrary::Arbitrary))]
 #[add_arbitrary_tests(rlp)]
 pub struct Receipts<T = Receipt>(
     /// Each receipt hash should correspond to a block hash in the request.
     pub Vec<Vec<ReceiptWithBloom<T>>>,
 );
+
+#[cfg(any(test, feature = "arbitrary"))]
+impl<'a, T> arbitrary::Arbitrary<'a> for Receipts<T>
+where
+    T: arbitrary::Arbitrary<'a> + TxReceipt + Typed2718,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
+        let mut receipts = <Vec<Vec<ReceiptWithBloom<T>>> as arbitrary::Arbitrary>::arbitrary(u)?;
+
+        for receipt in receipts.iter_mut().flatten() {
+            if receipt.receipt.ty() == TxType::Eip8141 as u8 {
+                // EIP-8141 omits the top-level bloom and reconstructs it from the frame logs.
+                receipt.logs_bloom = receipt.receipt.bloom();
+            }
+        }
+
+        Ok(Self(receipts))
+    }
+}
 
 impl<T: RlpEncodableReceipt> alloy_rlp::Encodable for Receipts<T> {
     #[inline]
