@@ -425,8 +425,11 @@ where
         self.inner_mut().execute_transaction_without_commit(tx)
     }
 
-    fn commit_transaction(&mut self, output: Self::Result) -> GasOutput {
-        let gas_used = self.inner_mut().commit_transaction(output);
+    fn commit_transaction(
+        &mut self,
+        output: Self::Result,
+    ) -> Result<GasOutput, BlockExecutionError> {
+        let gas_used = self.inner_mut().commit_transaction(output)?;
 
         // Fix up cumulative_gas_used on the just-committed receipt so that
         // the receipt root task (which reads receipts incrementally) sees
@@ -443,10 +446,10 @@ where
         while self.plan.next_segment < self.plan.segments.len() &&
             self.plan.tx_counter == self.plan.segments[self.plan.next_segment].start_tx
         {
-            self.apply_segment_boundary().expect("must succeed");
+            self.apply_segment_boundary()?;
         }
 
-        gas_used
+        Ok(gas_used)
     }
 
     fn finish(
