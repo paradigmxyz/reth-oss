@@ -83,6 +83,14 @@ impl Receipt {
         Self::from_inner(inner)
     }
 
+    /// Wire decoding must not silently discard a pre-Byzantium post-state root.
+    fn from_decoded_envelope(envelope: ReceiptEnvelope) -> alloy_rlp::Result<Self> {
+        if matches!(envelope.status_or_post_state(), Eip658Value::PostState(_)) {
+            return Err(alloy_rlp::Error::Custom("pre-Byzantium receipt is not supported"));
+        }
+        Ok(Self::from_envelope(envelope))
+    }
+
     /// Converts this receipt into its consensus envelope.
     pub fn to_envelope(&self) -> ReceiptEnvelope {
         match &self.inner {
@@ -226,27 +234,47 @@ impl Encodable2718 for Receipt {
 
 impl Decodable2718 for Receipt {
     fn typed_decode(ty: u8, buf: &mut &[u8]) -> Eip2718Result<Self> {
-        ReceiptEnvelope::typed_decode(ty, buf).map(Into::into)
+        Ok(Self::from_decoded_envelope(ReceiptEnvelope::typed_decode(ty, buf)?)?)
     }
 
     fn fallback_decode(buf: &mut &[u8]) -> Eip2718Result<Self> {
-        ReceiptEnvelope::fallback_decode(buf).map(Into::into)
+        Ok(Self::from_decoded_envelope(ReceiptEnvelope::fallback_decode(buf)?)?)
     }
 }
 
 impl Encodable for Receipt {
     fn encode(&self, out: &mut dyn BufMut) {
-        self.rlp_encode_with_bloom(&self.bloom(), out)
+        match &self.inner {
+            ReceiptData::Standard(receipt) => receipt.encode(out),
+            // Frame receipts have no bloom; retain their typed network representation.
+            ReceiptData::Frame { .. } => self.rlp_encode_with_bloom(&Bloom::ZERO, out),
+        }
     }
 
     fn length(&self) -> usize {
-        self.rlp_encoded_length_with_bloom(&self.bloom())
+        match &self.inner {
+            ReceiptData::Standard(receipt) => receipt.length(),
+            ReceiptData::Frame { .. } => self.rlp_encoded_length_with_bloom(&Bloom::ZERO),
+        }
     }
 }
 
 impl Decodable for Receipt {
     fn decode(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
-        ReceiptEnvelope::decode(buf).map(Into::into)
+        let mut header_buf = *buf;
+        if Header::decode(&mut header_buf)?.list {
+            let receipt = StandardReceipt::decode(buf)?;
+            if receipt.tx_type == TxType::Eip8141 {
+                return Err(alloy_rlp::Error::Custom("frame receipt requires a frame payload"));
+            }
+            Ok(Self::from_inner(ReceiptData::Standard(receipt)))
+        } else {
+            let envelope = ReceiptEnvelope::decode(buf)?;
+            if !matches!(envelope, ReceiptEnvelope::Eip8141(_)) {
+                return Err(alloy_rlp::Error::UnexpectedString);
+            }
+            Self::from_decoded_envelope(envelope)
+        }
     }
 }
 
@@ -273,7 +301,7 @@ impl RlpDecodableReceipt for Receipt {
     fn rlp_decode_with_bloom(buf: &mut &[u8]) -> alloy_rlp::Result<ReceiptWithBloom<Self>> {
         let ReceiptWithBloom { receipt, logs_bloom } =
             <ReceiptEnvelope as RlpDecodableReceipt>::rlp_decode_with_bloom(buf)?;
-        Ok(ReceiptWithBloom { receipt: receipt.into(), logs_bloom })
+        Ok(ReceiptWithBloom { receipt: Self::from_decoded_envelope(receipt)?, logs_bloom })
     }
 }
 
@@ -304,13 +332,13 @@ impl Eip2718DecodableReceipt for Receipt {
     fn typed_decode_with_bloom(ty: u8, buf: &mut &[u8]) -> Eip2718Result<ReceiptWithBloom<Self>> {
         let ReceiptWithBloom { receipt, logs_bloom } =
             <ReceiptEnvelope as Eip2718DecodableReceipt>::typed_decode_with_bloom(ty, buf)?;
-        Ok(ReceiptWithBloom { receipt: receipt.into(), logs_bloom })
+        Ok(ReceiptWithBloom { receipt: Self::from_decoded_envelope(receipt)?, logs_bloom })
     }
 
     fn fallback_decode_with_bloom(buf: &mut &[u8]) -> Eip2718Result<ReceiptWithBloom<Self>> {
         let ReceiptWithBloom { receipt, logs_bloom } =
             <ReceiptEnvelope as Eip2718DecodableReceipt>::fallback_decode_with_bloom(buf)?;
-        Ok(ReceiptWithBloom { receipt: receipt.into(), logs_bloom })
+        Ok(ReceiptWithBloom { receipt: Self::from_decoded_envelope(receipt)?, logs_bloom })
     }
 }
 
@@ -427,6 +455,60 @@ mod tests {
     ///
     /// Withdrawals can be optionally included at the end of the RLP encoded message.
     pub(crate) type Block<T = TransactionSigned> = alloy_consensus::Block<T>;
+
+    #[test]
+    fn plain_receipt_rlp_matches_standard_bloomless_encoding() {
+        for tx_type in
+            [TxType::Legacy, TxType::Eip2930, TxType::Eip1559, TxType::Eip4844, TxType::Eip7702]
+        {
+            let standard = StandardReceipt {
+                tx_type,
+                success: true,
+                cumulative_gas_used: 21_000,
+                logs: vec![Log::new_unchecked(Address::ZERO, vec![], bytes!("1234"))],
+            };
+            let receipt = Receipt::from_inner(ReceiptData::Standard(standard.clone()));
+            let encoded = alloy_rlp::encode(&receipt);
+            assert_eq!(encoded, alloy_rlp::encode(&standard));
+            assert_eq!(encoded.len(), receipt.length());
+            assert_eq!(Receipt::decode(&mut encoded.as_slice()).unwrap(), receipt);
+        }
+    }
+
+    #[test]
+    fn wire_receipt_rejects_post_state() {
+        let envelope = ReceiptEnvelope::Legacy(
+            alloy_consensus::Receipt {
+                status: Eip658Value::PostState(B256::repeat_byte(1)),
+                cumulative_gas_used: 21_000,
+                logs: vec![],
+            }
+            .with_bloom(),
+        );
+        let encoded = alloy_rlp::encode(&envelope);
+        assert!(Receipt::rlp_decode_with_bloom(&mut encoded.as_slice()).is_err());
+        assert!(Receipt::decode_2718(&mut encoded.as_slice()).is_err());
+        assert!(Receipt::fallback_decode_with_bloom(&mut encoded.as_slice()).is_err());
+    }
+
+    #[test]
+    fn plain_frame_receipt_rlp_roundtrip() {
+        let receipt = Receipt::from_envelope(ReceiptEnvelope::Eip8141(
+            FrameReceiptPayload {
+                cumulative_gas_used: 42_000,
+                payer: Address::ZERO,
+                frame_receipts: vec![FrameReceipt {
+                    status: FrameStatus::Success,
+                    gas_used: FrameGasUsed { execution: 21_000, state: 0 },
+                    logs: vec![Log::new_unchecked(Address::ZERO, vec![], bytes!("8141"))],
+                }],
+            }
+            .into(),
+        ));
+        let encoded = alloy_rlp::encode(&receipt);
+        assert_eq!(encoded.len(), receipt.length());
+        assert_eq!(Receipt::decode(&mut encoded.as_slice()).unwrap(), receipt);
+    }
 
     #[test]
     #[cfg(feature = "reth-codec")]
