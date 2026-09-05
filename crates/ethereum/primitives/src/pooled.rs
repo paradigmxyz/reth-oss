@@ -3,7 +3,8 @@
 use alloy_consensus::{
     error::ValueError,
     transaction::{
-        SignerRecoverable, TxEip4844Sidecar, TxEip8141Variant, TxEip8141WithSidecar, TxHashRef,
+        eip8141::CachedFrameTransaction, SignerRecoverable, TxEip4844Sidecar, TxEip8141Variant,
+        TxEip8141WithSidecar, TxHashRef,
     },
     EthereumTxEnvelope, InMemorySize, Signed, TransactionEnvelope, TxEip1559, TxEip2930,
     TxEip4844WithSidecar, TxEip7702, TxLegacy,
@@ -43,7 +44,7 @@ pub enum PooledTransactionVariant {
     Eip7702(Signed<TxEip7702>),
     /// An EIP-8141 transaction, optionally with its EIP-7594 sidecar.
     #[envelope(ty = 6)]
-    Eip8141(Sealed<TxEip8141Variant<BlobTransactionSidecarEip7594>>),
+    Eip8141(Sealed<CachedFrameTransaction<BlobTransactionSidecarEip7594>>),
 }
 
 impl PooledTransactionVariant {
@@ -77,7 +78,7 @@ impl PooledTransactionVariant {
     /// Returns the EIP-8141 transaction, if this is one.
     pub const fn as_eip8141(
         &self,
-    ) -> Option<&Sealed<TxEip8141Variant<BlobTransactionSidecarEip7594>>> {
+    ) -> Option<&Sealed<CachedFrameTransaction<BlobTransactionSidecarEip7594>>> {
         match self {
             Self::Eip8141(tx) => Some(tx),
             _ => None,
@@ -87,7 +88,7 @@ impl PooledTransactionVariant {
 
 impl From<TxEip8141WithSidecar<BlobTransactionSidecarEip7594>> for PooledTransactionVariant {
     fn from(value: TxEip8141WithSidecar<BlobTransactionSidecarEip7594>) -> Self {
-        Self::Eip8141(TxEip8141Variant::from(value).seal_slow())
+        Self::Eip8141(CachedFrameTransaction::from(value).seal_slow())
     }
 }
 
@@ -146,7 +147,7 @@ impl From<PooledTransactionVariant> for TransactionSigned {
             PooledTransactionVariant::Eip7702(tx) => Self::Eip7702(tx),
             PooledTransactionVariant::Eip8141(tx) => {
                 let (tx, hash) = tx.into_parts();
-                let tx = match tx {
+                let tx = match tx.into_inner() {
                     TxEip8141Variant::TxEip8141(tx) => tx,
                     TxEip8141Variant::TxEip8141WithSidecar(tx) => tx.into_parts().0,
                 };

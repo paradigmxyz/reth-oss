@@ -180,7 +180,7 @@ where
             gas_tracker.record_result(output.result.result());
             canonical_executor.evm_mut().db_mut().bump_bal_index();
 
-            let _ = canonical_executor.commit_transaction(output.result);
+            canonical_executor.commit_transaction(output.result)?;
             senders.push(output.signer);
 
             let current_len = canonical_executor.receipts().len();

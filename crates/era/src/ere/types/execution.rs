@@ -260,9 +260,11 @@ pub struct SlimReceipt {
     pub logs: Vec<Log>,
 }
 
-impl From<SlimReceipt> for ReceiptEnvelope {
+impl TryFrom<SlimReceipt> for ReceiptEnvelope {
+    type Error = alloy_consensus::error::ValueError<alloy_consensus::ReceiptWithBloom<Receipt>>;
+
     /// Restores the bloom that the slim form omits, recomputing it from the logs.
-    fn from(receipt: SlimReceipt) -> Self {
+    fn try_from(receipt: SlimReceipt) -> Result<Self, Self::Error> {
         let SlimReceipt { tx_type, status, cumulative_gas_used, logs } = receipt;
         let receipt = Receipt { status, cumulative_gas_used, logs };
 

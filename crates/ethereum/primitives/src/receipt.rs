@@ -13,26 +13,32 @@ use alloy_rlp::{BufMut, Decodable, Encodable, Header};
 use reth_primitives_traits::proofs::ordered_trie_root_with_encoder;
 
 /// Standard Ethereum receipt data shared by legacy and typed transactions.
-pub type StandardReceipt = alloy_consensus::EthereumReceiptData<TxType, Log>;
+pub type StandardReceipt = alloy_consensus::EthereumReceipt<TxType, Log>;
 
-/// Reth's storage receipt wrapper around Alloy's consensus receipt enum.
+/// Reth's storage receipt wrapper around Alloy's standard and frame receipt payloads.
 ///
 /// The additional flattened frame log vector is derived data required by the
 /// `TxReceipt` interface and Reth's storage/indexing paths. The consensus
 /// representation remains owned by Alloy.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Receipt {
-    inner: EthereumReceipt<TxType, Log>,
+    inner: ReceiptData,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ReceiptData {
+    Standard(StandardReceipt),
+    Frame { payload: FrameReceiptPayload<Log>, logs: Vec<Log> },
 }
 
 impl Default for Receipt {
     fn default() -> Self {
-        Self::from_inner(EthereumReceipt::default())
+        Self::from_inner(ReceiptData::Standard(StandardReceipt::default()))
     }
 }
 
 impl Receipt {
-    const fn from_inner(inner: EthereumReceipt<TxType, Log>) -> Self {
+    const fn from_inner(inner: ReceiptData) -> Self {
         Self { inner }
     }
 
@@ -44,7 +50,7 @@ impl Receipt {
         logs: Vec<Log>,
     ) -> Self {
         Self {
-            inner: EthereumReceipt::Standard(StandardReceipt {
+            inner: ReceiptData::Standard(StandardReceipt {
                 tx_type,
                 success,
                 cumulative_gas_used,
@@ -54,68 +60,84 @@ impl Receipt {
     }
     /// Converts a consensus receipt envelope into the Reth storage representation.
     pub fn from_envelope(envelope: ReceiptEnvelope) -> Self {
-        Self::from_inner(envelope.into())
+        let tx_type = envelope.tx_type();
+        let inner = match envelope {
+            ReceiptEnvelope::Eip8141(frame) => {
+                let (payload, logs) = frame.into_parts();
+                ReceiptData::Frame { payload, logs }
+            }
+            ReceiptEnvelope::Legacy(receipt) |
+            ReceiptEnvelope::Eip2930(receipt) |
+            ReceiptEnvelope::Eip1559(receipt) |
+            ReceiptEnvelope::Eip4844(receipt) |
+            ReceiptEnvelope::Eip7702(receipt) => {
+                let receipt = receipt.receipt;
+                ReceiptData::Standard(StandardReceipt {
+                    tx_type,
+                    success: receipt.status.coerce_status(),
+                    cumulative_gas_used: receipt.cumulative_gas_used,
+                    logs: receipt.logs,
+                })
+            }
+        };
+        Self::from_inner(inner)
     }
 
     /// Converts this receipt into its consensus envelope.
     pub fn to_envelope(&self) -> ReceiptEnvelope {
         match &self.inner {
-            EthereumReceipt::Standard(data) => {
+            ReceiptData::Standard(data) => {
                 data.clone().try_into().expect("standard receipt conversion cannot fail")
             }
-            EthereumReceipt::Frame { payload, .. } => {
-                ReceiptEnvelope::Eip8141(payload.clone().into())
-            }
+            ReceiptData::Frame { payload, .. } => ReceiptEnvelope::Eip8141(payload.clone().into()),
         }
     }
 
     /// Returns the EIP-8141 frame receipt payload, if this is a frame transaction receipt.
     pub const fn as_eip8141(&self) -> Option<&FrameReceiptPayload<Log>> {
         match self {
-            Self { inner: EthereumReceipt::Frame { payload, .. }, .. } => Some(payload),
-            Self { inner: EthereumReceipt::Standard(_), .. } => None,
+            Self { inner: ReceiptData::Frame { payload, .. }, .. } => Some(payload),
+            Self { inner: ReceiptData::Standard(_), .. } => None,
         }
     }
 
     /// Returns the transaction type associated with this receipt.
     pub const fn tx_type(&self) -> TxType {
         match &self.inner {
-            EthereumReceipt::Standard(receipt) => receipt.tx_type,
-            EthereumReceipt::Frame { .. } => TxType::Eip8141,
+            ReceiptData::Standard(receipt) => receipt.tx_type,
+            ReceiptData::Frame { .. } => TxType::Eip8141,
         }
     }
 
     /// Returns whether execution succeeded.
     pub const fn success(&self) -> bool {
         match &self.inner {
-            EthereumReceipt::Standard(receipt) => receipt.success,
-            EthereumReceipt::Frame { .. } => true,
+            ReceiptData::Standard(receipt) => receipt.success,
+            ReceiptData::Frame { .. } => true,
         }
     }
 
     /// Returns the cumulative gas used by the transaction.
     pub const fn cumulative_gas_used(&self) -> u64 {
         match &self.inner {
-            EthereumReceipt::Standard(receipt) => receipt.cumulative_gas_used,
-            EthereumReceipt::Frame { payload, .. } => payload.cumulative_gas_used,
+            ReceiptData::Standard(receipt) => receipt.cumulative_gas_used,
+            ReceiptData::Frame { payload, .. } => payload.cumulative_gas_used,
         }
     }
 
     /// Updates the cumulative gas used by this receipt.
     pub const fn set_cumulative_gas_used(&mut self, cumulative_gas_used: u64) {
         match &mut self.inner {
-            EthereumReceipt::Standard(receipt) => receipt.cumulative_gas_used = cumulative_gas_used,
-            EthereumReceipt::Frame { payload, .. } => {
-                payload.cumulative_gas_used = cumulative_gas_used
-            }
+            ReceiptData::Standard(receipt) => receipt.cumulative_gas_used = cumulative_gas_used,
+            ReceiptData::Frame { payload, .. } => payload.cumulative_gas_used = cumulative_gas_used,
         }
     }
 
     /// Returns all logs emitted by the transaction.
     pub fn logs(&self) -> &[Log] {
         match &self.inner {
-            EthereumReceipt::Standard(receipt) => &receipt.logs,
-            EthereumReceipt::Frame { .. } => self.inner.logs(),
+            ReceiptData::Standard(receipt) => &receipt.logs,
+            ReceiptData::Frame { logs, .. } => logs,
         }
     }
 

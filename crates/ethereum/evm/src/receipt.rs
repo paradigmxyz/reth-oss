@@ -1,5 +1,8 @@
 use alloy_consensus::TxType;
-use alloy_evm::eth::receipt_builder::{AlloyReceiptBuilder, ReceiptBuilder, ReceiptBuilderCtx};
+use alloy_evm::{
+    block::BlockExecutionError,
+    eth::receipt_builder::{AlloyReceiptBuilder, ReceiptBuilder, ReceiptBuilderCtx},
+};
 use reth_ethereum_primitives::{Receipt, TransactionSigned};
 use reth_evm::Evm;
 
@@ -13,7 +16,10 @@ impl ReceiptBuilder for RethReceiptBuilder {
     type Transaction = TransactionSigned;
     type Receipt = Receipt;
 
-    fn build_receipt<E: Evm>(&self, ctx: ReceiptBuilderCtx<'_, TxType, E>) -> Self::Receipt {
-        AlloyReceiptBuilder::default().build_receipt(ctx).into()
+    fn build_receipt<E: Evm>(
+        &self,
+        ctx: ReceiptBuilderCtx<'_, TxType, E>,
+    ) -> Result<Self::Receipt, BlockExecutionError> {
+        AlloyReceiptBuilder::default().build_receipt(ctx).map(Into::into)
     }
 }

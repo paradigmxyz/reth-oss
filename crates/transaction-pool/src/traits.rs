@@ -1677,7 +1677,7 @@ impl PoolTransaction for EthPooledTransaction {
             }
             PooledTransactionVariant::Eip8141(tx) => {
                 let (tx, hash) = tx.into_parts();
-                let (tx, blob) = match tx {
+                let (tx, blob) = match tx.into_inner() {
                     TxEip8141Variant::TxEip8141(tx) => (tx, None),
                     TxEip8141Variant::TxEip8141WithSidecar(tx) => {
                         let (tx, sidecar) = tx.into_parts();
@@ -1856,7 +1856,7 @@ impl EthPoolTransaction for EthPooledTransaction {
                 let (tx, hash) = tx.into_parts();
                 let tx = TxEip8141WithSidecar::new(tx, sidecar);
                 PooledTransactionVariant::Eip8141(alloy_primitives::Sealed::new_unchecked(
-                    TxEip8141Variant::from(tx),
+                    tx.into(),
                     hash,
                 ))
             }

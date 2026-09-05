@@ -138,7 +138,11 @@ impl Ere {
             .then(|| block.receipts.as_ref().map(|r| r.decode_receipts()))
             .flatten()
             .transpose()?
-            .map(|slim| receipts_from_envelopes(number, slim.into_iter().map(Into::into).collect()))
+            .map(|slim| {
+                let envelopes =
+                    slim.into_iter().map(TryInto::try_into).collect::<Result<_, _>>()?;
+                receipts_from_envelopes(number, envelopes)
+            })
             .transpose()?;
 
         Ok((header, body, receipts))
