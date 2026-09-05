@@ -125,6 +125,12 @@ impl TryFrom<TransactionSigned> for PooledTransactionVariant {
                 "pooled transaction requires a blob sidecar",
             )),
             TransactionSigned::Eip7702(tx) => Ok(Self::Eip7702(tx)),
+            TransactionSigned::Eip8141(tx) if !tx.blob_versioned_hashes.is_empty() => {
+                Err(ValueError::new_static(
+                    TransactionSigned::Eip8141(tx),
+                    "pooled frame transaction requires a blob sidecar",
+                ))
+            }
             TransactionSigned::Eip8141(tx) => {
                 let (tx, hash) = tx.into_parts();
                 Ok(Self::Eip8141(Sealed::new_unchecked(tx.into(), hash)))

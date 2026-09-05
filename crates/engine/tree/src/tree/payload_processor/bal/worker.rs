@@ -2,7 +2,6 @@ use super::BalExecutionError;
 use alloy_eip7928::BlockAccessIndex;
 use alloy_evm::{
     block::{BlockExecutionError, BlockExecutor, BlockExecutorFactory, BlockValidationError},
-    eth::transaction_gas_reservation,
     Evm, RecoveredTx,
 };
 use alloy_primitives::Address;
@@ -40,8 +39,6 @@ pub(super) struct BalWorkerOutput<R> {
     pub(super) index: usize,
     pub(super) signer: Address,
     pub(super) tx_gas_limit: u64,
-    pub(super) execution_gas_reservation: u64,
-    pub(super) state_gas_reservation: u64,
     pub(super) result: R,
 }
 
@@ -80,7 +77,6 @@ pub(super) fn spawn_worker<'scope, Evm, Tx, Err, DB, MakeDb>(
                 .with_bundle_update()
                 .build();
             let gas_params = evm_env.cfg_env.gas_params.clone();
-            let tx_gas_limit_cap = evm_env.cfg_env.tx_gas_limit_cap.unwrap_or(u64::MAX);
             let evm = evm_config.evm_with_env(&mut worker_state, evm_env);
             let mut executor = evm_config.create_executor_with_state(evm, ctx.clone());
 
@@ -92,30 +88,10 @@ pub(super) fn spawn_worker<'scope, Evm, Tx, Err, DB, MakeDb>(
                         Err(_) => break,
                     },
                 };
-                let tx = tx.map_err(|err| {
-                    tracing::info!(
-                        target: "engine::tree::payload_processor::bal",
-                        tx_index = index,
-                        %err,
-                        "BAL worker transaction conversion failed"
-                    );
-                    BalWorkerError::Transaction(Box::new(err))
-                })?;
+                let tx = tx.map_err(|err| BalWorkerError::Transaction(Box::new(err)))?;
                 let (tx_env, tx) = tx.into_parts_with_gas_params(&gas_params);
                 let signer = *tx.signer();
                 let tx_gas_limit = tx_env.gas_limit();
-                let (execution_gas_reservation, state_gas_reservation) =
-                    transaction_gas_reservation(&tx_env, tx_gas_limit_cap);
-
-                tracing::info!(
-                    target: "engine::tree::payload_processor::bal",
-                    tx_index = index,
-                    sender = ?signer,
-                    tx_gas_limit,
-                    execution_gas_reservation,
-                    state_gas_reservation,
-                    "Executing BAL worker transaction"
-                );
 
                 executor.evm_mut().db_mut().set_bal_index(BlockAccessIndex::new(index as u64 + 1));
                 let result = executor
@@ -123,14 +99,7 @@ pub(super) fn spawn_worker<'scope, Evm, Tx, Err, DB, MakeDb>(
                     .map_err(BalWorkerError::Execution)?;
 
                 if result_tx
-                    .send(Ok(BalWorkerOutput {
-                        index,
-                        signer,
-                        tx_gas_limit,
-                        execution_gas_reservation,
-                        state_gas_reservation,
-                        result,
-                    }))
+                    .send(Ok(BalWorkerOutput { index, signer, tx_gas_limit, result }))
                     .is_err()
                 {
                     break;

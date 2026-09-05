@@ -71,7 +71,10 @@ pub trait EstimateCall: Call {
         evm_env.cfg_env.disable_fee_charge = true;
 
         // set nonce to None so that the correct nonce is chosen by the EVM
-        request.as_mut().take_nonce();
+        let is_frame = Into::<u8>::into(request.as_ref().output_tx_type()) == 0x06;
+        if !is_frame {
+            request.as_mut().take_nonce();
+        }
 
         // Keep a copy of gas related request values
         let tx_request_gas_limit = request.as_ref().gas_limit();
@@ -117,7 +120,8 @@ pub trait EstimateCall: Call {
         let mut tx_env = self.create_txn_env(&evm_env, request, &mut db)?;
 
         // Check whether this is a basic transfer: empty input to an account without bytecode.
-        let is_basic_transfer = if tx_env.input().is_empty() &&
+        let is_basic_transfer = if !is_frame &&
+            tx_env.input().is_empty() &&
             let TxKind::Call(to) = tx_env.kind()
         {
             // Fetch the account through `Database::basic` so the state overrides applied above
@@ -134,14 +138,20 @@ pub trait EstimateCall: Call {
         // Check funds of the sender (only useful to check if transaction gas price is more than 0).
         //
         // The caller allowance is check by doing `(account.balance - tx.value) / tx.gas_price`
-        if tx_env.gas_price() > 0 {
+        if !is_frame && tx_env.gas_price() > 0 {
             // cap the highest gas limit by max gas caller can afford with given gas price
             highest_gas_limit =
                 highest_gas_limit.min(self.caller_gas_allowance(&mut db, &evm_env, &tx_env)?);
         }
 
         // If the provided gas limit is less than computed cap, use that
-        tx_env.set_gas_limit(tx_env.gas_limit().min(highest_gas_limit));
+        if !is_frame {
+            tx_env.set_gas_limit(tx_env.gas_limit().min(highest_gas_limit));
+        } else if self.call_gas_limit() != 0 && tx_env.gas_limit() > self.call_gas_limit() {
+            return Err(Self::Error::from_eth_err(EthApiError::InvalidParams(
+                "frame transaction exceeds the RPC gas cap".into(),
+            )));
+        }
 
         // Create EVM instance once and reuse it throughout the entire estimation process
         let mut evm = self.evm_config().evm_with_env(&mut db, evm_env);
@@ -189,6 +199,12 @@ pub trait EstimateCall: Call {
             // Propagate other results (successful or other errors).
             ethres => ethres?,
         };
+
+        // A frame envelope has exactly one canonical outer limit. Validate that envelope once;
+        // scalar binary search would invalidate its declared frame limits and authorizations.
+        if is_frame && matches!(&res.result, ExecutionResult::FrameTransaction { .. }) {
+            return Ok(U256::from(tx_env.gas_limit()));
+        }
 
         let gas_refund = match res.result {
             ExecutionResult::Success { gas, .. } |

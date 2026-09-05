@@ -498,6 +498,9 @@ where
                 .map_err(Eip8141PoolTransactionError::InvalidTransaction)?;
 
             // EIP-8141 public admission requires simulating the transaction's validation frames.
+            // TODO(eip8141): integrate validation-prefix execution, signature checks, atomic payer
+            // reservations and head/reorg dependency revalidation before enabling public admission.
+            // Track the remaining integration and regression checks in audit/frame-audit-todo.md.
             // Until the pool has that context, only explicitly local/private transactions are
             // retained and none are propagated.
             if origin.is_external() {
@@ -557,10 +560,12 @@ where
 
         // Checks for gas limit
         let transaction_gas_limit = transaction.gas_limit();
+        let (execution_reservation, state_reservation) = transaction.gas_reservations();
+        let block_reservation = execution_reservation.max(state_reservation);
         let block_gas_limit = self.max_gas_limit();
-        if transaction_gas_limit > block_gas_limit {
+        if block_reservation > block_gas_limit {
             return Err(InvalidPoolTransactionError::ExceedsGasLimit(
-                transaction_gas_limit,
+                block_reservation,
                 block_gas_limit,
             ))
         }
@@ -661,7 +666,7 @@ where
         // Transaction gas limit validation (EIP-7825 for Osaka+)
         let tx_gas_limit_cap =
             self.fork_tracker.tx_gas_limit_cap.load(std::sync::atomic::Ordering::Relaxed);
-        if tx_gas_limit_cap > 0 && transaction.gas_limit() > tx_gas_limit_cap {
+        if tx_gas_limit_cap > 0 && execution_reservation > tx_gas_limit_cap {
             return Err(InvalidTransactionError::GasLimitTooHigh.into())
         }
 

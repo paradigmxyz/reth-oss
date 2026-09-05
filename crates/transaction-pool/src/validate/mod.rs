@@ -473,6 +473,15 @@ impl<T: PoolTransaction> ValidPoolTransaction<T> {
     /// the blob-specific fees.
     #[inline]
     pub fn is_underpriced(&self, maybe_replacement: &Self, price_bumps: &PriceBumpConfig) -> bool {
+        if self.transaction.frame_transaction().is_some() ||
+            maybe_replacement.transaction.frame_transaction().is_some()
+        {
+            return crate::ordering::frame_replacement_underpriced(
+                &self.transaction,
+                &maybe_replacement.transaction,
+                price_bumps.price_bump(self.tx_type()),
+            )
+        }
         // Retrieve the required price bump percentage for this type of transaction.
         //
         // The bump is different for EIP-4844 and other transactions. See `PriceBumpConfig`.

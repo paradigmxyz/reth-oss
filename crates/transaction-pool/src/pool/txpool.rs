@@ -1866,10 +1866,12 @@ impl<T: PoolTransaction> AllTransactions<T> {
                 })
             }
         }
-        if transaction.gas_limit() > self.block_gas_limit {
+        let (execution_reservation, state_reservation) = transaction.transaction.gas_reservations();
+        let block_reservation = execution_reservation.max(state_reservation);
+        if block_reservation > self.block_gas_limit {
             return Err(InsertErr::TxGasLimitMoreThanAvailableBlockGas {
                 block_gas_limit: self.block_gas_limit,
-                tx_gas_limit: transaction.gas_limit(),
+                tx_gas_limit: block_reservation,
                 transaction: Arc::new(transaction),
             })
         }

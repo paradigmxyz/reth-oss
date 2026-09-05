@@ -439,6 +439,7 @@ where
     // If we're missing any fields we try to fill nonce, gas and
     // gas price.
     let tx_type = tx.as_ref().output_tx_type();
+    let is_frame = Into::<u8>::into(tx_type) == 0x06;
 
     let from = if let Some(from) = tx.as_ref().from() {
         from
@@ -453,11 +454,11 @@ where
         );
     }
     // eth_simulateV1 validation-off mode behaves like eth_call; avoid revm's max-nonce guard.
-    if disable_nonce_check && tx.as_ref().nonce() == Some(u64::MAX) {
+    if !is_frame && disable_nonce_check && tx.as_ref().nonce() == Some(u64::MAX) {
         tx.as_mut().set_nonce(0);
     }
 
-    if tx.as_ref().gas_limit().is_none() {
+    if !is_frame && tx.as_ref().gas_limit().is_none() {
         tx.as_mut().set_gas_limit(default_gas_limit);
     }
 
@@ -465,7 +466,7 @@ where
         tx.as_mut().set_chain_id(chain_id);
     }
 
-    if tx.as_ref().kind().is_none() {
+    if !is_frame && tx.as_ref().kind().is_none() {
         tx.as_mut().set_kind(TxKind::Create);
     }
 

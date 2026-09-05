@@ -1349,6 +1349,18 @@ pub trait PoolTransaction:
         self.is_eip4844() || self.blob_versioned_hashes().is_some_and(|hashes| !hashes.is_empty())
     }
 
+    /// Gas required in each block dimension for admission under the pool's gas schedule.
+    fn gas_reservations(&self) -> (u64, u64) {
+        let gas = self.gas_limit();
+        match self.frame_transaction() {
+            Some(tx) => {
+                let state = tx.total_frame_state_gas_limit();
+                (gas.checked_sub(state).unwrap_or(u64::MAX), state)
+            }
+            None => (gas, gas),
+        }
+    }
+
     /// Define a method to convert from the `Consensus` type to `Self`
     ///
     /// This conversion may fail for transactions that are valid for inclusion in blocks
@@ -1602,19 +1614,18 @@ impl<T: SignedTransaction> EthPooledTransaction<T> {
         let mut blob_cell_availability = None;
         let mut blob_sidecar = EthBlobTransactionSidecar::None;
 
-        let gas_cost = U256::from(transaction.max_fee_per_gas())
-            .saturating_mul(U256::from(transaction.gas_limit()));
+        let gas_cost =
+            transaction.max_fee_per_gas_u256().saturating_mul(U256::from(transaction.gas_limit()));
 
         let mut cost = gas_cost.saturating_add(transaction.value());
 
         if let (Some(blob_gas_used), Some(max_fee_per_blob_gas)) =
-            (transaction.blob_gas_used(), transaction.max_fee_per_blob_gas()) &&
+            (transaction.blob_gas_used(), transaction.max_fee_per_blob_gas_u256()) &&
             transaction.blob_versioned_hashes().is_some_and(|hashes| !hashes.is_empty())
         {
             // Add max blob cost using saturating math to avoid overflow
-            cost = cost.saturating_add(U256::from(
-                max_fee_per_blob_gas.saturating_mul(blob_gas_used as u128),
-            ));
+            cost =
+                cost.saturating_add(max_fee_per_blob_gas.saturating_mul(U256::from(blob_gas_used)));
 
             // because the blob sidecar is not included in this transaction variant, mark it as
             // missing
@@ -1767,6 +1778,22 @@ impl<T: alloy_consensus::Transaction> alloy_consensus::Transaction for EthPooled
 
     fn max_fee_per_gas(&self) -> u128 {
         self.transaction.max_fee_per_gas()
+    }
+
+    fn frame_transaction(&self) -> Option<&alloy_consensus::TxEip8141> {
+        self.transaction.frame_transaction()
+    }
+
+    fn max_fee_per_gas_u256(&self) -> U256 {
+        self.transaction.max_fee_per_gas_u256()
+    }
+
+    fn max_priority_fee_per_gas_u256(&self) -> Option<U256> {
+        self.transaction.max_priority_fee_per_gas_u256()
+    }
+
+    fn max_fee_per_blob_gas_u256(&self) -> Option<U256> {
+        self.transaction.max_fee_per_blob_gas_u256()
     }
 
     fn max_priority_fee_per_gas(&self) -> Option<u128> {

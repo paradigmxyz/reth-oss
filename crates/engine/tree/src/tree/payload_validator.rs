@@ -112,7 +112,7 @@ use alloy_eip7928::{
     bal::{Bal, DecodedBal},
     BlockAccessList,
 };
-use alloy_eips::{eip1898::BlockWithParent, eip4895::Withdrawal, NumHash};
+use alloy_eips::{eip1898::BlockWithParent, eip2718::Typed2718, eip4895::Withdrawal, NumHash};
 use alloy_evm::Evm;
 use alloy_primitives::{
     map::{AddressMap, B256Set},
@@ -492,14 +492,6 @@ where
         Evm: ConfigureEngineEvm<T::ExecutionData, Primitives = N>,
     {
         let parent_hash = input.parent_hash();
-        info!(
-            target: "engine::tree::payload_validator",
-            block = ?input.hash(),
-            parent = ?parent_hash,
-            transactions = input.transaction_count(),
-            gas_limit = input.gas_limit(),
-            "Starting payload validation"
-        );
         let _txpool_pause = self.txpool_prewarm.as_ref().map(txpool_prewarm::Handle::pause);
         let txpool_snapshot =
             self.txpool_prewarm.as_ref().and_then(|prewarmer| prewarmer.snapshot(parent_hash));
@@ -615,23 +607,15 @@ where
 
         // Get an iterator over the transactions in the payload
         let txs = self.tx_iterator_for(&input)?;
-        let has_eip8141_transactions = matches!(
-            &input,
-            BlockOrPayload::Payload(payload) if payload.has_eip8141_transactions()
-        );
+        let has_eip8141_transactions = match &input {
+            BlockOrPayload::Payload(payload) => payload.has_eip8141_transactions(),
+            BlockOrPayload::Block(block) => {
+                block.body().transactions().iter().any(|tx| tx.is_eip8141())
+            }
+        };
 
         let parallel_bal_execution = ensure_ok!(
-            self.bal_path_eligible(env.decoded_bal.as_deref(), has_eip8141_transactions,)
-        );
-
-        info!(
-            target: "engine::tree::payload_validator",
-            block = ?env.hash,
-            transactions = env.transaction_count,
-            parallel_bal_execution,
-            has_bal = env.decoded_bal.is_some(),
-            has_eip8141_transactions,
-            "Prepared payload execution environment"
+            self.bal_path_eligible(env.decoded_bal.as_deref(), has_eip8141_transactions)
         );
 
         // Prepare the state-root job before execution so it can provide streaming hooks.
@@ -1047,17 +1031,9 @@ where
         T: PayloadTypes<BuiltPayload: BuiltPayload<Primitives = N>>,
         Evm: ConfigureEngineEvm<T::ExecutionData, Primitives = N>,
     {
-        let has_bal = input.has_block_access_list();
-        let block_hash = env.hash;
-        info!(
-            target: "engine::tree::payload_validator",
-            block = ?block_hash,
-            parent = ?env.parent_hash,
-            transactions = input.transaction_count(),
-            has_bal,
-            "Executing block"
-        );
+        debug!(target: "engine::tree::payload_validator", "Executing block");
 
+        let has_bal = input.has_block_access_list();
         let mut db = debug_span!(target: "engine::tree", "build_state_db").in_scope(|| {
             State::builder()
                 .with_database(StateProviderDatabase::new(state_provider))
@@ -1112,7 +1088,6 @@ where
             &receipt_tx,
             &executed_tx_index,
             has_bal,
-            block_hash,
         )?;
         drop(receipt_tx);
 
@@ -1133,14 +1108,7 @@ where
         let execution_duration = execution_start.elapsed();
         self.metrics.record_block_execution(&output, execution_duration);
         self.metrics.record_block_execution_gas_bucket(output.result.gas_used, execution_duration);
-        info!(
-            target: "engine::tree::payload_validator",
-            block = ?block_hash,
-            gas_used = output.result.gas_used,
-            receipts = output.result.receipts.len(),
-            elapsed = ?execution_duration,
-            "Executed block"
-        );
+        debug!(target: "engine::tree::payload_validator", elapsed = ?execution_duration, "Executed block");
 
         Ok((output, senders, result_rx, built_bal))
     }
@@ -1159,9 +1127,10 @@ where
         has_eip8141_transactions: bool,
     ) -> Result<bool, InsertBlockErrorKind> {
         let has_bal = bal.is_some();
-        // EIP-8141 static validation must be able to report transaction errors before requiring
-        // sender state. The strict BAL worker resolves all accounts up front, which turns an
-        // intentionally absent sender designation into a BAL error for invalid transactions.
+        // Frame transactions reserve execution and state gas separately. The ordered commit
+        // loop only replays standard transaction limits, so mixed blocks must execute serially.
+        // Enabling frames also requires preserving serial admission/transaction error ordering:
+        // workers currently forward execution failures before the ordered admission check.
         let parallel_execution =
             has_bal && !has_eip8141_transactions && !self.config.disable_bal_parallel_execution();
         if parallel_execution && self.config.disable_bal_parallel_state_root() {
@@ -1208,15 +1177,7 @@ where
         T: PayloadTypes<BuiltPayload: BuiltPayload<Primitives = N>>,
         V: PayloadValidator<T, Block = N::Block>,
     {
-        let block_hash = env.hash;
-        info!(
-            target: "engine::tree::payload_validator",
-            block = ?block_hash,
-            parent = ?env.parent_hash,
-            transactions = env.transaction_count,
-            has_bal = env.decoded_bal.is_some(),
-            "Executing block via BAL path"
-        );
+        debug!(target: "engine::tree::payload_validator", "Executing block via BAL path");
 
         let (receipt_tx, result_rx) = self.spawn_receipt_root_task(env.transaction_count);
         let input_bal = env.decoded_bal.ok_or_else(|| {
@@ -1246,11 +1207,8 @@ where
 
         self.metrics.record_block_execution(&output, execution_duration);
         self.metrics.record_block_execution_gas_bucket(output.result.gas_used, execution_duration);
-        info!(
+        debug!(
             target: "engine::tree::payload_validator",
-            block = ?block_hash,
-            gas_used = output.result.gas_used,
-            receipts = output.result.receipts.len(),
             elapsed = ?execution_duration,
             "Executed block via BAL path",
         );
@@ -1280,7 +1238,6 @@ where
     /// - Collecting transaction senders for later use
     ///
     /// Returns the executor (for finalization) and the collected senders.
-    #[expect(clippy::too_many_arguments)]
     fn execute_transactions<'a, E, Tx, InnerTx, Err, DB>(
         &self,
         mut executor: E,
@@ -1289,7 +1246,6 @@ where
         receipt_tx: &crossbeam_channel::Sender<IndexedReceipt<N::Receipt>>,
         executed_tx_index: &AtomicUsize,
         has_bal: bool,
-        block_hash: B256,
     ) -> Result<(E, Vec<Address>), BlockExecutionError>
     where
         E: BlockExecutor<Receipt = N::Receipt, Evm: alloy_evm::Evm<DB = &'a mut State<DB>>>,
@@ -1342,15 +1298,6 @@ where
             if tracing::enabled!(target: "engine::tree", Level::TRACE) {
                 trace!(target: "engine::tree", "Executing transaction");
             }
-
-            info!(
-                target: "engine::tree::payload_validator",
-                block = ?block_hash,
-                tx_index = senders.len() - 1,
-                tx_hash = ?tx.tx().tx_hash(),
-                sender = ?tx_signer,
-                "Executing transaction"
-            );
 
             let tx_start = Instant::now();
             executor.execute_transaction(tx)?;
@@ -1414,14 +1361,6 @@ where
         let built_bal = built_bal.map(Bal::from);
         let block_access_list_hash =
             built_bal.as_ref().map(|bal| bal.compute_hash_with_buf(&mut self.bal_hash_buf));
-        info!(
-            target: "engine::tree::payload_validator",
-            block = ?block.num_hash(),
-            built_bal_accounts = built_bal.as_ref().map_or(0, |bal| bal.len()),
-            built_bal_hash = ?block_access_list_hash,
-            expected_payload_bal_hash = ?block.header().block_access_list_hash(),
-            "Comparing generated BAL with execution payload"
-        );
 
         let validation_result = built_bal
             .as_ref()

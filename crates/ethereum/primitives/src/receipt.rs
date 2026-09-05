@@ -153,7 +153,7 @@ impl Receipt {
         self.success().length() +
             self.cumulative_gas_used().length() +
             bloom.length() +
-            self.logs().to_vec().length()
+            alloy_rlp::list_length(self.logs())
     }
 
     fn rlp_receipt_length(&self, bloom: &Bloom) -> usize {
@@ -166,7 +166,7 @@ impl Receipt {
         self.success().encode(out);
         self.cumulative_gas_used().encode(out);
         bloom.encode(out);
-        self.logs().to_vec().encode(out);
+        alloy_rlp::encode_list(self.logs(), out);
     }
 }
 
@@ -178,7 +178,13 @@ impl From<ReceiptEnvelope> for Receipt {
 
 impl From<Receipt> for ReceiptEnvelope {
     fn from(value: Receipt) -> Self {
-        value.to_envelope()
+        match value.inner {
+            ReceiptData::Standard(receipt) => {
+                receipt.try_into().expect("standard receipt conversion cannot fail")
+            }
+            // Alloy rebuilds the flattened log cache; its constructor only accepts the payload.
+            ReceiptData::Frame { payload, .. } => Self::Eip8141(payload.into()),
+        }
     }
 }
 
@@ -206,7 +212,10 @@ impl TxReceipt for Receipt {
     }
 
     fn into_logs(self) -> Vec<Log> {
-        self.logs().to_vec()
+        match self.inner {
+            ReceiptData::Standard(receipt) => receipt.logs,
+            ReceiptData::Frame { logs, .. } => logs,
+        }
     }
 }
 
@@ -366,7 +375,10 @@ impl reth_codecs::Compact for Receipt {
     where
         B: BufMut + AsMut<[u8]>,
     {
-        reth_codecs::Compact::to_compact(&self.to_envelope(), buf)
+        match &self.inner {
+            ReceiptData::Standard(receipt) => reth_codecs::Compact::to_compact(receipt, buf),
+            ReceiptData::Frame { .. } => reth_codecs::Compact::to_compact(&self.to_envelope(), buf),
+        }
     }
 
     fn from_compact(buf: &[u8], len: usize) -> (Self, &[u8]) {
@@ -473,6 +485,127 @@ mod tests {
             assert_eq!(encoded.len(), receipt.length());
             assert_eq!(Receipt::decode(&mut encoded.as_slice()).unwrap(), receipt);
         }
+    }
+
+    #[test]
+    fn standard_receipt_wire_encoding_matches_alloy() {
+        for tx_type in
+            [TxType::Legacy, TxType::Eip2930, TxType::Eip1559, TxType::Eip4844, TxType::Eip7702]
+        {
+            for success in [false, true] {
+                for logs in [
+                    vec![],
+                    vec![Log::new_unchecked(
+                        Address::repeat_byte(1),
+                        vec![B256::repeat_byte(2)],
+                        alloy_primitives::Bytes::from(vec![3; 128]),
+                    )],
+                ] {
+                    let receipt = Receipt::standard(tx_type, success, 42_000, logs);
+                    let envelope = receipt.to_envelope();
+                    assert_eq!(receipt.encoded_2718(), envelope.encoded_2718());
+                    assert_eq!(receipt.encode_2718_len(), envelope.encode_2718_len());
+                    // Callers may supply a memoized bloom rather than recomputing it.
+                    for bloom in [Bloom::ZERO, receipt.bloom()] {
+                        let mut actual = Vec::new();
+                        let mut expected = Vec::new();
+                        receipt.rlp_encode_with_bloom(&bloom, &mut actual);
+                        envelope.rlp_encode_with_bloom(&bloom, &mut expected);
+                        assert_eq!(actual, expected);
+                        assert_eq!(actual.len(), receipt.rlp_encoded_length_with_bloom(&bloom));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "reth-codec")]
+    fn standard_receipt_compact_matches_alloy() {
+        for tx_type in
+            [TxType::Legacy, TxType::Eip2930, TxType::Eip1559, TxType::Eip4844, TxType::Eip7702]
+        {
+            for success in [false, true] {
+                for logs in [
+                    vec![],
+                    vec![Log::new_unchecked(
+                        Address::repeat_byte(1),
+                        vec![B256::repeat_byte(2)],
+                        bytes!("1234"),
+                    )],
+                ] {
+                    let standard =
+                        StandardReceipt { tx_type, success, cumulative_gas_used: 42_000, logs };
+                    let receipt = Receipt::from_inner(ReceiptData::Standard(standard.clone()));
+                    let mut expected = Vec::new();
+                    let expected_len = standard.to_compact(&mut expected);
+                    let mut actual = Vec::new();
+                    assert_eq!(receipt.to_compact(&mut actual), expected_len);
+                    assert_eq!(actual, expected);
+                    let mut envelope_bytes = Vec::new();
+                    assert_eq!(receipt.to_envelope().to_compact(&mut envelope_bytes), expected_len);
+                    assert_eq!(actual, envelope_bytes);
+                    let (decoded, remaining) = Receipt::from_compact(&actual, expected_len);
+                    assert_eq!(decoded, receipt);
+                    let (decoded_standard, expected_remaining) =
+                        StandardReceipt::from_compact(&expected, expected_len);
+                    assert_eq!(decoded_standard, standard);
+                    assert_eq!(remaining, expected_remaining);
+                }
+            }
+        }
+    }
+
+    fn frame_receipt_with_logs() -> Receipt {
+        ReceiptEnvelope::Eip8141(
+            FrameReceiptPayload {
+                cumulative_gas_used: 42_000,
+                payer: Address::repeat_byte(4),
+                frame_receipts: (1..=2)
+                    .map(|index| FrameReceipt {
+                        status: FrameStatus::Success,
+                        gas_used: FrameGasUsed { execution: 21_000, state: 0 },
+                        logs: vec![Log::new_unchecked(
+                            Address::repeat_byte(index),
+                            vec![B256::repeat_byte(index)],
+                            bytes!("8141"),
+                        )],
+                    })
+                    .collect(),
+            }
+            .into(),
+        )
+        .into()
+    }
+
+    #[test]
+    fn consuming_receipt_preserves_log_allocations() {
+        let standard = Receipt::standard(
+            TxType::Eip1559,
+            true,
+            21_000,
+            vec![Log::new_unchecked(Address::ZERO, vec![], bytes!("1234"))],
+        );
+        for receipt in [standard.clone(), frame_receipt_with_logs()] {
+            let expected = receipt.logs().to_vec();
+            let allocation = receipt.logs().as_ptr();
+            let logs = receipt.into_logs();
+            assert_eq!(logs, expected);
+            assert_eq!(logs.as_ptr(), allocation);
+        }
+
+        let allocation = standard.logs().as_ptr();
+        let expected = standard.to_envelope();
+        let envelope = ReceiptEnvelope::from(standard);
+        assert_eq!(envelope, expected);
+        assert_eq!(envelope.logs().as_ptr(), allocation);
+
+        let frame = frame_receipt_with_logs();
+        let expected = frame.to_envelope();
+        let allocation = frame.as_eip8141().unwrap().frame_receipts.as_ptr();
+        let envelope = ReceiptEnvelope::from(frame);
+        assert_eq!(envelope, expected);
+        assert_eq!(envelope.as_eip8141().unwrap().frame_receipts.as_ptr(), allocation);
     }
 
     #[test]

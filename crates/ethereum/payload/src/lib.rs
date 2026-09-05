@@ -256,7 +256,11 @@ where
 
     while let Some(pool_tx) = best_txs.next() {
         // ensure we still have capacity for this transaction
-        let exceeds_gas_limit = if is_amsterdam {
+        // The executor derives frame reservations from the active gas schedule. A combined
+        // frame limit is not a reservation for either individual gas dimension.
+        let exceeds_gas_limit = if pool_tx.is_eip8141() {
+            None
+        } else if is_amsterdam {
             let regular_available_gas = block_gas_limit.saturating_sub(block_regular_gas_used);
             let state_available_gas = block_gas_limit.saturating_sub(block_state_gas_used);
             let regular_tx_gas_limit = pool_tx.gas_limit().min(tx_gas_limit_cap);
@@ -317,7 +321,7 @@ where
         let mut blob_tx_sidecar = None;
         let tx_blob_count = tx.blob_count();
 
-        if let Some(tx_blob_count) = tx_blob_count {
+        if let Some(tx_blob_count) = tx_blob_count.filter(|count| *count != 0 || tx.is_eip4844()) {
             if block_blob_count + tx_blob_count > max_blob_count {
                 // we can't fit this _blob_ transaction into the block, so we mark it as
                 // invalid, which removes its dependent transactions from
