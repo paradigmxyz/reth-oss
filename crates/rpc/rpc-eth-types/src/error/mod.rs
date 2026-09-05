@@ -442,6 +442,7 @@ impl From<EthTxEnvError> for EthApiError {
                 Self::InvalidTransaction(RpcInvalidTransactionError::TipVeryHigh)
             }
             EthTxEnvError::Input(err) => Self::TransactionInputError(err),
+            err @ EthTxEnvError::Eip8141InvalidOuterFields => Self::InvalidParams(err.to_string()),
         }
     }
 }
@@ -1196,6 +1197,17 @@ mod tests {
     fn timed_out_error() {
         let err = EthApiError::ExecutionTimedOut(Duration::from_secs(10));
         assert_eq!(err.to_string(), "execution aborted (timeout = 10s)");
+    }
+
+    #[test]
+    fn frame_outer_fields_error_is_invalid_params() {
+        let err = EthApiError::from(EthTxEnvError::Eip8141InvalidOuterFields);
+        let err: jsonrpsee_types::error::ErrorObject<'static> = err.into();
+        assert_eq!(err.code(), -32602);
+        assert_eq!(
+            err.message(),
+            "EIP-8141 transaction request contains non-canonical outer fields"
+        );
     }
 
     #[test]
