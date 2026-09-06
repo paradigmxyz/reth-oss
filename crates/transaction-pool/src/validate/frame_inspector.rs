@@ -315,16 +315,20 @@ mod tests {
         ] {
             let mut inspector = FrameValidationInspector::new(Address::ZERO, policy());
             let mut ctx = Context::mainnet();
-            let mut interp = Interpreter::default();
-            interp.bytecode = ExtBytecode::new(Bytecode::new_legacy(vec![opcode].into()));
+            let mut interp = Interpreter {
+                bytecode: ExtBytecode::new(Bytecode::new_legacy(vec![opcode].into())),
+                ..Default::default()
+            };
             inspector.step(&mut interp, &mut ctx);
             assert!(inspector.error().is_some(), "opcode {opcode:#x}");
         }
         for next in [0xf1, 0xf2, 0xf4, 0xfa, 0x00, 0x50] {
             let mut inspector = FrameValidationInspector::new(Address::ZERO, policy());
             let mut ctx = Context::mainnet();
-            let mut interp = Interpreter::default();
-            interp.bytecode = ExtBytecode::new(Bytecode::new_legacy(vec![0x5a, next].into()));
+            let mut interp = Interpreter {
+                bytecode: ExtBytecode::new(Bytecode::new_legacy(vec![0x5a, next].into())),
+                ..Default::default()
+            };
             inspector.step(&mut interp, &mut ctx);
             assert_eq!(inspector.error().is_none(), matches!(next, 0xf1 | 0xf2 | 0xf4 | 0xfa));
         }
