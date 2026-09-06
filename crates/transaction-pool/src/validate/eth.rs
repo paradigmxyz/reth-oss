@@ -1,6 +1,6 @@
 //! Ethereum transaction validator.
 
-use super::constants::DEFAULT_MAX_TX_INPUT_BYTES;
+use super::{constants::DEFAULT_MAX_TX_INPUT_BYTES, FrameValidation};
 use crate::{
     blobstore::{BlobStore, PooledBlobSidecar},
     error::{
@@ -55,6 +55,10 @@ use std::{
 /// transaction passes or `Err` to reject it.
 pub type StatelessValidationFn<T> =
     Arc<dyn Fn(TransactionOrigin, &T) -> Result<(), InvalidPoolTransactionError> + Send + Sync>;
+
+/// Executes public frame validation against one pinned canonical state snapshot.
+pub type FrameValidationFn<T> =
+    Arc<dyn Fn(&T) -> Result<Arc<FrameValidation>, InvalidPoolTransactionError> + Send + Sync>;
 
 /// Additional stateful validation function signature.
 ///
@@ -132,6 +136,8 @@ pub struct EthTransactionValidator<Client, T, Evm> {
     /// Optional additional stateful validation check applied at the end of
     /// [`validate_stateful`](Self::validate_stateful).
     additional_stateful_validation: Option<StatefulValidationFn<T>>,
+    /// Prefix executor installed by the node's EVM configuration.
+    frame_validation: Option<FrameValidationFn<T>>,
 }
 
 impl<Client, Tx, Evm> fmt::Debug for EthTransactionValidator<Client, Tx, Evm> {
@@ -162,6 +168,11 @@ impl<Client, Tx, Evm> fmt::Debug for EthTransactionValidator<Client, Tx, Evm> {
 }
 
 impl<Client, Tx, Evm> EthTransactionValidator<Client, Tx, Evm> {
+    /// Installs public frame validation. Pool admission must also enforce reservations.
+    pub fn set_frame_validation(&mut self, validation: FrameValidationFn<Tx>) {
+        self.frame_validation = Some(validation);
+    }
+
     /// Returns the configured chain spec
     pub fn chain_spec(&self) -> Arc<Client::ChainSpec>
     where
@@ -497,12 +508,9 @@ where
                 .validate_eip8141_structure()
                 .map_err(Eip8141PoolTransactionError::InvalidTransaction)?;
 
-            // EIP-8141 public admission requires simulating the transaction's validation frames.
-            // TODO(eip8141): integrate validation-prefix execution, signature checks, atomic payer
-            // reservations and head/reorg dependency revalidation before enabling public admission.
-            // Until the pool has that context, only explicitly local/private transactions are
-            // retained and none are propagated.
-            if origin.is_external() {
+            // Generic validators fail closed without the node's prefix executor. Explicitly
+            // local/private transactions retain their non-propagating devnet behavior.
+            if origin.is_external() && self.frame_validation.is_none() {
                 return Err(Eip8141PoolTransactionError::PublicMempoolValidationUnavailable.into())
             }
         }
@@ -691,10 +699,36 @@ where
         P: AccountInfoReader,
     {
         // Use provider to get account info
-        let account = match state.basic_account(transaction.sender_ref()) {
-            Ok(account) => account.unwrap_or_default(),
-            Err(err) => {
-                return TransactionValidationOutcome::Error(*transaction.hash(), Box::new(err))
+        let frame_metadata = if transaction.is_eip8141() && !origin.is_private() {
+            match &self.frame_validation {
+                Some(validate) => match validate(&transaction) {
+                    Ok(metadata) => Some(metadata),
+                    Err(err) => return TransactionValidationOutcome::Invalid(transaction, err),
+                },
+                None => None,
+            }
+        } else {
+            None
+        };
+        let account = if let Some(metadata) = frame_metadata {
+            let account = Account {
+                nonce: metadata.sender_nonce,
+                balance: metadata.sender_balance,
+                bytecode_hash: metadata.sender_code_hash,
+            };
+            if let Err(reason) = transaction.set_frame_validation(metadata) {
+                return TransactionValidationOutcome::Invalid(
+                    transaction,
+                    Eip8141PoolTransactionError::PublicMempoolPolicy(reason).into(),
+                )
+            }
+            account
+        } else {
+            match state.basic_account(transaction.sender_ref()) {
+                Ok(account) => account.unwrap_or_default(),
+                Err(err) => {
+                    return TransactionValidationOutcome::Error(*transaction.hash(), Box::new(err))
+                }
             }
         };
 
@@ -735,7 +769,8 @@ where
         }
 
         let authorities = self.recover_authorities(&transaction);
-        let is_eip8141 = transaction.is_eip8141();
+        let unvalidated_frame =
+            transaction.is_eip8141() && transaction.frame_validation().is_none();
         // Return the valid transaction
         TransactionValidationOutcome::Valid {
             balance: account.balance,
@@ -743,7 +778,7 @@ where
             bytecode_hash: account.bytecode_hash,
             transaction: ValidTransaction::new(transaction, maybe_blob_sidecar),
             // by this point assume all external transactions should be propagated
-            propagate: if is_eip8141 {
+            propagate: if unvalidated_frame {
                 false
             } else {
                 match origin {
@@ -1469,6 +1504,7 @@ impl<Client, Evm> EthTransactionValidatorBuilder<Client, Evm> {
             eip7594,
             additional_stateless_validation: None,
             additional_stateful_validation: None,
+            frame_validation: None,
         }
     }
 

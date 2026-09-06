@@ -21,6 +21,7 @@ reth-primitives-traits = { workspace = true, features = ["secp256k1", "rayon"] }
 reth-node-builder.workspace = true
 reth-tracing.workspace = true
 reth-provider.workspace = true
+reth-storage-api.workspace = true
 reth-transaction-pool.workspace = true
 reth-network.workspace = true
 reth-evm.workspace = true

@@ -254,6 +254,9 @@ pub enum Eip8141PoolTransactionError {
     /// Public admission requires EIP-8141 validation-frame simulation.
     #[error("public EIP-8141 mempool validation is unavailable")]
     PublicMempoolValidationUnavailable,
+    /// The transaction does not satisfy public-pool policy at the current head.
+    #[error("EIP-8141 public mempool policy: {0}")]
+    PublicMempoolPolicy(&'static str),
 }
 
 /// Represents errors that can happen when validating transactions for the pool
@@ -451,7 +454,8 @@ impl InvalidPoolTransactionError {
             },
             Self::Eip8141(eip8141_err) => match eip8141_err {
                 Eip8141PoolTransactionError::InvalidTransaction(_) => true,
-                Eip8141PoolTransactionError::PublicMempoolValidationUnavailable => false,
+                Eip8141PoolTransactionError::PublicMempoolValidationUnavailable |
+                Eip8141PoolTransactionError::PublicMempoolPolicy(_) => false,
             },
             Self::PriorityFeeBelowMinimum { .. } => false,
         }

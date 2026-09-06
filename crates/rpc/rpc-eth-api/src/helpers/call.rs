@@ -876,7 +876,7 @@ pub trait Call:
         // Frame limits are part of the signed envelope. Reject an excessive request instead of
         // changing its canonical gas limit or charging its allowance to an unrelated sender.
         if is_frame && self.call_gas_limit() != 0 && tx_env.gas_limit() > self.call_gas_limit() {
-            return Err(Self::Error::from_eth_err(EthApiError::InvalidParams(
+            return Err(Self::Error::from(EthApiError::InvalidParams(
                 "frame transaction exceeds the RPC gas cap".into(),
             )));
         }

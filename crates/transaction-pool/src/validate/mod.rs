@@ -15,9 +15,15 @@ use std::{fmt, fmt::Debug, future::Future, time::Instant};
 
 mod constants;
 mod eth;
+mod frame_inspector;
+mod frame_policy;
+mod frame_state;
 mod task;
 
 pub use eth::*;
+pub use frame_inspector::FrameValidationInspector;
+pub use frame_policy::FrameValidationPolicy;
+pub use frame_state::*;
 
 pub use task::{TransactionValidationTaskExecutor, ValidationTask};
 

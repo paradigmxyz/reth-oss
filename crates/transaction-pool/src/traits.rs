@@ -57,7 +57,9 @@ use crate::{
         state::SubPool, BestTransactionFilter, NewTransactionEvent, TransactionEvents,
         TransactionListenerKind,
     },
-    validate::{TransactionValidationOutcome, TransactionValidator, ValidPoolTransaction},
+    validate::{
+        FrameValidation, TransactionValidationOutcome, TransactionValidator, ValidPoolTransaction,
+    },
     AddedTransactionOutcome, AllTransactionsEvents,
 };
 use alloy_consensus::{
@@ -790,6 +792,24 @@ pub trait TransactionPoolExt: TransactionPool {
     /// the sidecar is still available.
     fn on_canonical_state_change(&self, update: CanonicalStateUpdate<'_, Self::Block>);
 
+    /// Updates the head with all touched state addresses, including destroyed accounts.
+    ///
+    /// Pools supporting public frames must override this and
+    /// [`Self::revalidate_frame_transactions`]; the defaults preserve non-frame pool behavior.
+    fn on_canonical_state_change_with_touched_accounts(
+        &self,
+        update: CanonicalStateUpdate<'_, Self::Block>,
+        _touched: &[Address],
+    ) {
+        self.on_canonical_state_change(update);
+    }
+
+    /// Revalidates frames withdrawn by canonical state updates.
+    /// Also call this after changing the head through [`Self::set_block_info`].
+    fn revalidate_frame_transactions(&self) -> impl Future<Output = ()> + Send {
+        async {}
+    }
+
     /// Updates the accounts in the pool
     fn update_accounts(&self, accounts: Vec<ChangedAccount>);
 
@@ -1469,6 +1489,19 @@ pub trait PoolTransaction:
     /// The Sender of the transaction.
     fn sender(&self) -> Address;
 
+    /// Returns frame validation metadata when attached.
+    fn frame_validation(&self) -> Option<&Arc<FrameValidation>> {
+        None
+    }
+
+    /// Attaches frame validation metadata.
+    fn set_frame_validation(
+        &mut self,
+        _metadata: Arc<FrameValidation>,
+    ) -> Result<(), &'static str> {
+        Err("frame validation metadata is unsupported")
+    }
+
     /// Reference to the Sender of the transaction.
     fn sender_ref(&self) -> &Address;
 
@@ -1603,6 +1636,9 @@ pub struct EthPooledTransaction<T = TransactionSigned> {
     ///
     /// This is shared with the blob sidecar so that availability updates are reflected here.
     pub blob_cell_availability: Option<BlobCellAvailability>,
+
+    /// Optional validation metadata for an EIP-8141 frame transaction.
+    pub frame_validation: Option<Arc<FrameValidation>>,
 }
 
 impl<T: SignedTransaction> EthPooledTransaction<T> {
@@ -1634,7 +1670,14 @@ impl<T: SignedTransaction> EthPooledTransaction<T> {
             blob_cell_availability = Some(BlobCellAvailability::full());
         }
 
-        Self { transaction, cost, encoded_length, blob_sidecar, blob_cell_availability }
+        Self {
+            transaction,
+            cost,
+            encoded_length,
+            blob_sidecar,
+            blob_cell_availability,
+            frame_validation: None,
+        }
     }
 
     /// Return the reference to the underlying transaction.
@@ -1731,6 +1774,22 @@ impl PoolTransaction for EthPooledTransaction {
         self.transaction.signer_ref()
     }
 
+    fn frame_validation(&self) -> Option<&Arc<FrameValidation>> {
+        self.frame_validation.as_ref()
+    }
+
+    fn set_frame_validation(&mut self, metadata: Arc<FrameValidation>) -> Result<(), &'static str> {
+        if !self.is_eip8141() {
+            return Err("frame validation metadata requires an EIP-8141 transaction");
+        }
+        if metadata.sender != self.sender() || metadata.sender_nonce != self.nonce() {
+            return Err("frame validation metadata sender or nonce mismatch");
+        }
+        self.cost = metadata.max_cost;
+        self.frame_validation = Some(metadata);
+        Ok(())
+    }
+
     /// Returns the cost that this transaction is allowed to consume:
     ///
     /// For EIP-1559 transactions: `max_fee_per_gas * gas_limit + tx_value`.
@@ -1738,7 +1797,7 @@ impl PoolTransaction for EthPooledTransaction {
     /// For EIP-4844 blob transactions: `max_fee_per_gas * gas_limit + tx_value +
     /// max_blob_fee_per_gas * blob_gas_used`.
     fn cost(&self) -> &U256 {
-        &self.cost
+        self.frame_validation.as_ref().map_or(&self.cost, |metadata| &metadata.max_cost)
     }
 
     /// Returns the length of the rlp encoded object
@@ -1755,7 +1814,18 @@ impl<T: Typed2718> Typed2718 for EthPooledTransaction<T> {
 
 impl<T: InMemorySize> InMemorySize for EthPooledTransaction<T> {
     fn size(&self) -> usize {
-        self.transaction.size()
+        self.transaction.size() +
+            self.frame_validation.as_ref().map_or(0, |metadata| {
+                // Admission metadata can exceed the wire payload for code/storage-heavy prefixes.
+                // Include its allocation in pool pressure accounting without changing encoded
+                // length.
+                std::mem::size_of::<FrameValidation>() +
+                    2 * std::mem::size_of::<usize>() +
+                    metadata.dependencies.accounts.capacity() * std::mem::size_of::<Address>() +
+                    metadata.dependencies.code.capacity() * std::mem::size_of::<Address>() +
+                    metadata.dependencies.storage.capacity() *
+                        std::mem::size_of::<(Address, U256)>()
+            })
     }
 }
 
