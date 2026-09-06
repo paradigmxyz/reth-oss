@@ -94,7 +94,7 @@ fn is_sender_verify(frame: &Frame, sender: Address, flags: u8) -> bool {
     frame.mode == FrameMode::Verify &&
         frame.flags == flags &&
         frame.has_valid_target_encoding() &&
-        frame.target_address().map_or(true, |target| target == sender)
+        frame.target_address().is_none_or(|target| target == sender)
 }
 
 fn is_pay(frame: &Frame) -> bool {

@@ -34,12 +34,9 @@ impl<T: Ord + Clone> Ord for Priority<T> {
     fn cmp(&self, other: &Self) -> Ordering {
         match (self, other) {
             (Self::Overflow(a), Self::Overflow(b)) => a.cmp(b),
-            (Self::Overflow(_), _) => Ordering::Greater,
-            (_, Self::Overflow(_)) => Ordering::Less,
+            (Self::Overflow(_), _) | (Self::Value(_), Self::None) => Ordering::Greater,
+            (_, Self::Overflow(_)) | (Self::None, Self::Value(_)) => Ordering::Less,
             (Self::Value(a), Self::Value(b)) => a.cmp(b),
-            // Note: None should be smaller than Value.
-            (Self::Value(_), Self::None) => Ordering::Greater,
-            (Self::None, Self::Value(_)) => Ordering::Less,
             (Self::None, Self::None) => Ordering::Equal,
         }
     }

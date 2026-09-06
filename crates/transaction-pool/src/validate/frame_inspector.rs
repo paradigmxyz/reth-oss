@@ -31,7 +31,7 @@ pub struct FrameValidationInspector {
 
 impl FrameValidationInspector {
     /// Creates a fresh inspector for one structurally checked transaction.
-    pub fn new(sender: Address, policy: FrameValidationPolicy) -> Self {
+    pub const fn new(sender: Address, policy: FrameValidationPolicy) -> Self {
         Self {
             sender,
             policy,

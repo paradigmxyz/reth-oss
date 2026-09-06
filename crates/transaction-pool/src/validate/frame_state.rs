@@ -189,19 +189,19 @@ impl FrameReservations {
                 }
             }
         }
-        for a in m.dependencies.code.iter().copied() {
-            if let Some(s) = self.code.get_mut(&a) {
+        for a in &m.dependencies.code {
+            if let Some(s) = self.code.get_mut(a) {
                 s.remove(&hash);
                 if s.is_empty() {
-                    self.code.remove(&a);
+                    self.code.remove(a);
                 }
             }
         }
-        for s in m.dependencies.storage.iter().copied() {
-            if let Some(v) = self.storage.get_mut(&s) {
+        for s in &m.dependencies.storage {
+            if let Some(v) = self.storage.get_mut(s) {
                 v.remove(&hash);
                 if v.is_empty() {
-                    self.storage.remove(&s);
+                    self.storage.remove(s);
                 }
             }
         }
@@ -213,12 +213,12 @@ impl FrameReservations {
                 }
             }
         }
-        if let Some(t) = m.expires_at {
-            if let Some(v) = self.expiry.get_mut(&t) {
-                v.remove(&hash);
-                if v.is_empty() {
-                    self.expiry.remove(&t);
-                }
+        if let Some(t) = m.expires_at &&
+            let Some(v) = self.expiry.get_mut(&t)
+        {
+            v.remove(&hash);
+            if v.is_empty() {
+                self.expiry.remove(&t);
             }
         }
     }
