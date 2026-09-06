@@ -1721,7 +1721,7 @@ mod tests {
             fees: TransactionFees {
                 max_priority_fee_per_gas: U256::ZERO,
                 max_fee_per_gas: U256::from(1),
-                max_fee_per_blob_gas: U256::ZERO,
+                max_fee_per_blob_gas: if blobs == 0 { U256::ZERO } else { U256::from(1) },
             },
             blob_versioned_hashes: vec![B256::repeat_byte(1); blobs],
             ..Default::default()
