@@ -2,19 +2,15 @@
 
 use crate::utils::eth_payload_attributes_amsterdam;
 use alloy_consensus::TxEip8141;
-use alloy_eips::{
-    eip8141::{
-        Frame, FrameLimits, FrameMode, FrameSignature, SignatureScheme, TransactionFees,
-        ATOMIC_BATCH_FLAG, EXPIRY_VERIFIER,
-    },
-    Encodable2718,
+use alloy_eips::eip8141::{
+    Frame, FrameLimits, FrameMode, FrameSignature, SignatureScheme, TransactionFees,
+    ATOMIC_BATCH_FLAG, EXPIRY_VERIFIER,
 };
 use alloy_primitives::{Address, Bytes, U256};
 use alloy_signer::SignerSync;
 use alloy_signer_local::PrivateKeySigner;
 use reth_chainspec::{ChainSpecBuilder, MAINNET};
-use reth_e2e_test_utils::{setup_engine, wallet::Wallet};
-use reth_ethereum_primitives::TxHashRef;
+use reth_e2e_test_utils::setup_engine;
 use reth_node_ethereum::EthereumNode;
 use reth_transaction_pool::TransactionPool;
 use std::sync::Arc;
@@ -88,7 +84,7 @@ async fn assert_mined_from_pool(
     expected: &[alloy_primitives::B256],
 ) -> eyre::Result<()> {
     for hash in expected {
-        assert!(node.inner.pool.contains(*hash), "frame transaction was not admitted to the pool");
+        assert!(node.inner.pool.contains(hash), "frame transaction was not admitted to the pool");
     }
 
     let payload = node.new_payload().await?;
@@ -100,7 +96,7 @@ async fn assert_mined_from_pool(
     let block_hash = node.submit_payload(payload).await?;
     node.update_forkchoice(block_hash, block_hash).await?;
     for hash in expected {
-        assert!(!node.inner.pool.contains(*hash), "canonical frame transaction remained in pool");
+        assert!(!node.inner.pool.contains(hash), "canonical frame transaction remained in pool");
     }
     Ok(())
 }
