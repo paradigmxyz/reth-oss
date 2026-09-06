@@ -23,6 +23,7 @@ use reth_storage_api::StateProvider;
 pub use reth_storage_errors::provider::ProviderError;
 use reth_trie_common::{updates::TrieUpdates, HashedPostState};
 use revm::{
+    context_interface::cfg::GasParams,
     database::{states::bundle_state::BundleRetention, BundleState, State},
     state::bal::Bal,
 };
@@ -420,6 +421,17 @@ where
 pub trait ExecutorTx<Executor: BlockExecutor> {
     /// Converts the transaction into a tuple of [`TxEnvFor`] and [`Recovered`].
     fn into_parts(self) -> (<Executor::Evm as Evm>::Tx, Recovered<Executor::Transaction>);
+
+    /// Converts using the block's gas schedule, preserving explicitly supplied environments.
+    fn into_parts_with_gas_params(
+        self,
+        _gas_params: &GasParams,
+    ) -> (<Executor::Evm as Evm>::Tx, Recovered<Executor::Transaction>)
+    where
+        Self: Sized,
+    {
+        self.into_parts()
+    }
 }
 
 impl<Executor: BlockExecutor> ExecutorTx<Executor>
@@ -428,11 +440,25 @@ impl<Executor: BlockExecutor> ExecutorTx<Executor>
     fn into_parts(self) -> (<Executor::Evm as Evm>::Tx, Recovered<Executor::Transaction>) {
         (self.to_tx_env(), self.1)
     }
+
+    fn into_parts_with_gas_params(
+        self,
+        gas_params: &GasParams,
+    ) -> (<Executor::Evm as Evm>::Tx, Recovered<Executor::Transaction>) {
+        (self.to_tx_env_with_gas_params(gas_params), self.1)
+    }
 }
 
 impl<Executor: BlockExecutor> ExecutorTx<Executor> for Recovered<Executor::Transaction> {
     fn into_parts(self) -> (<Executor::Evm as Evm>::Tx, Self) {
         (self.to_tx_env(), self)
+    }
+
+    fn into_parts_with_gas_params(
+        self,
+        gas_params: &GasParams,
+    ) -> (<Executor::Evm as Evm>::Tx, Self) {
+        (self.to_tx_env_with_gas_params(gas_params), self)
     }
 }
 
@@ -487,7 +513,7 @@ where
         tx: impl ExecutorTx<Self::Executor>,
         f: impl FnOnce(&<Self::Executor as BlockExecutor>::Result) -> CommitChanges,
     ) -> Result<Option<GasOutput>, BlockExecutionError> {
-        let (tx_env, tx) = tx.into_parts();
+        let (tx_env, tx) = tx.into_parts_with_gas_params(&self.executor.evm().cfg_env().gas_params);
         if let Some(gas_used) =
             self.executor.execute_transaction_with_commit_condition((tx_env, &tx), f)?
         {
@@ -694,6 +720,15 @@ impl<TxEnv, T> WithTxEnv<TxEnv, T> {
         Tx: ExecutableTxParts<TxEnv, InnerTx, Recovered = T>,
     {
         let (tx_env, tx) = tx.into_parts();
+        Self { tx_env, tx: Arc::new(tx) }
+    }
+
+    /// Prepares a transaction using the block's gas schedule.
+    pub fn new_with_gas_params<Tx, InnerTx>(tx: Tx, gas_params: &GasParams) -> Self
+    where
+        Tx: ExecutableTxParts<TxEnv, InnerTx, Recovered = T>,
+    {
+        let (tx_env, tx) = tx.into_parts_with_gas_params(gas_params);
         Self { tx_env, tx: Arc::new(tx) }
     }
 }

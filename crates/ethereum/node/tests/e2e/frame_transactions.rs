@@ -1,0 +1,216 @@
+//! End-to-end EIP-8141 pool coverage using Spamoor-compatible frame envelopes.
+
+use crate::utils::eth_payload_attributes_amsterdam;
+use alloy_consensus::TxEip8141;
+use alloy_eips::eip8141::{
+    Frame, FrameLimits, FrameMode, FrameSignature, SignatureScheme, TransactionFees,
+    ATOMIC_BATCH_FLAG, EXPIRY_VERIFIER,
+};
+use alloy_primitives::{Address, Bytes, U256};
+use alloy_signer::SignerSync;
+use alloy_signer_local::PrivateKeySigner;
+use reth_chainspec::{ChainSpecBuilder, MAINNET};
+use reth_e2e_test_utils::setup_engine;
+use reth_node_ethereum::EthereumNode;
+use reth_transaction_pool::TransactionPool;
+use std::sync::Arc;
+
+const VERIFY_GAS: u64 = 5_000;
+const USER_OP_GAS: u64 = 30_000;
+const MAX_FEE_PER_GAS: u64 = 20_000_000_000;
+const MAX_PRIORITY_FEE_PER_GAS: u64 = 2_000_000_000;
+
+fn chain_spec() -> Arc<reth_chainspec::ChainSpec> {
+    Arc::new(
+        ChainSpecBuilder::default()
+            .chain(MAINNET.chain)
+            .genesis(serde_json::from_str(include_str!("../assets/genesis.json")).unwrap())
+            // The Frames devnet aliases Bogotá to Amsterdam. The E2E chain enables both so the
+            // pool gate and the V6 payload path exercise the same configuration.
+            .bogota_activated()
+            .build(),
+    )
+}
+
+fn self_verify_frame() -> Frame {
+    Frame {
+        mode: FrameMode::Verify,
+        flags: 3,
+        limits: FrameLimits { execution: VERIFY_GAS, state: 0 },
+        ..Default::default()
+    }
+}
+
+fn sender_frame(target: Address) -> Frame {
+    Frame {
+        mode: FrameMode::Sender,
+        target: Bytes::copy_from_slice(target.as_slice()),
+        limits: FrameLimits { execution: USER_OP_GAS, state: 0 },
+        ..Default::default()
+    }
+}
+
+/// Builds the `v || r || s` SEC256K1 signature form emitted by Spamoor.
+fn spamoor_frame_tx(signer: &PrivateKeySigner, nonce: u64, frames: Vec<Frame>) -> Bytes {
+    let mut tx = TxEip8141 {
+        chain_id: 1,
+        nonce,
+        sender: signer.address(),
+        frames,
+        signatures: vec![FrameSignature {
+            scheme: SignatureScheme::Secp256k1,
+            ..Default::default()
+        }],
+        fees: TransactionFees {
+            max_priority_fee_per_gas: U256::from(MAX_PRIORITY_FEE_PER_GAS),
+            max_fee_per_gas: U256::from(MAX_FEE_PER_GAS),
+            max_fee_per_blob_gas: U256::ZERO,
+        },
+        ..Default::default()
+    };
+    let signature = signer.sign_hash_sync(&tx.signature_hash()).unwrap().as_bytes();
+    let mut frame_signature = Vec::with_capacity(65);
+    frame_signature.push(signature[64]);
+    frame_signature.extend_from_slice(&signature[..64]);
+    tx.signatures[0].signature = frame_signature.into();
+
+    let mut raw = Vec::with_capacity(tx.eip2718_encoded_length());
+    tx.eip2718_encode(&mut raw);
+    raw.into()
+}
+
+async fn assert_mined_from_pool(
+    node: &mut reth_e2e_test_utils::NodeHelperType<EthereumNode>,
+    expected: &[alloy_primitives::B256],
+) -> eyre::Result<()> {
+    for hash in expected {
+        assert!(node.inner.pool.contains(hash), "frame transaction was not admitted to the pool");
+    }
+
+    let payload = node.new_payload().await?;
+    let hashes = payload.block().body().transactions().map(|tx| *tx.tx_hash()).collect::<Vec<_>>();
+    for hash in expected {
+        assert!(hashes.contains(hash), "frame transaction was not selected for the payload");
+    }
+
+    let block_hash = node.submit_payload(payload).await?;
+    node.update_forkchoice(block_hash, block_hash).await?;
+    for hash in expected {
+        assert!(!node.inner.pool.contains(hash), "canonical frame transaction remained in pool");
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn spamoor_self_verify_frame_is_admitted_and_mined() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+    let (mut nodes, wallets) = setup_engine::<EthereumNode>(
+        1,
+        chain_spec(),
+        false,
+        Default::default(),
+        eth_payload_attributes_amsterdam,
+    )
+    .await?;
+    let mut node = nodes.pop().unwrap();
+    let wallets = wallets.wallet_gen();
+    let raw = spamoor_frame_tx(
+        &wallets[0],
+        0,
+        vec![self_verify_frame(), sender_frame(wallets[1].address())],
+    );
+    let hash = node.rpc.inject_tx(raw).await?;
+
+    assert_mined_from_pool(&mut node, &[hash]).await
+}
+
+#[tokio::test]
+async fn spamoor_expiry_prefix_frame_is_admitted_and_mined() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+    let (mut nodes, wallets) = setup_engine::<EthereumNode>(
+        1,
+        chain_spec(),
+        false,
+        Default::default(),
+        eth_payload_attributes_amsterdam,
+    )
+    .await?;
+    let mut node = nodes.pop().unwrap();
+    let wallets = wallets.wallet_gen();
+    let deadline = node.payload.timestamp.saturating_add(600).to_be_bytes();
+    let expiry = Frame {
+        mode: FrameMode::Verify,
+        target: Bytes::copy_from_slice(EXPIRY_VERIFIER.as_slice()),
+        limits: FrameLimits { execution: VERIFY_GAS, state: 0 },
+        data: Bytes::copy_from_slice(&deadline),
+        ..Default::default()
+    };
+    let raw = spamoor_frame_tx(
+        &wallets[0],
+        0,
+        vec![expiry, self_verify_frame(), sender_frame(wallets[1].address())],
+    );
+    let hash = node.rpc.inject_tx(raw).await?;
+
+    assert_mined_from_pool(&mut node, &[hash]).await
+}
+
+#[tokio::test]
+async fn spamoor_atomic_frame_body_is_admitted_and_mined() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+    let (mut nodes, wallets) = setup_engine::<EthereumNode>(
+        1,
+        chain_spec(),
+        false,
+        Default::default(),
+        eth_payload_attributes_amsterdam,
+    )
+    .await?;
+    let mut node = nodes.pop().unwrap();
+    let wallets = wallets.wallet_gen();
+    let mut first = sender_frame(wallets[1].address());
+    first.flags = ATOMIC_BATCH_FLAG;
+    let mut second = sender_frame(wallets[1].address());
+    second.flags = ATOMIC_BATCH_FLAG;
+    let raw = spamoor_frame_tx(
+        &wallets[0],
+        0,
+        vec![self_verify_frame(), first, second, sender_frame(wallets[1].address())],
+    );
+    let hash = node.rpc.inject_tx(raw).await?;
+
+    assert_mined_from_pool(&mut node, &[hash]).await
+}
+
+#[tokio::test]
+async fn spamoor_frames_from_independent_senders_share_a_payload() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+    let (mut nodes, wallets) = setup_engine::<EthereumNode>(
+        1,
+        chain_spec(),
+        false,
+        Default::default(),
+        eth_payload_attributes_amsterdam,
+    )
+    .await?;
+    let mut node = nodes.pop().unwrap();
+    let wallets = wallets.wallet_gen();
+    let first = node
+        .rpc
+        .inject_tx(spamoor_frame_tx(
+            &wallets[0],
+            0,
+            vec![self_verify_frame(), sender_frame(wallets[2].address())],
+        ))
+        .await?;
+    let second = node
+        .rpc
+        .inject_tx(spamoor_frame_tx(
+            &wallets[1],
+            0,
+            vec![self_verify_frame(), sender_frame(wallets[2].address())],
+        ))
+        .await?;
+
+    assert_mined_from_pool(&mut node, &[first, second]).await
+}
