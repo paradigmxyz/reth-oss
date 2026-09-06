@@ -1808,6 +1808,10 @@ impl<T: alloy_consensus::Transaction> alloy_consensus::Transaction for EthPooled
         self.transaction.priority_fee_or_price()
     }
 
+    fn priority_fee_or_price_u256(&self) -> U256 {
+        self.transaction.priority_fee_or_price_u256()
+    }
+
     fn effective_gas_price(&self, base_fee: Option<u64>) -> u128 {
         self.transaction.effective_gas_price(base_fee)
     }

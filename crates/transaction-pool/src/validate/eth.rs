@@ -500,7 +500,6 @@ where
             // EIP-8141 public admission requires simulating the transaction's validation frames.
             // TODO(eip8141): integrate validation-prefix execution, signature checks, atomic payer
             // reservations and head/reorg dependency revalidation before enabling public admission.
-            // Track the remaining integration and regression checks in audit/frame-audit-todo.md.
             // Until the pool has that context, only explicitly local/private transactions are
             // retained and none are propagated.
             if origin.is_external() {

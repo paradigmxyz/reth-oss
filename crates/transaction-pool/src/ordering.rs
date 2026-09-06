@@ -91,16 +91,11 @@ where
         base_fee: u64,
     ) -> Priority<Self::PriorityValue> {
         if transaction.frame_transaction().is_some() {
-            return match transaction.max_fee_per_gas_u256().checked_sub(U256::from(base_fee)) {
-                Some(available) => {
-                    let tip = transaction
-                        .max_priority_fee_per_gas_u256()
-                        .map_or(available, |priority| priority.min(available));
-                    match u128::try_from(tip) {
-                        Ok(tip) => Priority::Value(tip),
-                        Err(_) => Priority::Overflow(Box::new(tip)),
-                    }
-                }
+            return match transaction.effective_tip_per_gas_u256(base_fee) {
+                Some(tip) => match u128::try_from(tip) {
+                    Ok(tip) => Priority::Value(tip),
+                    Err(_) => Priority::Overflow(Box::new(tip)),
+                },
                 None => Priority::None,
             }
         }
@@ -241,6 +236,7 @@ mod tests {
         let boundary = U256::from(u128::MAX);
         let low = frame(boundary + U256::from(1), U256::MAX);
         let high = frame(boundary + U256::from(2), U256::MAX);
+        assert_eq!(alloy_consensus::Transaction::priority_fee_or_price_u256(&high), U256::MAX);
         assert!(ordering.priority(&high, 0) > ordering.priority(&low, 0));
         assert!(ordering.priority(&low, 0) > Priority::Value(u128::MAX));
         assert_eq!(ordering.priority(&low, 1), Priority::Value(u128::MAX));

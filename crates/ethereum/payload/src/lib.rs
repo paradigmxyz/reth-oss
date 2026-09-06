@@ -258,7 +258,7 @@ where
         // ensure we still have capacity for this transaction
         // The executor derives frame reservations from the active gas schedule. A combined
         // frame limit is not a reservation for either individual gas dimension.
-        let exceeds_gas_limit = if pool_tx.is_eip8141() {
+        let exceeds_gas_limit = if pool_tx.transaction.is_eip8141() {
             None
         } else if is_amsterdam {
             let regular_available_gas = block_gas_limit.saturating_sub(block_regular_gas_used);
@@ -369,7 +369,11 @@ where
             };
         }
 
-        let miner_fee = tx.effective_tip_per_gas(base_fee);
+        let miner_fee = if tx.is_eip8141() {
+            tx.effective_tip_per_gas_u256(base_fee)
+        } else {
+            tx.effective_tip_per_gas(base_fee).map(U256::from)
+        };
         let tx_hash = *tx.tx_hash();
 
         let mut tx_regular_gas_used = 0;
@@ -433,7 +437,7 @@ where
         // update and add to total fees
         let gas_used = gas_output.tx_gas_used();
         let miner_fee = miner_fee.expect("fee is always valid; execution succeeded");
-        total_fees += U256::from(miner_fee) * U256::from(gas_used);
+        total_fees = total_fees.saturating_add(miner_fee.saturating_mul(U256::from(gas_used)));
         cumulative_tx_gas_used += gas_used;
         block_regular_gas_used += tx_regular_gas_used;
         block_state_gas_used += gas_output.state_gas_used();
