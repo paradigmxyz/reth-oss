@@ -12,7 +12,8 @@ pub enum Priority<T: Ord + Clone> {
     /// A fee priority above `u128::MAX`, ranked above every ordinary value.
     ///
     /// Used by coinbase tip ordering without widening custom ordering priority types.
-    Overflow(U256),
+    /// Boxed so ordinary `u128` priorities retain their size; only overflowing tips allocate.
+    Overflow(Box<U256>),
     /// Missing priority due to ordering internals.
     None,
 }
@@ -97,7 +98,7 @@ where
                         .map_or(available, |priority| priority.min(available));
                     match u128::try_from(tip) {
                         Ok(tip) => Priority::Value(tip),
-                        Err(_) => Priority::Overflow(tip),
+                        Err(_) => Priority::Overflow(Box::new(tip)),
                     }
                 }
                 None => Priority::None,
@@ -169,12 +170,19 @@ mod tests {
     use alloy_primitives::{Address, Sealable};
 
     fn frame(fee: U256, tip: U256) -> EthPooledTransaction {
+        frame_with_blob_fee(fee, tip, None)
+    }
+
+    fn frame_with_blob_fee(fee: U256, tip: U256, blob_fee: Option<U256>) -> EthPooledTransaction {
         let tx = TxEip8141 {
             fees: TransactionFees {
                 max_fee_per_gas: fee,
                 max_priority_fee_per_gas: tip,
-                max_fee_per_blob_gas: U256::ZERO,
+                max_fee_per_blob_gas: blob_fee.unwrap_or_default(),
             },
+            blob_versioned_hashes: blob_fee
+                .map(|_| vec![alloy_primitives::B256::repeat_byte(1)])
+                .unwrap_or_default(),
             ..Default::default()
         };
         EthPooledTransaction::new(
@@ -269,6 +277,23 @@ mod tests {
         assert!(!existing.is_underpriced(&valid(frame(bumped, bumped)), &config));
         let maximum = valid(frame(U256::MAX, U256::MAX));
         assert!(maximum.is_underpriced(&maximum, &config));
+    }
+
+    #[test]
+    fn frame_blob_replacement_uses_blob_price_bump() {
+        let fee = U256::from(u128::MAX) + U256::from(1);
+        let config = PriceBumpConfig { default_price_bump: 10, replace_blob_tx_price_bump: 100 };
+        let existing = valid(frame_with_blob_fee(fee, fee, Some(fee)));
+        let doubled = fee * U256::from(2);
+        let below = doubled - U256::from(1);
+        assert!(existing
+            .is_underpriced(&valid(frame_with_blob_fee(doubled, doubled, Some(below))), &config));
+        assert!(existing
+            .is_underpriced(&valid(frame_with_blob_fee(below, doubled, Some(doubled))), &config));
+        assert!(existing
+            .is_underpriced(&valid(frame_with_blob_fee(doubled, below, Some(doubled))), &config));
+        assert!(!existing
+            .is_underpriced(&valid(frame_with_blob_fee(doubled, doubled, Some(doubled))), &config));
     }
 
     #[test]

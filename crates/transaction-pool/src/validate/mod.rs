@@ -479,7 +479,11 @@ impl<T: PoolTransaction> ValidPoolTransaction<T> {
             return crate::ordering::frame_replacement_underpriced(
                 &self.transaction,
                 &maybe_replacement.transaction,
-                price_bumps.price_bump(self.tx_type()),
+                if self.transaction.is_blob_transaction() {
+                    price_bumps.replace_blob_tx_price_bump
+                } else {
+                    price_bumps.default_price_bump
+                },
             )
         }
         // Retrieve the required price bump percentage for this type of transaction.

@@ -638,8 +638,8 @@ where
         ensure_intrinsic_gas(transaction, &self.fork_tracker)?;
 
         // light blob tx pre-checks
-        if transaction.is_eip4844() {
-            // Cancun fork is required for blob txs
+        if transaction.is_blob_transaction() {
+            // Cancun fork is required for blob txs, including blob-carrying frames.
             if !self.fork_tracker.is_cancun_activated() {
                 return Err(InvalidTransactionError::TxTypeNotSupported.into())
             }
@@ -1675,6 +1675,10 @@ mod tests {
     }
 
     fn eip8141_tx(chain_id: u64, sender: Address) -> EthPooledTransaction {
+        eip8141_tx_with_blobs(chain_id, sender, 0)
+    }
+
+    fn eip8141_tx_with_blobs(chain_id: u64, sender: Address, blobs: usize) -> EthPooledTransaction {
         let tx = TxEip8141 {
             chain_id,
             sender,
@@ -1684,6 +1688,7 @@ mod tests {
                 max_fee_per_gas: U256::from(1),
                 max_fee_per_blob_gas: U256::ZERO,
             },
+            blob_versioned_hashes: vec![B256::repeat_byte(1); blobs],
             ..Default::default()
         };
         let encoded_length = tx.eip2718_encoded_length();
@@ -1706,6 +1711,28 @@ mod tests {
             validator.validate_stateless(TransactionOrigin::External, &transaction),
             Err(InvalidPoolTransactionError::Eip8141(
                 Eip8141PoolTransactionError::PublicMempoolValidationUnavailable
+            ))
+        ));
+    }
+
+    #[test]
+    fn eip8141_blob_count_obeys_active_limit() {
+        let provider = MockEthProvider::default().with_genesis_block();
+        let validator = EthTransactionValidatorBuilder::new(provider, test_evm_config())
+            .set_bogota(true)
+            .set_cancun(true)
+            .build(InMemoryBlobStore::default());
+        validator.fork_tracker.max_blob_count.store(1, std::sync::atomic::Ordering::Relaxed);
+        let sender = Address::repeat_byte(0x41);
+        for count in [0, 1] {
+            let transaction = eip8141_tx_with_blobs(validator.chain_id(), sender, count);
+            assert!(validator.validate_stateless(TransactionOrigin::Local, &transaction).is_ok());
+        }
+        let transaction = eip8141_tx_with_blobs(validator.chain_id(), sender, 2);
+        assert!(matches!(
+            validator.validate_stateless(TransactionOrigin::Local, &transaction),
+            Err(InvalidPoolTransactionError::Eip4844(
+                Eip4844PoolTransactionError::TooManyEip4844Blobs { have: 2, permitted: 1 }
             ))
         ));
     }

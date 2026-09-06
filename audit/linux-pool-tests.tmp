@@ -1,0 +1,7 @@
+ Downloading crates ...
+  Downloaded nix v0.31.3
+  Downloaded statrs v0.18.0
+  Downloaded codspeed-criterion-compat v4.7.0
+  Downloaded codspeed-criterion-compat-walltime v4.7.0
+  Downloaded codspeed v4.7.0
+    Blocking waiting for file lock on build directory

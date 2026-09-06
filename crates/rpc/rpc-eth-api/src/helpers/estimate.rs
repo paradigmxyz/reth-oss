@@ -3,7 +3,7 @@
 use super::{Call, LoadPendingBlock};
 use crate::{AsEthApiError, FromEthApiError, IntoEthApiError};
 use alloy_evm::overrides::{apply_block_overrides, apply_state_overrides};
-use alloy_network::TransactionBuilder;
+use alloy_network::{NetworkTransactionBuilder, TransactionBuilder};
 use alloy_primitives::{TxKind, U256};
 use alloy_rpc_types_eth::{state::EvmOverrides, BlockId};
 use futures::Future;
@@ -181,7 +181,8 @@ pub trait EstimateCall: Call {
             // retry the transaction with the block's gas limit to determine if
             // the failure was due to insufficient gas.
             Err(err)
-                if err.is_gas_too_high() &&
+                if !is_frame &&
+                    err.is_gas_too_high() &&
                     (tx_request_gas_limit.is_some() || tx_request_gas_price.is_some()) =>
             {
                 return Self::map_out_of_gas_err(&mut evm, tx_env, max_gas_limit);
@@ -217,7 +218,9 @@ pub trait EstimateCall: Call {
             ExecutionResult::Revert { output, .. } => {
                 // if price or limit was included in the request then we can execute the request
                 // again with the block's gas limit to check if revert is gas related or not
-                return if tx_request_gas_limit.is_some() || tx_request_gas_price.is_some() {
+                return if !is_frame &&
+                    (tx_request_gas_limit.is_some() || tx_request_gas_price.is_some())
+                {
                     Self::map_out_of_gas_err(&mut evm, tx_env, max_gas_limit)
                 } else {
                     // the transaction did revert

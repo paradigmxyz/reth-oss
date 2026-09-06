@@ -49,3 +49,58 @@ excluded from this commit. Do not enable public frame gossip based on these part
 
 Main fix worktree: `C:/Users/soubh/Documents/Codex/2026-09-03/https-github-com-alloy-rs-alloy/work/reth-frame-audit-fixes`.
 All sibling worktrees and drafts above should be preserved until explicitly integrated or discarded.
+
+## Continuation audit — 2026-09-06
+
+Fetched `origin/feat/eip8141-frame-transactions`: it still points to `a801a389229f524e9a415b923e3fb13777921106`.
+The checkout was clean before editing. No dependency drafts were available or adopted and nothing
+has been pushed. The Amsterdam/Bogota mapping, Engine API compatibility, serial frame execution,
+public gossip gate and local pooled enum remain unchanged.
+
+### Specification evidence
+
+- User-selected [EIP-8141 revision](https://github.com/ethereum/EIPs/blob/b75cbe61150f09a44c38843be916417283d5b7bf/EIPS/eip-8141.md).
+- User-selected execution-specs `devnets/frames/0` resolves to
+  [`92bd4d2e1da307158dbe868c551262318efc870d`](https://github.com/ethereum/execution-specs/tree/92bd4d2e1da307158dbe868c551262318efc870d).
+  Its frame tests' `spec.py` pins the same EIP revision above.
+- The prefix ends when payment approval succeeds; signatures cover the complete original
+  transaction. Prefix execution budgets plus signature cost are capped at 100,000 execution gas,
+  and prefix state budgets at 500,000. Later VERIFY frames are forbidden for public admission.
+- The EIP requires an exact canonical-paymaster runtime match and delayed-withdrawal accounting,
+  but supplies neither a runtime artifact nor a storage layout. The inspected devnet frame
+  implementation, fixture helpers and admission tests do not supply them either. Do not invent a
+  runtime hash or exempt an arbitrary contract from trace restrictions. The EIP also has a
+  canonical-only propagation sentence alongside non-canonical paymaster admission rules; this
+  policy ambiguity remains unresolved.
+
+### Additional fixes in this checkout
+
+- Import `NetworkTransactionBuilder` where call and estimate use `output_tx_type`.
+- Frame estimation no longer retries failures with an ordinary scalar gas limit.
+- Simulation resolves the canonical transaction and active-schedule EVM environment before
+  checking frame gas. Omitted outer gas cannot bypass the global cap, supplied gas is not clamped,
+  and execution/state block reservations are checked separately. Ordinary request normalization
+  remains on its existing path. Added a budget and dimensional-boundary regression test.
+- Frame blob admission now checks the active blob-count limit. Added blobless, at-limit and
+  over-limit cases. Frame blob replacement uses the configured blob bump, with full-width
+  fee, priority-fee and blob-fee boundary tests.
+- Removed unused `reth-evm` tracing dependency and its lockfile entry.
+
+### Verification and remaining integration
+
+- Current GitHub checks for the handoff report build, Clippy and test failures; Hive was skipped.
+  Formatting passed. Public check annotations only expose exit statuses; the log download API
+  rejected unauthenticated access with HTTP 403. These CI failures are not claimed resolved.
+- Windows targeted `cargo +nightly check -p reth-transaction-pool -p reth-rpc-eth-types --locked`
+  passed using a workspace-local target directory. The wider RPC API check encounters pre-existing
+  Unix-only `ChangesetOffsetReader`/`ChangesetOffsetWriter` imports in the provider crate.
+- Linux checking and regression test results are recorded below when completed.
+- `zepter` passed. `make lint-toml` cannot run with the Windows shell; its `dprint fmt` command
+  was run directly (formatting completed, with an unwritable incremental-cache warning).
+- Full public validation, local-RPC prefix validation, atomic payer reservations and lifecycle
+  integration remain unfinished. No admission or gossip enablement follows from these fixes.
+- Revm prefix API, its EVM bridge and matching published dependency revisions remain required.
+  Alloy consolidation remains deferred until its reverse conversions exist at an available pin.
+- `Priority::Overflow` retains the `u128` associated priority type, but adds an exhaustive public
+  enum variant and embeds a U256 in every priority value. Downstream source compatibility and
+  memory/performance review remain necessary; this audit does not claim them resolved.
