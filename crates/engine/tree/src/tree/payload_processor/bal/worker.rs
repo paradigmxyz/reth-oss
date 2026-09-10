@@ -1,14 +1,13 @@
 use super::BalExecutionError;
-use alloy_consensus::Transaction;
 use alloy_eip7928::BlockAccessIndex;
 use alloy_evm::{
     block::{BlockExecutionError, BlockExecutor, BlockExecutorFactory, BlockValidationError},
-    Evm,
+    Evm, RecoveredTx,
 };
 use alloy_primitives::Address;
 use crossbeam_channel::{Receiver, Sender};
 use reth_evm::{execute::ExecutableTxFor, ConfigureEvm, Database, EvmEnvFor, ExecutionCtxFor};
-use revm::{database::State, state::bal::Bal as RevmBal};
+use revm::{context::Transaction as _, database::State, state::bal::Bal as RevmBal};
 use std::sync::Arc;
 
 #[derive(Debug, thiserror::Error)]
@@ -92,6 +91,7 @@ pub(super) fn spawn_worker<'scope, Evm, Tx, Err, DB, MakeDb>(
                     .with_bal(Arc::clone(&received_bal_revm))
                     .with_bundle_update()
                     .build();
+                let gas_params = evm_env.cfg_env.gas_params.clone();
                 let evm = evm_config.evm_with_env(&mut worker_state, evm_env.clone());
                 let mut executor = evm_config.create_executor_with_state(evm, ctx.clone());
 
@@ -114,14 +114,15 @@ pub(super) fn spawn_worker<'scope, Evm, Tx, Err, DB, MakeDb>(
                             continue;
                         }
                     };
+                    let (tx_env, tx) = tx.into_parts_with_gas_params(&gas_params);
                     let signer = *tx.signer();
-                    let tx_gas_limit = tx.tx().gas_limit();
+                    let tx_gas_limit = tx_env.gas_limit();
 
                     executor
                         .evm_mut()
                         .db_mut()
                         .set_bal_index(BlockAccessIndex::from_tx_index(tx_index as u64));
-                    let message = match executor.execute_transaction_without_commit(tx) {
+                    let message = match executor.execute_transaction_without_commit((tx_env, tx)) {
                         Ok(result) => {
                             Ok(BalWorkerOutput { index: tx_index, signer, tx_gas_limit, result })
                         }

@@ -775,6 +775,13 @@ where
 
         let block_hash = num_hash.hash;
 
+        info!(
+            target: "engine::tree",
+            block = ?num_hash,
+            parent = ?payload.parent_hash(),
+            "Received new payload"
+        );
+
         // Check for invalid ancestors
         if let Some(invalid) = self.find_invalid_ancestor(&payload) {
             let status = self.handle_invalid_ancestor_payload(payload, invalid)?;
@@ -803,6 +810,14 @@ where
         // record total newPayload duration
         self.metrics.block_validation.total_duration.record(start.elapsed().as_secs_f64());
 
+        info!(
+            target: "engine::tree",
+            block = ?num_hash,
+            status = ?outcome.outcome,
+            elapsed = ?start.elapsed(),
+            "Finished new payload"
+        );
+
         Ok(outcome)
     }
 
@@ -816,6 +831,13 @@ where
         let num_hash = payload.num_hash();
         let parent_hash = payload.parent_hash();
         let mut latest_valid_hash = None;
+
+        info!(
+            target: "engine::tree",
+            block = ?num_hash,
+            parent = ?parent_hash,
+            "Inserting payload"
+        );
 
         match self.insert_payload(payload) {
             Ok(status) => {
@@ -3190,10 +3212,11 @@ where
     {
         let block_insert_start = Instant::now();
         let block_num_hash = block_id.block;
-        debug!(target: "engine::tree", block=?block_num_hash, parent = ?block_id.parent, "Inserting new block into tree");
+        info!(target: "engine::tree", block=?block_num_hash, parent = ?block_id.parent, "Inserting new block into tree");
 
         // Check if block already exists - first in memory, then DB only if it could be persisted
         if self.state.tree_state.contains_hash(&block_num_hash.hash) {
+            info!(target: "engine::tree", block=?block_num_hash, "Block already exists in memory");
             convert_to_block(self, input)?;
             return Ok(InsertPayloadOk::AlreadySeen(BlockStatus::Valid));
         }
@@ -3207,6 +3230,7 @@ where
                     return Err(InsertBlockError::new(block.split().0, err.into()).into());
                 }
                 Ok(Some(_)) => {
+                    info!(target: "engine::tree", block=?block_num_hash, "Block already exists in database");
                     convert_to_block(self, input)?;
                     return Ok(InsertPayloadOk::AlreadySeen(BlockStatus::Valid));
                 }
@@ -3236,6 +3260,13 @@ where
                     .unwrap_or_else(|| block.parent_num_hash());
 
                 self.state.buffer.insert_block(block);
+
+                info!(
+                    target: "engine::tree",
+                    block = ?block_num_hash,
+                    parent = ?block_id.parent,
+                    "Buffered payload because parent state is unavailable"
+                );
 
                 return Ok(InsertPayloadOk::Inserted(BlockStatus::Disconnected {
                     head: self.state.tree_state.current_canonical_head,
@@ -3298,6 +3329,13 @@ where
 
         // emit insert event
         let elapsed = start.elapsed();
+        info!(
+            target: "engine::tree",
+            block = ?block_num_hash,
+            is_fork,
+            elapsed = ?elapsed,
+            "Inserted executed block into tree"
+        );
         let engine_event = if is_fork {
             ConsensusEngineEvent::ForkBlockAdded(executed, elapsed)
         } else {
@@ -3593,6 +3631,13 @@ where
             warn!(target: "engine::tree", %err, ?head, "Invalid payload attributes");
             return OnForkChoiceUpdated::invalid_payload_attributes()
         }
+
+        info!(
+            target: "engine::tree",
+            head = ?state.head_block_hash,
+            timestamp = attributes.timestamp(),
+            "Starting payload build from forkchoice update"
+        );
 
         // 8. Client software MUST begin a payload build process building on top of
         //    forkchoiceState.headBlockHash and identified via buildProcessId value if

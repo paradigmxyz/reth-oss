@@ -142,12 +142,12 @@ impl<N: NodePrimitives> TestBlockBuilder<N> {
             .iter()
             .enumerate()
             .map(|(idx, tx)| {
-                Receipt {
-                    tx_type: tx.tx_type(),
-                    success: true,
-                    cumulative_gas_used: (idx as u64 + 1) * MIN_TRANSACTION_GAS,
-                    ..Default::default()
-                }
+                Receipt::standard(
+                    tx.tx_type(),
+                    true,
+                    (idx as u64 + 1) * MIN_TRANSACTION_GAS,
+                    vec![],
+                )
                 .into_with_bloom()
             })
             .collect::<Vec<_>>();
@@ -250,8 +250,9 @@ impl<N: NodePrimitives> TestBlockBuilder<N> {
         let single_cost = Self::single_tx_cost();
 
         // Look up parent's post-block state for correct revert construction.
+        let parent_state = self.post_block_state.get(&parent_hash);
         let (pre_info, old_slot_value) =
-            self.post_block_state.get(&parent_hash).cloned().unwrap_or((initial_info, U256::ZERO));
+            parent_state.cloned().unwrap_or_else(|| (initial_info.clone(), U256::ZERO));
 
         let mut final_balance = pre_info.balance;
         for _ in 0..num_txs {
@@ -261,16 +262,18 @@ impl<N: NodePrimitives> TestBlockBuilder<N> {
         let post_info =
             AccountInfo { nonce: final_nonce, balance: final_balance, ..Default::default() };
 
-        // An empty parent creates the signer without changing its balance or nonce.
-        let account_revert = if self.post_block_state.contains_key(&parent_hash) {
-            Some(Some(pre_info))
-        } else {
-            Some(None)
-        };
+        // An empty parent block still created the funded signer. Account existence must
+        // come from the parent state, not from whether its balance or nonce changed.
+        let original_info = parent_state.map(|(info, _)| info.clone());
+        let account_revert = Some(original_info.clone());
 
         let new_slot_value = U256::from(block_number).wrapping_add(U256::ONE);
 
         let bundle = BundleState::builder(block_number..=block_number)
+            .apply(|builder| match original_info {
+                Some(info) => builder.state_original_account_info(self.signer, info),
+                None => builder,
+            })
             .state_present_account_info(self.signer, post_info.clone())
             .revert_account_info(block_number, self.signer, account_revert)
             .state_storage(
@@ -298,11 +301,13 @@ impl<N: NodePrimitives> TestBlockBuilder<N> {
                 .transactions
                 .iter()
                 .enumerate()
-                .map(|(idx, tx)| Receipt {
-                    tx_type: tx.tx_type(),
-                    success: true,
-                    cumulative_gas_used: (idx as u64 + 1) * MIN_TRANSACTION_GAS,
-                    ..Default::default()
+                .map(|(idx, tx)| {
+                    Receipt::standard(
+                        tx.tx_type(),
+                        true,
+                        (idx as u64 + 1) * MIN_TRANSACTION_GAS,
+                        vec![],
+                    )
                 })
                 .collect()
         } else {
@@ -387,11 +392,13 @@ impl<N: NodePrimitives> TestBlockBuilder<N> {
             .transactions
             .iter()
             .enumerate()
-            .map(|(idx, tx)| Receipt {
-                tx_type: tx.tx_type(),
-                success: true,
-                cumulative_gas_used: (idx as u64 + 1) * MIN_TRANSACTION_GAS,
-                ..Default::default()
+            .map(|(idx, tx)| {
+                Receipt::standard(
+                    tx.tx_type(),
+                    true,
+                    (idx as u64 + 1) * MIN_TRANSACTION_GAS,
+                    vec![],
+                )
             })
             .collect::<Vec<_>>();
 
@@ -418,6 +425,7 @@ impl TestBlockBuilder {
         Self::default()
     }
 }
+
 /// A test `ChainEventSubscriptions`
 #[derive(Clone, Debug, Default)]
 pub struct TestCanonStateSubscriptions<N: NodePrimitives = reth_ethereum_primitives::EthPrimitives>
@@ -480,5 +488,22 @@ mod tests {
                 "reverting must restore the signer's existence in the specified parent"
             );
         }
+    }
+
+    use revm::database::states::reverts::AccountInfoRevert;
+
+    #[test]
+    fn unchanged_parent_signer_is_restored_not_deleted() {
+        let mut builder = TestBlockBuilder::eth().with_state();
+        let parent_hash = B256::repeat_byte(1);
+        let parent_info = builder.signer_execute_account_info.clone();
+        // State after an empty first block: the signer exists but has its initial balance/nonce.
+        builder.post_block_state.insert(parent_hash, (parent_info.clone(), U256::from(2)));
+        let block = builder.get_executed_block_with_number(2, parent_hash);
+        let state = &block.execution_output.state;
+        assert_eq!(state.state[&builder.signer].original_info, Some(parent_info.clone()));
+        let (_, revert) =
+            state.reverts[0].iter().find(|(address, _)| *address == builder.signer).unwrap();
+        assert_eq!(revert.account, AccountInfoRevert::RevertTo(parent_info));
     }
 }
