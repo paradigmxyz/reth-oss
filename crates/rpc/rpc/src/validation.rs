@@ -199,7 +199,11 @@ where
             let cached_db = request_cache.as_db_mut(StateProviderDatabase::new(&state_provider));
             let mut executor = self.evm_config.batch_executor(cached_db);
 
-            let result = executor.execute_one(&block)?;
+            let result = if block.header().block_access_list_hash().is_some() {
+                executor.execute_one_with_bal_building(&block)?
+            } else {
+                executor.execute_one(&block)?
+            };
 
             // The executor rebuilds the block access list whenever the block header contains a
             // BAL hash. Comparing the rebuilt hash against the header post execution also
