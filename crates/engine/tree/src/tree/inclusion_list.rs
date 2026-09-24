@@ -4,7 +4,7 @@
 //! was given, and the bounded store of lists retained from `engine_newPayloadV6`.
 
 use alloy_consensus::Transaction;
-use alloy_eips::eip2718::Decodable2718;
+use alloy_eips::{eip2718::Decodable2718, eip4844::DATA_GAS_PER_BLOB};
 use alloy_primitives::{
     map::{B256Map, B256Set},
     Bytes, B256, U256,
@@ -72,14 +72,6 @@ fn could_append_transaction<N: NodePrimitives>(
 ) -> ProviderResult<bool> {
     // EIP-2681 reserves the maximum nonce; execution could not increment past it.
     if transaction.nonce() == u64::MAX {
-        return Ok(false)
-    }
-
-    // An inclusion list carries only EIP-2718 bytes, so the sidecar a blob transaction needs is
-    // unavailable and no proposer can append one from the list. The payload builder skips them
-    // for the same reason; treating them as appendable here would report our own blocks as
-    // unsatisfied.
-    if transaction.blob_count().is_some() {
         return Ok(false)
     }
 
@@ -155,7 +147,20 @@ fn could_append_transaction<N: NodePrimitives>(
     let max_gas_cost = U256::from(transaction.gas_limit())
         .checked_mul(U256::from(transaction.max_fee_per_gas()))
         .unwrap_or(U256::MAX);
-    let max_cost = max_gas_cost.checked_add(transaction.value()).unwrap_or(U256::MAX);
+    let max_blob_gas_cost = transaction
+        .blob_count()
+        .zip(transaction.max_fee_per_blob_gas())
+        .map(|(blob_count, max_fee_per_blob_gas)| {
+            U256::from(blob_count)
+                .checked_mul(U256::from(DATA_GAS_PER_BLOB))
+                .and_then(|cost| cost.checked_mul(U256::from(max_fee_per_blob_gas)))
+                .unwrap_or(U256::MAX)
+        })
+        .unwrap_or_default();
+    let max_cost = max_gas_cost
+        .checked_add(max_blob_gas_cost)
+        .and_then(|cost| cost.checked_add(transaction.value()))
+        .unwrap_or(U256::MAX);
 
     Ok(account.nonce == transaction.nonce() && account.balance >= max_cost)
 }
@@ -410,11 +415,19 @@ mod inclusion_list_tests {
     }
 
     #[test]
-    fn blob_transactions_are_never_appendable() {
-        // The list carries only EIP-2718 bytes, so the sidecar is unavailable and the payload
-        // builder skips them. The check here has to agree, or we flag our own blocks.
-        assert!(!could_append(blob_tx(vec![B256::ZERO], 1), funded(0), context()));
-        assert!(!could_append(blob_tx(Vec::new(), 1), funded(0), context()));
+    fn affordable_blob_transaction_is_appendable() {
+        // Blob transactions in an inclusion list are checked from their EIP-2718 bytes; the
+        // inclusion-list check does not require the blob sidecar to validate appendability.
+        assert!(could_append(blob_tx(vec![B256::ZERO], 1), funded(0), context()));
+    }
+
+    #[test]
+    fn blob_transaction_fee_is_included_in_affordability() {
+        let tx = blob_tx(vec![B256::ZERO], 1);
+        let gas_cost = U256::from(tx.gas_limit()) * U256::from(tx.max_fee_per_gas());
+        let blob_cost = U256::from(DATA_GAS_PER_BLOB);
+        let account = ExtendedAccount::new(0, gas_cost + blob_cost - U256::from(1));
+        assert!(!could_append(tx, account, context()));
     }
 
     #[test]
