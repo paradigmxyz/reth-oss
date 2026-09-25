@@ -1800,8 +1800,11 @@ impl PoolTransaction for EthPooledTransaction {
         if !self.is_eip8141() {
             return Err("frame validation metadata requires an EIP-8141 transaction");
         }
-        if metadata.sender != self.sender() || metadata.sender_nonce != self.nonce() {
-            return Err("frame validation metadata sender or nonce mismatch");
+        if metadata.sender != self.sender() ||
+            metadata.sender_nonce != self.transaction.nonce() ||
+            self.frame_transaction().is_none_or(|frame| frame.nonce_keys != metadata.nonce_keys)
+        {
+            return Err("frame validation metadata keyed nonce mismatch");
         }
         self.cost = metadata.max_cost;
         self.frame_validation = Some(metadata);
@@ -1854,7 +1857,10 @@ impl<T: alloy_consensus::Transaction> alloy_consensus::Transaction for EthPooled
     }
 
     fn nonce(&self) -> u64 {
-        self.transaction.nonce()
+        self.frame_validation
+            .as_ref()
+            .filter(|metadata| metadata.nonce_keys != [U256::ZERO])
+            .map_or_else(|| self.transaction.nonce(), |metadata| metadata.state_nonce)
     }
 
     fn gas_limit(&self) -> u64 {

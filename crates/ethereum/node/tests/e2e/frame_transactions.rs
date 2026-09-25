@@ -47,7 +47,7 @@ fn self_verify_frame() -> Frame {
 fn sender_frame(target: Address) -> Frame {
     Frame {
         mode: FrameMode::Sender,
-        target: Bytes::copy_from_slice(target.as_slice()),
+        target: target.into(),
         limits: FrameLimits { execution: USER_OP_GAS, state: 0 },
         ..Default::default()
     }
@@ -57,7 +57,7 @@ fn sender_frame(target: Address) -> Frame {
 fn frame_tx(signer: &PrivateKeySigner, nonce: u64, frames: Vec<Frame>) -> Bytes {
     let mut tx = TxEip8141 {
         chain_id: 1,
-        nonce,
+        nonce_seq: nonce,
         sender: signer.address(),
         frames,
         signatures: vec![FrameSignature {
@@ -87,7 +87,7 @@ fn frame_tx(signer: &PrivateKeySigner, nonce: u64, frames: Vec<Frame>) -> Bytes 
         "EIP-8141 E2E envelope: hash={:#x}, sender={:#x}, nonce={}, frames={:?}, signature={:#x}",
         tx.tx_hash(),
         tx.sender,
-        tx.nonce,
+        tx.nonce_seq,
         tx.frames,
         tx.signatures[0].signature,
     );
@@ -175,7 +175,7 @@ async fn expiry_prefix_frame_is_admitted_and_mined() -> eyre::Result<()> {
     let deadline = node.payload.timestamp.saturating_add(600).to_be_bytes();
     let expiry = Frame {
         mode: FrameMode::Verify,
-        target: Bytes::copy_from_slice(EXPIRY_VERIFIER.as_slice()),
+        target: EXPIRY_VERIFIER.into(),
         limits: FrameLimits { execution: VERIFY_GAS, state: 0 },
         data: Bytes::copy_from_slice(&deadline),
         ..Default::default()

@@ -1,0 +1,63 @@
+[workspace]
+members = ["crates/*"]
+resolver = "2"
+
+[workspace.package]
+version = "0.39.0"
+edition = "2021"
+rust-version = "1.94.1"
+authors = ["Alloy Contributors"]
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/alloy-rs/alloy-evm"
+repository = "https://github.com/alloy-rs/alloy-evm"
+exclude = ["benches/", "tests/"]
+
+[workspace.lints.rustdoc]
+all = "warn"
+
+[workspace.lints.rust]
+missing-debug-implementations = "warn"
+missing-docs = "warn"
+unreachable-pub = "warn"
+unused-must-use = "deny"
+rust-2018-idioms = "deny"
+unnameable-types = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+missing-const-for-fn = "warn"
+use-self = "warn"
+option-if-let-else = "allow"
+redundant-clone = "warn"
+
+[workspace.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[workspace.dependencies]
+alloy-evm = { version = "0.39.0", path = "crates/evm", default-features = false }
+
+# alloy
+alloy-eip2124 = { version = "0.2", default-features = false }
+alloy-chains = { version = "0.2.0", default-features = false }
+alloy-eips = { git = "https://github.com/Rimeeeeee/alloy", rev = "fb2a22c5e4351bbf9dee73eaf513e3894342c151", default-features = false }
+alloy-consensus = { git = "https://github.com/Rimeeeeee/alloy", rev = "fb2a22c5e4351bbf9dee73eaf513e3894342c151", default-features = false }
+alloy-primitives = { version = "1.0.0", default-features = false }
+alloy-sol-types = { version = "1.0.0", default-features = false }
+alloy-hardforks = "0.4.8"
+alloy-rpc-types-eth = { git = "https://github.com/Rimeeeeee/alloy", rev = "fb2a22c5e4351bbf9dee73eaf513e3894342c151", default-features = false }
+alloy-rpc-types-engine = { git = "https://github.com/Rimeeeeee/alloy", rev = "fb2a22c5e4351bbf9dee73eaf513e3894342c151", default-features = false }
+
+# revm
+revm = { git = "https://github.com/Rimeeeeee/revm", rev = "4bfee0dc84efeba995bd75e0840e6858a8cc30f5", default-features = false }
+
+# tracing
+tracing = { version = "0.1", default-features = false }
+
+# misc
+auto_impl = "1"
+derive_more = { version = "2", default-features = false, features = ["full"] }
+serde = { version = "1", default-features = false, features = ["derive"] }
+thiserror = { version = "2.0.0", default-features = false }
+serde_json = "1"
+test-case = "3"

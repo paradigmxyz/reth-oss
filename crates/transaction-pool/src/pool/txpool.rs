@@ -2177,6 +2177,17 @@ impl<T: PoolTransaction> AllTransactions<T> {
         // leave both the old pool entry and its reservation untouched.
         let existing = self.txs.get(transaction.id()).map(|tx| &tx.transaction);
         if let Some(existing) = &existing &&
+            (existing.transaction.frame_validation().is_some() ||
+                transaction.transaction.frame_validation().is_some()) &&
+            existing.transaction.frame_validation().is_some() !=
+                transaction.transaction.frame_validation().is_some()
+        {
+            return Err(InsertErr::FramePolicy {
+                transaction,
+                reason: "frame and ordinary transactions cannot replace each other",
+            });
+        }
+        if let Some(existing) = &existing &&
             existing.is_underpriced(&transaction, &self.price_bumps)
         {
             return Err(InsertErr::Underpriced { transaction, existing: *existing.hash() })
@@ -2625,7 +2636,7 @@ mod tests {
         let tx = TxEip8141 {
             chain_id: 1,
             sender,
-            nonce,
+            nonce_seq: nonce,
             frames: vec![Frame::default()],
             fees: TransactionFees {
                 max_priority_fee_per_gas: U256::ZERO,
@@ -2645,6 +2656,7 @@ mod tests {
             .set_frame_validation(Arc::new(crate::validate::FrameValidation {
                 sender,
                 sender_nonce: nonce,
+                nonce_keys: vec![U256::ZERO],
                 state_nonce: nonce,
                 sender_balance: U256::from(max_cost),
                 sender_code_hash: None,
