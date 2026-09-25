@@ -152,7 +152,7 @@ members = [
     "crates/tracing-otlp",
 ]
 default-members = ["bin/reth"]
-exclude = ["docs/cli", "vendor/alloy-evm", "vendor/reth-core", "vendor/revm-inspectors"]
+exclude = ["docs/cli"]
 
 # Explicitly set the resolver to version 2, which is the default for packages with edition >= 2021
 # https://doc.rust-lang.org/edition-guide/rust-2021/default-cargo-resolver.html
@@ -698,7 +698,7 @@ vergen-git2 = "10.0.1"
 ipnet = "2.11"
 
 [patch.crates-io]
-revm-inspectors = { path = "vendor/revm-inspectors" }
+revm-inspectors = { git = "https://github.com/Rimeeeeee/revm-inspectors", branch = "feat/eip8250-keyed-nonce-adapters" }
 # EIP-8141 Alloy consensus, networking, RPC, signer, and transport stack.
 alloy-consensus = { git = "https://github.com/Rimeeeeee/alloy", rev = "fb2a22c5e4351bbf9dee73eaf513e3894342c151" }
 alloy-consensus-any = { git = "https://github.com/Rimeeeeee/alloy", rev = "fb2a22c5e4351bbf9dee73eaf513e3894342c151" }
@@ -732,13 +732,13 @@ alloy-transport-ipc = { git = "https://github.com/Rimeeeeee/alloy", rev = "fb2a2
 alloy-transport-ws = { git = "https://github.com/Rimeeeeee/alloy", rev = "fb2a22c5e4351bbf9dee73eaf513e3894342c151" }
 alloy-tx-macros = { git = "https://github.com/Rimeeeeee/alloy", rev = "fb2a22c5e4351bbf9dee73eaf513e3894342c151" }
 
-# EIP-8141 execution adapter and VM.
-alloy-evm = { path = "vendor/alloy-evm/crates/evm" }
-reth-codecs = { path = "vendor/reth-core/crates/codecs" }
-reth-codecs-derive = { path = "vendor/reth-core/crates/codecs-derive" }
-reth-primitives-traits = { path = "vendor/reth-core/crates/primitives-traits" }
-reth-rpc-traits = { path = "vendor/reth-core/crates/rpc-traits" }
-reth-zstd-compressors = { path = "vendor/reth-core/crates/zstd-compressors" }
+# EIP-8250 adapters layered on the frame-transaction forks.
+alloy-evm = { git = "https://github.com/Soubhik-10/evm", branch = "feat/eip8250-keyed-nonce-adapters" }
+reth-codecs = { git = "https://github.com/Soubhik-10/reth-core", branch = "feat/eip8250-keyed-nonce-adapters" }
+reth-codecs-derive = { git = "https://github.com/Soubhik-10/reth-core", branch = "feat/eip8250-keyed-nonce-adapters" }
+reth-primitives-traits = { git = "https://github.com/Soubhik-10/reth-core", branch = "feat/eip8250-keyed-nonce-adapters" }
+reth-rpc-traits = { git = "https://github.com/Soubhik-10/reth-core", branch = "feat/eip8250-keyed-nonce-adapters" }
+reth-zstd-compressors = { git = "https://github.com/Soubhik-10/reth-core", branch = "feat/eip8250-keyed-nonce-adapters" }
 revm = { git = "https://github.com/Rimeeeeee/revm", rev = "4bfee0dc84efeba995bd75e0840e6858a8cc30f5" }
 revm-bytecode = { git = "https://github.com/Rimeeeeee/revm", rev = "4bfee0dc84efeba995bd75e0840e6858a8cc30f5" }
 revm-context = { git = "https://github.com/Rimeeeeee/revm", rev = "4bfee0dc84efeba995bd75e0840e6858a8cc30f5" }
