@@ -34,6 +34,10 @@ use revm::{
     Database,
 };
 
+pub use alloy_rpc_types_eth::simulate::{
+    FrameSimulationFrameResult, FrameSimulationPrefixShape, FrameSimulationResult,
+};
+
 /// Fallback seconds added between simulated block timestamps when neither the user nor the chain
 /// hint provides a value.
 const SIMULATE_FALLBACK_TIMESTAMP_INCREMENT: u64 = 12;
@@ -565,8 +569,6 @@ where
             ExecutionResult::Halt { reason, gas, .. } => {
                 let error = Err::from_evm_halt(reason, tx.gas_limit());
                 SimCallResult {
-                    payer: None,
-                    frame_results: None,
                     return_data: Bytes::new(),
                     error: Some(SimulateError {
                         message: error.to_string(),
@@ -577,13 +579,12 @@ where
                     max_used_gas: Some(gas.total_gas_spent().max(gas.floor_gas())),
                     logs: Vec::new(),
                     status: false,
+                    ..Default::default()
                 }
             }
             ExecutionResult::Revert { output, gas, .. } => {
                 let error = Err::from_revert(output.clone());
                 SimCallResult {
-                    payer: None,
-                    frame_results: None,
                     return_data: Bytes::new(),
                     error: Some(SimulateError {
                         message: error.to_string(),
@@ -594,11 +595,10 @@ where
                     max_used_gas: Some(gas.total_gas_spent().max(gas.floor_gas())),
                     status: false,
                     logs: Vec::new(),
+                    ..Default::default()
                 }
             }
             ExecutionResult::Success { output, gas, logs, .. } => SimCallResult {
-                payer: None,
-                frame_results: None,
                 return_data: output.into_data(),
                 error: None,
                 gas_used: gas.tx_gas_used(),
@@ -620,58 +620,24 @@ where
                     })
                     .collect(),
                 status: true,
+                ..Default::default()
             },
             ExecutionResult::FrameTransaction {
                 gas, payer, frame_receipts, frame_outputs, ..
-            } => {
-                let mut logs = Vec::new();
-                let frame_results = frame_receipts
-                    .into_iter()
-                    .zip(frame_outputs)
-                    .map(|(receipt, return_data)| {
-                        let frame_logs = receipt
-                            .logs
-                            .into_iter()
-                            .map(|log| {
-                                log_index += 1;
-                                alloy_rpc_types_eth::Log {
-                                    inner: log,
-                                    log_index: Some(log_index - 1),
-                                    transaction_index: Some(index as u64),
-                                    transaction_hash: Some(*tx.tx_hash()),
-                                    block_hash: Some(block.hash()),
-                                    block_number: Some(block.header().number()),
-                                    block_timestamp: Some(block.header().timestamp()),
-                                    ..Default::default()
-                                }
-                            })
-                            .collect::<Vec<_>>();
-                        logs.extend(frame_logs.iter().cloned());
-                        FrameCallResult {
-                            status: receipt.status,
-                            gas_used: receipt
-                                .gas_used
-                                .execution
-                                .saturating_add(receipt.gas_used.state),
-                            execution_gas_used: receipt.gas_used.execution,
-                            state_gas_used: receipt.gas_used.state,
-                            logs: frame_logs,
-                            return_data,
-                            error: None,
-                        }
-                    })
-                    .collect();
-                SimCallResult {
-                    payer: Some(payer),
-                    frame_results: Some(frame_results),
-                    return_data: Bytes::new(),
-                    error: None,
-                    gas_used: gas.frame_tx_gas_used(),
-                    max_used_gas: Some(gas.total_gas_spent().max(gas.floor_gas())),
-                    logs,
-                    status: true,
+            } => frame_call_result(gas, payer, frame_receipts, frame_outputs, |log| {
+                let current_index = log_index;
+                log_index += 1;
+                alloy_rpc_types_eth::Log {
+                    inner: log,
+                    log_index: Some(current_index),
+                    transaction_index: Some(index as u64),
+                    transaction_hash: Some(*tx.tx_hash()),
+                    block_hash: Some(block.hash()),
+                    block_number: Some(block.header().number()),
+                    block_timestamp: Some(block.header().timestamp()),
+                    ..Default::default()
                 }
-            }
+            }),
         };
 
         calls.push(call);
@@ -685,17 +651,67 @@ where
     Ok(SimulatedBlock { inner: block, calls })
 }
 
+fn frame_call_result(
+    gas: revm::context_interface::result::ResultGas,
+    payer: Address,
+    frame_receipts: Vec<alloy_eips::eip8141::FrameReceipt>,
+    frame_outputs: Vec<Bytes>,
+    mut map_log: impl FnMut(alloy_primitives::Log) -> alloy_rpc_types_eth::Log,
+) -> SimCallResult {
+    assert_eq!(frame_receipts.len(), frame_outputs.len());
+    let frame_results: Vec<_> = frame_receipts
+        .into_iter()
+        .zip(frame_outputs)
+        .map(|(receipt, output)| {
+            let logs = receipt.logs.into_iter().map(&mut map_log).collect();
+            FrameCallResult {
+                status: receipt.status,
+                gas_used: receipt.gas_used.execution.saturating_add(receipt.gas_used.state),
+                execution_gas_used: receipt.gas_used.execution,
+                state_gas_used: receipt.gas_used.state,
+                logs,
+                return_data: output,
+                error: None,
+            }
+        })
+        .collect();
+    let failed = frame_results
+        .iter()
+        .find(|frame| frame.status != alloy_eips::eip8141::FrameStatus::Success);
+    let status = failed.is_none();
+    let return_data = failed
+        .or_else(|| frame_results.last())
+        .map(|frame| frame.return_data.clone())
+        .unwrap_or_default();
+    SimCallResult {
+        payer: Some(payer),
+        logs: frame_results.iter().flat_map(|frame| frame.logs.iter().cloned()).collect(),
+        frame_results: Some(frame_results),
+        return_data,
+        status,
+        error: (!status).then(|| SimulateError {
+            code: SIMULATE_VM_ERROR_CODE,
+            message: "vm execution error: frame failed".into(),
+            data: None,
+        }),
+        gas_used: gas.frame_tx_gas_used(),
+        max_used_gas: Some(gas.total_gas_spent().max(gas.floor_gas())),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         apply_precompile_overrides, ensure_frame_simulation_gas, sanitize_chain, EthSimulateError,
+        FrameSimulationFrameResult, FrameSimulationPrefixShape, FrameSimulationResult,
         INTERNAL_ERROR_CODE,
     };
     use crate::{error::ToRpcError, EthApiError};
     use alloy_chains::Chain;
     use alloy_consensus::Header;
+    use alloy_eips::eip8141::FrameStatus;
     use alloy_evm::precompiles::PrecompilesMap;
-    use alloy_primitives::{address, U256};
+    use alloy_primitives::{address, Address, U256};
     use alloy_rpc_types_eth::{
         simulate::SimBlock,
         state::{AccountOverride, StateOverride},
@@ -703,6 +719,88 @@ mod tests {
     };
     use reth_primitives_traits::SealedHeader;
     use revm::precompile::Precompiles;
+    use serde_json::json;
+
+    #[test]
+    fn simulated_frame_outputs_include_payer_gas_and_return_data() {
+        use alloy_eips::eip8141::{FrameGasUsed, FrameReceipt};
+        use alloy_primitives::{Bytes, Log};
+        use revm::context_interface::result::ResultGas;
+
+        for status in [FrameStatus::Success, FrameStatus::Failure, FrameStatus::SkippedAtomicBatch]
+        {
+            let receipts = vec![
+                FrameReceipt {
+                    status,
+                    gas_used: FrameGasUsed { execution: 21, state: 3 },
+                    logs: if status == FrameStatus::Success {
+                        vec![Log::default()]
+                    } else {
+                        vec![]
+                    },
+                },
+                FrameReceipt {
+                    status: FrameStatus::Success,
+                    gas_used: FrameGasUsed { execution: 5, state: 7 },
+                    logs: vec![],
+                },
+            ];
+            let first = Bytes::from_static(&[0xab]);
+            let last = Bytes::from_static(&[0xcd]);
+            let result = super::frame_call_result(
+                ResultGas::new_with_state_gas(40, 0, 0, 10),
+                Address::repeat_byte(0x11),
+                receipts,
+                vec![first.clone(), last.clone()],
+                |inner| alloy_rpc_types_eth::Log { inner, ..Default::default() },
+            );
+            let success = status == FrameStatus::Success;
+            assert_eq!(result.status, success);
+            assert_eq!(result.error.is_none(), success);
+            assert_eq!(result.return_data, if success { last } else { first });
+            assert_eq!(result.logs.len(), usize::from(success));
+            let json = serde_json::to_value(&result).unwrap();
+            assert_eq!(json["payer"], "0x1111111111111111111111111111111111111111");
+            assert_eq!(json["gasUsed"], "0x28");
+            assert_eq!(json["frameResults"][0]["gasUsed"], "0x18");
+            assert_eq!(json["frameResults"][0]["executionGasUsed"], "0x15");
+            assert_eq!(json["frameResults"][0]["stateGasUsed"], "0x3");
+            assert_eq!(json["frameResults"][1]["returnData"], "0xcd");
+        }
+    }
+
+    #[test]
+    fn frame_simulation_result_serializes_rpc_fields() {
+        let result = FrameSimulationResult {
+            valid: true,
+            max_cost: U256::from(123),
+            prefix_shape: Some(FrameSimulationPrefixShape::OnlyVerifyPay),
+            payer: Some(Address::repeat_byte(0x11)),
+            violation: None,
+            gas_used: Some(456),
+            frames: Some(vec![FrameSimulationFrameResult {
+                execution_gas: 5,
+                state_gas: 7,
+                status: FrameStatus::Failure,
+            }]),
+        };
+
+        assert_eq!(
+            serde_json::to_value(result).unwrap(),
+            json!({
+                "valid": true,
+                "maxCost": "0x7b",
+                "prefixShape": "onlyVerifyPay",
+                "payer": "0x1111111111111111111111111111111111111111",
+                "gasUsed": "0x1c8",
+                "frames": [{
+                    "executionGas": "0x5",
+                    "stateGas": "0x7",
+                    "status": "0x0",
+                }],
+            })
+        );
+    }
 
     #[test]
     fn frame_simulation_checks_resolved_budget_and_separate_dimensions() {

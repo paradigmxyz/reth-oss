@@ -132,7 +132,7 @@ mod tests {
             (vec![frame(FrameMode::Verify, 3, s.clone())], 1),
             (
                 vec![
-                    frame(FrameMode::Default, 0, FrameAddress::Empty),
+                    frame(FrameMode::Default, 0, FrameAddress::default()),
                     frame(FrameMode::Verify, 3, s.clone()),
                 ],
                 2,
@@ -140,15 +140,15 @@ mod tests {
             (
                 vec![
                     frame(FrameMode::Verify, 2, s.clone()),
-                    frame(FrameMode::Verify, 1, FrameAddress::Empty),
+                    frame(FrameMode::Verify, 1, FrameAddress::default()),
                 ],
                 2,
             ),
             (
                 vec![
-                    frame(FrameMode::Default, 0, FrameAddress::Empty),
+                    frame(FrameMode::Default, 0, FrameAddress::default()),
                     frame(FrameMode::Verify, 2, s),
-                    frame(FrameMode::Verify, 1, FrameAddress::Empty),
+                    frame(FrameMode::Verify, 1, FrameAddress::default()),
                 ],
                 3,
             ),
@@ -169,7 +169,7 @@ mod tests {
         assert_eq!(p.expiry_index, Some(0));
         t.frames[0].limits.execution = MAX_VERIFY_GAS;
         assert_eq!(FrameValidationPolicy::new(&t, 0), Err("verification gas budget exceeded"));
-        t.frames.push(frame(FrameMode::Verify, 0, FrameAddress::Empty));
+        t.frames.push(frame(FrameMode::Verify, 0, FrameAddress::default()));
         assert_eq!(FrameValidationPolicy::new(&t, 1), Err("verify frame after validation prefix"));
     }
 
@@ -177,15 +177,16 @@ mod tests {
     fn rejects_invalid_shape_and_budgets_without_overflow() {
         let s = sender();
         for bad in [
-            vec![frame(FrameMode::Verify, 7, s)],
+            vec![frame(FrameMode::Verify, 7, s.clone())],
             vec![frame(FrameMode::Verify, 3, Address::repeat_byte(0x22).into())],
+            vec![frame(FrameMode::Verify, 2, s.clone())],
         ] {
             assert!(FrameValidationPolicy::new(&tx(bad), 1).is_err());
         }
         assert!(FrameValidationPolicy::new(
             &tx(vec![
                 frame(FrameMode::Verify, 3, s.clone()),
-                frame(FrameMode::Default, 0, FrameAddress::Empty),
+                frame(FrameMode::Default, 0, FrameAddress::default()),
             ]),
             1
         )
