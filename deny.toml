@@ -92,6 +92,7 @@ unused-allowed-source = "allow"
 allow-git = [
     "https://github.com/Rimeeeeee/alloy",
     "https://github.com/Rimeeeeee/eips",
+    "https://github.com/Rimeeeeee/evm",
     "https://github.com/Rimeeeeee/revm",
     "https://github.com/Rimeeeeee/revm-inspectors",
     "https://github.com/Soubhik-10/eips",
