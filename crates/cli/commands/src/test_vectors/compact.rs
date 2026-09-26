@@ -336,7 +336,10 @@ fn decode_legacy_frame_vector(
     let Ok(transaction) = LegacyFrameTransaction::decode(&mut payload) else {
         return Ok(None);
     };
-    Ok(payload.is_empty().then_some((prefix.len(), transaction)))
+    if !payload.is_empty() {
+        eyre::bail!("EIP-8141 compact vector has trailing bytes");
+    }
+    Ok(Some((prefix.len(), transaction)))
 }
 
 #[cfg(test)]
