@@ -342,7 +342,6 @@ fn decode_legacy_frame_vector(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use reth_codecs::Compact;
 
     #[test]
     fn legacy_frame_vectors_roundtrip_with_nested_fees() {
