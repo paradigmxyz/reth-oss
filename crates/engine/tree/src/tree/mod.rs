@@ -31,14 +31,15 @@ use reth_primitives_traits::{
     FastInstant as Instant, NodePrimitives, RecoveredBlock, SealedBlock, SealedHeader,
 };
 use reth_provider::{
-    BalProvider, BlockExecutionOutput, BlockExecutionResult, BlockReader, ChangeSetReader,
-    DatabaseProviderFactory, ProviderError, PruneCheckpointReader, SaveBlocksInput,
-    StageCheckpointReader, StateProviderFactory, StateReader, StorageChangeSetReader,
-    StorageSettingsCache, TransactionVariant,
+    BalProvider, BlockExecutionOutput, BlockExecutionResult, BlockHashReader, BlockReader,
+    ChangeSetReader, DatabaseProviderFactory, DatabaseProviderROFactory, ProviderError,
+    PruneCheckpointReader, SaveBlocksInput, StageCheckpointReader, StateProvider, StateProviderBox,
+    StateProviderFactory, StateReader, StorageChangeSetReader, StorageSettingsCache,
+    TransactionVariant,
 };
 use reth_revm::database::StateProviderDatabase;
 use reth_stages_api::ControlFlow;
-use reth_storage_overlay::OverlayManager;
+use reth_storage_overlay::{OverlayManager, OverlayStateProviderFactory};
 use reth_tasks::{spawn_os_thread, utils::increase_thread_priority};
 use reth_trie::ComputedTrieData;
 use revm::{context_interface::Cfg, interpreter::debug_unreachable, primitives::hardfork::SpecId};
@@ -379,12 +380,14 @@ where
         + Clone
         + 'static,
     P::Provider: BlockReader<Block = N::Block, Header = N::BlockHeader>
+        + BlockHashReader
         + PruneCheckpointReader
         + StageCheckpointReader
         + ChangeSetReader
         + StorageChangeSetReader
         + StorageSettingsCache
         + 'static,
+    OverlayStateProviderFactory<P, N>: DatabaseProviderROFactory<Provider: StateProvider>,
     C: ConfigureEvm<Primitives = N> + 'static,
     // The EIP-7805 appendability check prices intrinsic gas, which needs a concrete revm spec.
     reth_evm::SpecFor<C>: Into<SpecId>,
@@ -3509,10 +3512,17 @@ where
             };
             block
         };
-        let Some(provider_builder) = self.state_provider_builder(block_hash)? else {
+        if !self.state.tree_state.contains_hash(&block_hash) &&
+            self.provider.header(block_hash)?.is_none()
+        {
+            debug!(target: "engine::tree", %block_hash, "no canonical state found for block");
             return Ok(None)
-        };
-        let state = provider_builder.build()?;
+        }
+        let state_provider_factory = OverlayStateProviderFactory::new(
+            self.provider.clone(),
+            self.state.tree_state.overlay_manager.overlay_builder(block_hash),
+        );
+        let state: StateProviderBox = Box::new(state_provider_factory.database_provider_ro()?);
 
         // The EVM environment supplies the chain id and the EIP-7825 gas cap the block was
         // executed under. The spec permits a null result, so a failure here reports nothing.
