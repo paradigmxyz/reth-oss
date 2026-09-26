@@ -51,7 +51,7 @@ pub struct FrameDependencies {
 #[derive(Debug, Default)]
 pub struct FrameReservations {
     frames: HashMap<TxHash, Arc<FrameValidation>>,
-    sender_frame: HashMap<Address, TxHash>,
+    sender_frames: HashMap<Address, HashSet<TxHash>>,
     payer: HashMap<Address, PayerUsage>,
     accounts: HashMap<Address, HashSet<TxHash>>,
     code: HashMap<Address, HashSet<TxHash>>,
@@ -103,6 +103,8 @@ impl FrameReservations {
         if replaces.is_some() && old.is_none() {
             return Err("replacement not found");
         }
+        // Legacy-key frames use distinct account nonces and can queue together. Keyed frames
+        // share a virtual sender nonce in the pool, so keep their one-pending policy.
         if let Some(old) = &old {
             if old.sender != metadata.sender ||
                 old.sender_nonce != metadata.sender_nonce ||
@@ -110,8 +112,15 @@ impl FrameReservations {
             {
                 return Err("replacement keyed nonce mismatch");
             }
-        } else if self.sender_frame.contains_key(&metadata.sender) {
-            return Err("sender already has a pending frame");
+        } else if self.sender_frames.get(&metadata.sender).is_some_and(|hashes| {
+            hashes.iter().any(|hash| {
+                let pending = &self.frames[hash];
+                metadata.nonce_keys != [U256::ZERO] ||
+                    pending.nonce_keys != [U256::ZERO] ||
+                    pending.sender_nonce == metadata.sender_nonce
+            })
+        }) {
+            return Err("sender already has a pending frame for this nonce domain");
         }
         let usage = self.payer.get(&metadata.payer).copied().unwrap_or_default();
         let old_cost =
@@ -147,7 +156,7 @@ impl FrameReservations {
         }
         self.remove_inner(replaces);
         self.frames.insert(hash, metadata.clone());
-        self.sender_frame.insert(metadata.sender, hash);
+        self.sender_frames.entry(metadata.sender).or_default().insert(hash);
         let entry = self.payer.entry(metadata.payer).or_default();
         entry.balance = metadata.payer_balance;
         entry.frame_cost = frame_cost;
@@ -184,7 +193,12 @@ impl FrameReservations {
     fn remove_inner(&mut self, hash: Option<B256>) {
         let Some(hash) = hash else { return };
         let Some(m) = self.frames.remove(&hash) else { return };
-        self.sender_frame.remove(&m.sender);
+        if let Some(hashes) = self.sender_frames.get_mut(&m.sender) {
+            hashes.remove(&hash);
+            if hashes.is_empty() {
+                self.sender_frames.remove(&m.sender);
+            }
+        }
         if let Some(p) = self.payer.get_mut(&m.payer) {
             p.frame_cost = p.frame_cost.checked_sub(m.max_cost).unwrap_or(U256::ZERO);
             p.frame_count = p.frame_count.saturating_sub(1);
@@ -325,15 +339,30 @@ mod tests {
     }
 
     #[test]
-    fn stale_head_and_second_sender_frame_do_not_mutate_reservations() {
+    fn stale_head_and_conflicting_sender_frame_do_not_mutate_reservations() {
         let mut r = FrameReservations::default();
         put(&mut r, 1, m(1, 0, 1, 3)).unwrap();
         let mut stale = m(2, 0, 1, 2);
         stale.head_hash = B256::repeat_byte(7);
         assert_eq!(put(&mut r, 2, stale), Err("stale head"));
-        assert_eq!(put(&mut r, 3, m(1, 1, 2, 1)), Err("sender already has a pending frame"));
+        assert_eq!(
+            put(&mut r, 3, m(1, 0, 2, 1)),
+            Err("sender already has a pending frame for this nonce domain")
+        );
         assert_eq!(r.payer_exposure(&Address::repeat_byte(1)), U256::from(3));
         assert_eq!(r.hashes().count(), 1);
+
+        put(&mut r, 4, m(1, 1, 2, 1)).unwrap();
+        assert_eq!(r.hashes().count(), 2);
+        r.remove(&B256::repeat_byte(1));
+        assert_eq!(r.hashes().collect::<Vec<_>>(), vec![B256::repeat_byte(4)]);
+
+        let mut keyed = m(1, 0, 2, 1);
+        keyed.nonce_keys = vec![U256::from(3)];
+        assert_eq!(
+            put(&mut r, 5, keyed),
+            Err("sender already has a pending frame for this nonce domain")
+        );
     }
 
     #[test]
@@ -399,7 +428,10 @@ mod tests {
         let mut second_exclusive = m(3, 0, 1, 1);
         second_exclusive.exclusive_payer = true;
         assert_eq!(put(&mut r, 3, second_exclusive), Err("exclusive payer capacity exceeded"));
-        assert_eq!(put(&mut r, 3, m(1, 0, 2, 1)), Err("sender already has a pending frame"));
+        assert_eq!(
+            put(&mut r, 3, m(1, 0, 2, 1)),
+            Err("sender already has a pending frame for this nonce domain")
+        );
     }
     #[test]
     fn replacement_rollback_and_payer_shift() {

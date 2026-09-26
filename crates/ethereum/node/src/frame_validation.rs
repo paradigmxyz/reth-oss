@@ -79,8 +79,8 @@ where
             .basic_account(&frame.sender)
             .map_err(|_| policy("cannot read sender nonce"))?
             .unwrap_or_default();
-        if frame.nonce_seq != sender.nonce {
-            return Err(policy("sender nonce sequence changed"));
+        if frame.nonce_seq < sender.nonce {
+            return Err(policy("sender nonce sequence already consumed"));
         }
     } else {
         for &key in &frame.nonce_keys {
