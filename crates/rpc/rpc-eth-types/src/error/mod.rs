@@ -439,6 +439,7 @@ impl From<EthTxEnvError> for EthApiError {
             }
             EthTxEnvError::Input(err) => Self::TransactionInputError(err),
             err @ EthTxEnvError::Eip8141InvalidOuterFields => Self::InvalidParams(err.to_string()),
+            err @ EthTxEnvError::Eip8141MissingLimit(_) => Self::InvalidParams(err.to_string()),
         }
     }
 }

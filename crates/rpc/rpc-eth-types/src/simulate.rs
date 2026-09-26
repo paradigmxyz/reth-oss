@@ -12,7 +12,7 @@ use alloy_evm::{
 };
 use alloy_network::{NetworkTransactionBuilder, TransactionBuilder};
 use alloy_rpc_types_eth::{
-    simulate::{SimBlock, SimCallResult, SimulateError, SimulatedBlock},
+    simulate::{FrameCallResult, SimBlock, SimCallResult, SimulateError, SimulatedBlock},
     state::StateOverride,
     BlockId, BlockOverrides, BlockTransactionsKind,
 };
@@ -565,6 +565,8 @@ where
             ExecutionResult::Halt { reason, gas, .. } => {
                 let error = Err::from_evm_halt(reason, tx.gas_limit());
                 SimCallResult {
+                    payer: None,
+                    frame_results: None,
                     return_data: Bytes::new(),
                     error: Some(SimulateError {
                         message: error.to_string(),
@@ -580,6 +582,8 @@ where
             ExecutionResult::Revert { output, gas, .. } => {
                 let error = Err::from_revert(output.clone());
                 SimCallResult {
+                    payer: None,
+                    frame_results: None,
                     return_data: Bytes::new(),
                     error: Some(SimulateError {
                         message: error.to_string(),
@@ -593,6 +597,8 @@ where
                 }
             }
             ExecutionResult::Success { output, gas, logs, .. } => SimCallResult {
+                payer: None,
+                frame_results: None,
                 return_data: output.into_data(),
                 error: None,
                 gas_used: gas.tx_gas_used(),
@@ -615,29 +621,57 @@ where
                     .collect(),
                 status: true,
             },
-            ExecutionResult::FrameTransaction { gas, logs, .. } => SimCallResult {
-                return_data: Bytes::new(),
-                error: None,
-                gas_used: gas.frame_tx_gas_used(),
-                max_used_gas: Some(gas.total_gas_spent().max(gas.floor_gas())),
-                logs: logs
+            ExecutionResult::FrameTransaction {
+                gas, payer, frame_receipts, frame_outputs, ..
+            } => {
+                let mut logs = Vec::new();
+                let frame_results = frame_receipts
                     .into_iter()
-                    .map(|log| {
-                        log_index += 1;
-                        alloy_rpc_types_eth::Log {
-                            inner: log,
-                            log_index: Some(log_index - 1),
-                            transaction_index: Some(index as u64),
-                            transaction_hash: Some(*tx.tx_hash()),
-                            block_hash: Some(block.hash()),
-                            block_number: Some(block.header().number()),
-                            block_timestamp: Some(block.header().timestamp()),
-                            ..Default::default()
+                    .zip(frame_outputs)
+                    .map(|(receipt, return_data)| {
+                        let frame_logs = receipt
+                            .logs
+                            .into_iter()
+                            .map(|log| {
+                                log_index += 1;
+                                alloy_rpc_types_eth::Log {
+                                    inner: log,
+                                    log_index: Some(log_index - 1),
+                                    transaction_index: Some(index as u64),
+                                    transaction_hash: Some(*tx.tx_hash()),
+                                    block_hash: Some(block.hash()),
+                                    block_number: Some(block.header().number()),
+                                    block_timestamp: Some(block.header().timestamp()),
+                                    ..Default::default()
+                                }
+                            })
+                            .collect::<Vec<_>>();
+                        logs.extend(frame_logs.iter().cloned());
+                        FrameCallResult {
+                            status: receipt.status,
+                            gas_used: receipt
+                                .gas_used
+                                .execution
+                                .saturating_add(receipt.gas_used.state),
+                            execution_gas_used: receipt.gas_used.execution,
+                            state_gas_used: receipt.gas_used.state,
+                            logs: frame_logs,
+                            return_data,
+                            error: None,
                         }
                     })
-                    .collect(),
-                status: true,
-            },
+                    .collect();
+                SimCallResult {
+                    payer: Some(payer),
+                    frame_results: Some(frame_results),
+                    return_data: Bytes::new(),
+                    error: None,
+                    gas_used: gas.frame_tx_gas_used(),
+                    max_used_gas: Some(gas.total_gas_spent().max(gas.floor_gas())),
+                    logs,
+                    status: true,
+                }
+            }
         };
 
         calls.push(call);
