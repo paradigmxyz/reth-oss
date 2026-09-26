@@ -387,7 +387,7 @@ where
         + StorageChangeSetReader
         + StorageSettingsCache
         + 'static,
-    OverlayStateProviderFactory<P, N>: DatabaseProviderROFactory<Provider: StateProvider>,
+    OverlayStateProviderFactory<P, N>: DatabaseProviderROFactory<Provider: StateProvider + Send>,
     C: ConfigureEvm<Primitives = N> + 'static,
     // The EIP-7805 appendability check prices intrinsic gas, which needs a concrete revm spec.
     reth_evm::SpecFor<C>: Into<SpecId>,
