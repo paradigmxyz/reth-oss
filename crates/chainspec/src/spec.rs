@@ -885,9 +885,9 @@ impl From<Genesis> for ChainSpec {
             None
         };
 
-        // Bogota shares Amsterdam's activation timestamp on the frames devnet. Keep accepting
-        // genesis files that only contain Amsterdam, as older Hive genesis mappers do not emit a
-        // separate Bogota timestamp.
+        // Bogota activates EIP-8141 and the EIP-8250 keyed-nonce schema together on this
+        // frames devnet. Keep accepting genesis files that only contain Amsterdam, as older Hive
+        // genesis mappers do not emit a separate Bogota timestamp.
         let bogota_time = genesis.config.bogota_time.or(genesis.config.amsterdam_time);
 
         // Time-based hardforks

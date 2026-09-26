@@ -451,7 +451,8 @@ mod tests {
         let frame_tx = filled.tx.frame_transaction().expect("filled transaction should be a frame");
 
         assert_eq!(frame_tx.sender, address);
-        assert_eq!(frame_tx.nonce, nonce);
+        assert_eq!(frame_tx.nonce_keys, vec![U256::ZERO]);
+        assert_eq!(frame_tx.nonce_seq, nonce);
         assert_eq!(frame_tx.chain_id, 1);
         assert_eq!(frame_tx.frames[0].limits, limits);
         assert!(frame_tx.signatures.is_empty());
@@ -484,7 +485,8 @@ mod tests {
         let frame_tx = filled.tx.frame_transaction().expect("filled transaction should be a frame");
 
         assert_eq!(frame_tx.sender, address);
-        assert_eq!(frame_tx.nonce, nonce);
+        assert_eq!(frame_tx.nonce_keys, vec![U256::ZERO]);
+        assert_eq!(frame_tx.nonce_seq, nonce);
         assert_eq!(frame_tx.chain_id, 1);
         assert_eq!(frame_tx.frames[0].limits, limits);
         assert_eq!(frame_tx.signatures.len(), 1);
@@ -620,6 +622,8 @@ mod tests {
             .converter()
             .build_simulate_v1_transaction(TransactionRequest {
                 nonce: Some(0),
+                nonce_keys: Some(vec![U256::ZERO]),
+                nonce_seq: Some(0),
                 gas: None,
                 max_fee_per_gas: Some(0),
                 max_priority_fee_per_gas: Some(0),

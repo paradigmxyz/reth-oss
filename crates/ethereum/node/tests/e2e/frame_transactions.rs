@@ -57,7 +57,7 @@ fn sender_frame(target: Address) -> Frame {
 fn frame_tx(signer: &PrivateKeySigner, nonce: u64, frames: Vec<Frame>) -> Bytes {
     let mut tx = TxEip8141 {
         chain_id: 1,
-        nonce,
+        nonce_seq: nonce,
         sender: signer.address(),
         frames,
         signatures: vec![FrameSignature {
@@ -87,7 +87,7 @@ fn frame_tx(signer: &PrivateKeySigner, nonce: u64, frames: Vec<Frame>) -> Bytes 
         "EIP-8141 E2E envelope: hash={:#x}, sender={:#x}, nonce={}, frames={:?}, signature={:#x}",
         tx.tx_hash(),
         tx.sender,
-        tx.nonce,
+        tx.nonce_seq,
         tx.frames,
         tx.signatures[0].signature,
     );
