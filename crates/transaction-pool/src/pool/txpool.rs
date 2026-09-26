@@ -2627,9 +2627,9 @@ mod tests {
         traits::{PoolTransaction, TransactionOrigin},
         EthPooledTransaction, SubPoolLimit,
     };
-    use alloy_consensus::{Transaction, TxEip8141, TxType};
+    use alloy_consensus::{Transaction, TxEip1559, TxEip8141, TxType};
     use alloy_eips::eip8141::{Frame, TransactionFees};
-    use alloy_primitives::{address, Sealable};
+    use alloy_primitives::{address, Sealable, TxKind};
     use reth_ethereum_primitives::TransactionSigned;
 
     fn validated_frame(
@@ -2639,8 +2639,21 @@ mod tests {
         fee: u64,
         max_cost: u64,
     ) -> ValidPoolTransaction<EthPooledTransaction> {
+        validated_frame_with_keys(sender, sender_id, nonce, fee, max_cost, vec![U256::ZERO], nonce)
+    }
+
+    fn validated_frame_with_keys(
+        sender: Address,
+        sender_id: SenderId,
+        nonce: u64,
+        fee: u64,
+        max_cost: u64,
+        nonce_keys: Vec<U256>,
+        state_nonce: u64,
+    ) -> ValidPoolTransaction<EthPooledTransaction> {
         let tx = TxEip8141 {
             chain_id: 1,
+            nonce_keys: nonce_keys.clone(),
             sender,
             nonce_seq: nonce,
             frames: vec![Frame::default()],
@@ -2662,8 +2675,8 @@ mod tests {
             .set_frame_validation(Arc::new(crate::validate::FrameValidation {
                 sender,
                 sender_nonce: nonce,
-                nonce_keys: vec![U256::ZERO],
-                state_nonce: nonce,
+                nonce_keys: nonce_keys.clone(),
+                state_nonce,
                 sender_balance: U256::from(max_cost),
                 sender_code_hash: None,
                 payer: sender,
@@ -2677,7 +2690,10 @@ mod tests {
             .unwrap();
         ValidPoolTransaction {
             transaction,
-            transaction_id: TransactionId::new(sender_id, nonce),
+            transaction_id: TransactionId::new(
+                sender_id,
+                if nonce_keys == [U256::ZERO] { nonce } else { state_nonce },
+            ),
             propagate: true,
             timestamp: std::time::Instant::now(),
             origin: TransactionOrigin::External,
@@ -2714,6 +2730,67 @@ mod tests {
             Err(InsertErr::Underpriced { .. })
         ));
         assert_eq!(pool.frame_reservations.hashes().collect::<Vec<_>>(), vec![first_hash]);
+    }
+
+    #[test]
+    fn keyed_frame_and_ordinary_transaction_share_a_virtual_pool_slot() {
+        let sender = Address::repeat_byte(0x13);
+        let sender_id = SenderId::from(3);
+        let ordinary = || {
+            let tx = TxEip1559 {
+                chain_id: 1,
+                nonce: 0,
+                gas_limit: 21_000,
+                max_fee_per_gas: 100,
+                max_priority_fee_per_gas: 1,
+                to: TxKind::Call(Address::ZERO),
+                ..Default::default()
+            };
+            ValidPoolTransaction {
+                transaction: EthPooledTransaction::new(
+                    alloy_consensus::transaction::Recovered::new_unchecked(
+                        TransactionSigned::Eip1559(tx.seal_slow()),
+                        sender,
+                    ),
+                    0,
+                ),
+                transaction_id: TransactionId::new(sender_id, 0),
+                propagate: true,
+                timestamp: std::time::Instant::now(),
+                origin: TransactionOrigin::External,
+                authority_ids: None,
+            }
+        };
+        let keyed =
+            || validated_frame_with_keys(sender, sender_id, 0, 100, 5, vec![U256::from(7)], 0);
+
+        let mut pool = AllTransactions::default();
+        let ordinary = ordinary();
+        let ordinary_hash = *ordinary.hash();
+        pool.insert_tx(ordinary, U256::MAX, 0).unwrap();
+        let keyed = keyed();
+        assert_eq!(keyed.transaction_id, TransactionId::new(sender_id, 0));
+        assert!(matches!(
+            pool.insert_tx(keyed, U256::MAX, 0),
+            Err(InsertErr::FramePolicy {
+                reason: "frame and ordinary transactions cannot replace each other",
+                ..
+            })
+        ));
+        assert_eq!(*pool.txs.get(&TransactionId::new(sender_id, 0)).unwrap().hash(), ordinary_hash);
+
+        let mut pool = AllTransactions::default();
+        let keyed = keyed();
+        let keyed_hash = *keyed.hash();
+        pool.insert_tx(keyed, U256::MAX, 0).unwrap();
+        assert!(matches!(
+            pool.insert_tx(ordinary(), U256::MAX, 0),
+            Err(InsertErr::FramePolicy {
+                reason: "frame and ordinary transactions cannot replace each other",
+                ..
+            })
+        ));
+        assert_eq!(*pool.txs.get(&TransactionId::new(sender_id, 0)).unwrap().hash(), keyed_hash);
     }
 
     #[test]

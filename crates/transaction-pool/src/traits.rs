@@ -1857,6 +1857,9 @@ impl<T: alloy_consensus::Transaction> alloy_consensus::Transaction for EthPooled
     }
 
     fn nonce(&self) -> u64 {
+        // A nonzero-key frame has no legacy consensus nonce. The pool nevertheless indexes it
+        // by the current account nonce, so it cannot coexist here with an ordinary transaction
+        // from the same sender at that nonce. This is admission policy, not consensus validity.
         self.frame_validation
             .as_ref()
             .filter(|metadata| metadata.nonce_keys != [U256::ZERO])
