@@ -451,7 +451,7 @@ mod tests {
         let frame_tx = filled.tx.frame_transaction().expect("filled transaction should be a frame");
 
         assert_eq!(frame_tx.sender, address);
-        assert_eq!(frame_tx.nonce, nonce);
+        assert_eq!(frame_tx.nonce_seq, nonce);
         assert_eq!(frame_tx.chain_id, 1);
         assert_eq!(frame_tx.frames[0].limits, limits);
         assert!(frame_tx.signatures.is_empty());
@@ -484,7 +484,7 @@ mod tests {
         let frame_tx = filled.tx.frame_transaction().expect("filled transaction should be a frame");
 
         assert_eq!(frame_tx.sender, address);
-        assert_eq!(frame_tx.nonce, nonce);
+        assert_eq!(frame_tx.nonce_seq, nonce);
         assert_eq!(frame_tx.chain_id, 1);
         assert_eq!(frame_tx.frames[0].limits, limits);
         assert_eq!(frame_tx.signatures.len(), 1);
