@@ -71,7 +71,7 @@
 //!   activation)
 //! - **Size**: Input data ≤ 128KB (default)
 //! - **Gas**: Limit ≤ block gas limit
-//! - **Fees**: Priority fee ≤ max fee; local tx fee cap; external minimum priority fee
+//! - **Fees**: Priority fee ≤ max fee; local tx fee cap; minimum priority fee
 //! - **Chain ID**: Must match current chain
 //! - **Intrinsic Gas**: Sufficient for data and access lists
 //! - **Blobs** (EIP-4844): Valid count, KZG proofs
@@ -305,9 +305,9 @@ pub use crate::{
 use crate::{identifier::TransactionId, pool::PoolInner};
 use alloy_eips::{
     eip4844::{BlobAndProofV1, BlobAndProofV2, BlobCellsAndProofsV1},
-    eip7594::BlobTransactionSidecarVariant,
+    eip7594::{BlobCellMask, BlobTransactionSidecarVariant},
 };
-use alloy_primitives::{map::AddressSet, Address, Bytes, TxHash, B128, B256, U256};
+use alloy_primitives::{map::AddressSet, Address, Bytes, TxHash, B256, U256};
 use aquamarine as _;
 use reth_chainspec::{ChainSpecProvider, EthereumHardforks};
 use reth_eth_wire_types::HandleMempoolData;
@@ -619,10 +619,9 @@ where
             }
 
             let encoded = pool_tx.encoded_2718_consensus();
-            // The cap bounds the RLP encoding of the whole list, so account for each item's
-            // header and the list header rather than the raw transaction bytes.
-            let new_size = total_size + alloy_rlp::Encodable::length(&encoded);
-            if new_size + alloy_rlp::length_of_length(new_size) > max_size {
+            // Only transaction bytes count toward the cap, without additional list framing.
+            let new_size = total_size + encoded.len();
+            if new_size > max_size {
                 break
             }
 
@@ -666,6 +665,13 @@ where
 
     fn all_transactions(&self) -> AllPoolTransactions<Self::Transaction> {
         self.pool.all_transactions()
+    }
+
+    fn all_transactions_by_sender(
+        &self,
+        sender: Address,
+    ) -> AllPoolTransactions<Self::Transaction> {
+        self.pool.all_transactions_by_sender(sender)
     }
 
     fn all_transaction_hashes(&self) -> Vec<TxHash> {
@@ -844,9 +850,9 @@ where
     fn get_blobs_for_versioned_hashes_v4(
         &self,
         versioned_hashes: &[B256],
-        indices_bitarray: B128,
+        cell_mask: BlobCellMask,
     ) -> Result<Vec<Option<BlobCellsAndProofsV1>>, BlobStoreError> {
-        self.pool.blob_store().get_by_versioned_hashes_v4(versioned_hashes, indices_bitarray)
+        self.pool.blob_store().get_by_versioned_hashes_v4(versioned_hashes, cell_mask)
     }
 
     fn has_blobs_for_versioned_hashes(

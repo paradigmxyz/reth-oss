@@ -531,6 +531,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::needless_update)]
     fn test_state_root_branch_nodes_iter_basic() {
         // Simple test with a few accounts and storage
         let mut accounts = BTreeMap::new();
@@ -544,6 +545,7 @@ mod tests {
                 nonce: 1,
                 balance: U256::from(1000),
                 bytecode_hash: Some(keccak256(b"code1")),
+                ..Default::default()
             },
         );
 
@@ -599,6 +601,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::needless_update)]
     fn test_state_root_branch_nodes_iter_multiple_accounts() {
         // Test with multiple accounts to verify ordering
         let mut accounts = BTreeMap::new();
@@ -613,6 +616,7 @@ mod tests {
                     nonce: i as u64,
                     balance: U256::from(i as u64 * 1000),
                     bytecode_hash: (i == 2).then(|| keccak256([i])),
+                    ..Default::default()
                 },
             );
 
@@ -959,9 +963,11 @@ mod tests {
     fn test_single_verifier_complex_depth_first() {
         // Test a complex tree structure with depth-first ordering
         // Build a tree structure with proper parent-child relationships
-        let node_root = test_branch_node(0b0110, 0, 0b0110, vec![]); // root: children at nibbles 1 and 2
+        let node_root = test_branch_node(0b0110, 0, 0b0110, vec![]); // root: children at nibbles 1
+                                                                     // and 2
         let node1 = test_branch_node(0b0110, 0, 0b0110, vec![]); // 0x1: children at nibbles 1 and 2
-        let node11 = test_branch_node(0b0110, 0, 0b0110, vec![]); // 0x11: children at nibbles 1 and 2
+        let node11 = test_branch_node(0b0110, 0, 0b0110, vec![]); // 0x11: children at nibbles 1 and
+                                                                  // 2
         let node111 = test_branch_node(0b0001, 0, 0b0001, vec![]); // 0x111: leaf
         let node112 = test_branch_node(0b0010, 0, 0b0010, vec![]); // 0x112: leaf
         let node12 = test_branch_node(0b0100, 0, 0b0100, vec![]); // 0x12: leaf

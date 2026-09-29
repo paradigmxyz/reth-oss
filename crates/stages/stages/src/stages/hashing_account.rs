@@ -219,7 +219,7 @@ where
                 if index > 0 && index.is_multiple_of(interval) {
                     info!(
                         target: "sync::stages::hashing_account",
-                        progress = %format!("{:.2}%", (index as f64 / total_hashes as f64) * 100.0),
+                        progress = %format_args!("{:.2}%", (index as f64 / total_hashes as f64) * 100.0),
                         "Inserting hashes"
                     );
                 }
@@ -463,7 +463,7 @@ mod tests {
                         let old_acc = Account {
                             nonce: nonce - 1,
                             balance: balance - U256::from(1),
-                            bytecode_hash: None,
+                            ..Default::default()
                         };
                         let hashed_addr = keccak256(address);
                         if let Some((_, acc)) = hashed_acc_cursor.seek_exact(hashed_addr)? {

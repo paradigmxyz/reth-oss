@@ -2,12 +2,15 @@
 
 use alloy_consensus::EMPTY_ROOT_HASH;
 use alloy_primitives::{address, b256, keccak256, Address, Bytes, B256, U256};
-use alloy_rlp::EMPTY_STRING_CODE;
+use alloy_rlp::{Decodable, EMPTY_STRING_CODE};
 use reth_chainspec::{Chain, ChainSpec, HOLESKY, MAINNET};
 use reth_primitives_traits::Account;
 use reth_provider::test_utils::{create_test_provider_factory, insert_genesis};
 use reth_storage_api::StorageSettingsCache;
-use reth_trie::{proof::Proof, AccountProof, Nibbles, StorageProof};
+use reth_trie::{
+    proof::Proof, AccountProof, MultiProofTargetsV2, Nibbles, ProofV2Target, StorageProof,
+    TrieInput, TrieNode,
+};
 use reth_trie_db::{DatabaseHashedCursorFactory, DatabaseProof, DatabaseTrieCursorFactory};
 use std::{
     str::FromStr,
@@ -135,6 +138,47 @@ fn testspec_empty_storage_proof() {
 }
 
 #[test]
+fn multiproof_v2_includes_branch_after_terminal_extension() {
+    let factory = create_test_provider_factory();
+    let root = insert_genesis(&factory, TEST_SPEC.clone()).unwrap();
+    let target = Address::ZERO;
+    let provider = factory.provider().unwrap();
+
+    reth_trie_db::with_adapter!(provider, |A| {
+        let proof = <DbProof<'_, _, A> as DatabaseProof>::from_tx(provider.tx_ref());
+        let legacy = proof.account_proof(target, &[]).unwrap();
+        assert_eq!(legacy.proof.len(), 1);
+        assert!(matches!(
+            TrieNode::decode(&mut &legacy.proof[0][..]).unwrap(),
+            TrieNode::Extension(_)
+        ));
+
+        let proof = <DbProof<'_, _, A> as DatabaseProof>::from_tx(provider.tx_ref());
+        let multiproof = proof
+            .overlay_multiproof_v2(
+                TrieInput::default(),
+                MultiProofTargetsV2 {
+                    account_targets: vec![ProofV2Target::new(keccak256(target))],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let account_proof = multiproof.account_proof(target, &[]).unwrap();
+
+        assert_eq!(account_proof.proof.len(), 2);
+        assert!(matches!(
+            TrieNode::decode(&mut &account_proof.proof[0][..]).unwrap(),
+            TrieNode::Extension(_)
+        ));
+        assert!(matches!(
+            TrieNode::decode(&mut &account_proof.proof[1][..]).unwrap(),
+            TrieNode::Branch(_)
+        ));
+        assert_eq!(account_proof.verify(root), Ok(()));
+    });
+}
+
+#[test]
 fn empty_state_trie_account_proof() {
     // Empty database => empty account (state) trie, root == EMPTY_ROOT_HASH.
     // The account proof generation has no `empty()` sentinel of its own, yet the hash builder
@@ -242,9 +286,8 @@ fn holesky_deposit_contract_proof() {
     let expected = AccountProof {
         address: target,
         info: Some(Account {
-            balance: U256::ZERO,
-            nonce: 0,
-            bytecode_hash: Some(b256!("0x2034f79e0e33b0ae6bef948532021baceb116adf2616478703bec6b17329f1cc"))
+            bytecode_hash: Some(b256!("0x2034f79e0e33b0ae6bef948532021baceb116adf2616478703bec6b17329f1cc")),
+            ..Default::default()
         }),
         storage_root: b256!("0x556a482068355939c95a3412bdb21213a301483edb1b64402fb66ac9f3583599"),
         proof: convert_to_proof([
