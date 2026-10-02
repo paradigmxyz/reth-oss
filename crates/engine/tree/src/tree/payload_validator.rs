@@ -613,6 +613,20 @@ where
 
         let parallel_bal_execution = ensure_ok!(self.bal_path_eligible(env.decoded_bal.as_deref()));
 
+        if input.has_block_access_list() {
+            info!(
+                target: "engine::tree::payload_validator",
+                block = ?input.num_hash(),
+                %parent_hash,
+                transactions = input.transaction_count(),
+                gas_limit = input.gas_limit(),
+                parallel_bal_execution,
+                received_bal_hash = ?decoded_bal.as_ref().map(|bal| bal.hash()),
+                received_bal_accounts = ?decoded_bal.as_ref().map(|bal| bal.as_bal().as_slice().len()),
+                "Executing block with BAL",
+            );
+        }
+
         // Prepare the state-root job before execution so it can provide streaming hooks.
         let mut state_root_job =
             ensure_ok!(self.state_root_strategy.prepare(StateRootJobContext::new(
@@ -1113,6 +1127,22 @@ where
             alloy: revm_bal.clone().into_alloy_bal(),
             revm: Arc::new(revm_bal),
         });
+        if tracing::enabled!(target: "engine::tree::payload_validator", Level::INFO) &&
+            let Some(received_bal) = env.decoded_bal.as_deref() &&
+            let Some(built_bal) = &built_bal &&
+            received_bal.as_bal().as_slice() != built_bal.alloy.as_slice()
+        {
+            let divergence = received_bal.as_bal().diff(built_bal.alloy.as_slice());
+            info!(
+                target: "engine::tree::payload_validator",
+                block = ?input.num_hash(),
+                %divergence,
+                "Serial execution BAL differs from received BAL",
+            );
+            for account in received_bal.as_bal().as_slice() {
+                info!(target: "engine::tree::payload_validator", block = ?input.num_hash(), ?account, "Received BAL account");
+            }
+        }
         let output = BlockExecutionOutput { result, state: db.take_bundle() };
 
         let execution_duration = execution_start.elapsed();
@@ -1368,6 +1398,22 @@ where
         let block_access_list_hash =
             built_bal.as_ref().map(|bal| bal.compute_hash_with_buf(&mut self.bal_hash_buf));
 
+        if block.header().block_access_list_hash().is_some() || built_bal.is_some() {
+            info!(
+                target: "engine::tree::payload_validator",
+                block = ?block.num_hash(),
+                parent_hash = %block.parent_hash(),
+                timestamp = block.timestamp(),
+                gas_limit = block.gas_limit(),
+                header_gas_used = block.gas_used(),
+                executed_gas_used = output.result.gas_used,
+                expected_bal_hash = ?block.header().block_access_list_hash(),
+                rebuilt_bal_hash = ?block_access_list_hash,
+                rebuilt_bal_accounts = ?built_bal.as_ref().map(|bal| bal.as_slice().len()),
+                "Validating execution BAL",
+            );
+        }
+
         let validation_result = built_bal
             .as_ref()
             .map(|bal| bal.validate_gas_limit(block.gas_limit()).map_err(ConsensusError::from))
@@ -1382,6 +1428,12 @@ where
             });
 
         if let Err(err) = validation_result {
+            info!(target: "engine::tree::payload_validator", block = ?block.num_hash(), %err, "Post-execution validation failed");
+            if let Some(bal) = &built_bal {
+                for account in bal.as_slice() {
+                    info!(target: "engine::tree::payload_validator", block = ?block.num_hash(), ?account, "Rebuilt BAL account after validation failure");
+                }
+            }
             // call post-block hook
             self.on_invalid_block(parent_block, block, output, None, ctx.state_mut());
             return Err(err.into())
