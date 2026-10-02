@@ -488,5 +488,5 @@ jobs:
         uses: rtCamp/action-slack-notify@33ca3be66c6f378fe1610fd1d5258632dbed5e58 # v2.4.0
         env:
           SLACK_COLOR: ${{ job.status }}
-          SLACK_MESSAGE: "Failed run: https://github.com/paradigmxyz/reth/actions/runs/${{ github.run_id }}"
+          SLACK_MESSAGE: "Failed run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           SLACK_WEBHOOK: ${{ secrets.SLACK_HIVE_WEBHOOK_URL }}
