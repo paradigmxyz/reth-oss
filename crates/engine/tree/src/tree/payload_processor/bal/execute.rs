@@ -254,19 +254,25 @@ where
     DB: Database,
 {
     let built_bal = canonical_state.take_built_alloy_bal().expect("with_bal_builder set");
-    if tracing::enabled!(target: "engine::tree::payload_processor::bal", tracing::Level::DEBUG) &&
+    if tracing::enabled!(target: "engine::tree::payload_processor::bal", tracing::Level::INFO) &&
         built_bal.as_slice() != received_bal.as_slice()
     {
         let rebuilt = compute_block_access_list_hash(built_bal.as_slice());
         let expected = compute_block_access_list_hash(received_bal.as_slice());
         let div = received_bal.diff(built_bal.as_slice());
-        tracing::debug!(
+        tracing::info!(
             target: "engine::tree::payload_processor::bal",
             %rebuilt,
             %expected,
             %div,
-            "first BAL divergence",
+            "Parallel execution BAL differs from received BAL",
         );
+        for account in received_bal.as_slice() {
+            tracing::info!(target: "engine::tree::payload_processor::bal", %expected, ?account, "Received BAL account");
+        }
+        for account in built_bal.as_slice() {
+            tracing::info!(target: "engine::tree::payload_processor::bal", %rebuilt, ?account, "Rebuilt BAL account");
+        }
     }
 
     built_bal

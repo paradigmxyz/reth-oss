@@ -350,6 +350,20 @@ where
 
             cumulative_gas += block.header().gas_used();
 
+            if block.header().block_access_list_hash().is_some() {
+                info!(
+                    target: "sync::stages::execution",
+                    number = block_number,
+                    hash = %block.hash(),
+                    parent_hash = %block.parent_hash(),
+                    timestamp = block.header().timestamp(),
+                    transactions = block.body().transactions().len(),
+                    gas_limit = block.header().gas_limit(),
+                    expected_bal_hash = ?block.header().block_access_list_hash(),
+                    "Executing stage block with BAL",
+                );
+            }
+
             // Configure the executor to use the current state.
             trace!(target: "sync::stages::execution", number = block_number, txs = block.body().transactions().len(), "Executing block");
 
@@ -364,19 +378,40 @@ where
             })?;
 
             let built_bal = executor.take_bal().map(Bal::from);
+            let bal_hash = built_bal.as_ref().map(|bal| bal.compute_hash_with_buf(&mut bal_buf));
+            if block.header().block_access_list_hash().is_some() || built_bal.is_some() {
+                info!(
+                    target: "sync::stages::execution",
+                    number = block_number,
+                    hash = %block.hash(),
+                    header_gas_used = block.header().gas_used(),
+                    executed_gas_used = result.gas_used,
+                    expected_bal_hash = ?block.header().block_access_list_hash(),
+                    rebuilt_bal_hash = ?bal_hash,
+                    rebuilt_bal_accounts = ?built_bal.as_ref().map(|bal| bal.as_slice().len()),
+                    "Validating stage execution BAL",
+                );
+            }
+            if block.header().block_access_list_hash() != bal_hash &&
+                let Some(bal) = &built_bal
+            {
+                for account in bal.as_slice() {
+                    info!(target: "sync::stages::execution", number = block_number, hash = %block.hash(), ?account, "Rebuilt BAL account after hash mismatch");
+                }
+            }
             if let Some(bal) = &built_bal &&
                 let Err(err) = bal.validate_gas_limit(block.header().gas_limit())
             {
+                info!(target: "sync::stages::execution", number = block_number, hash = %block.hash(), %err, "Stage BAL gas limit validation failed");
                 return Err(StageError::Block {
                     block: Box::new(block.block_with_parent()),
                     error: BlockErrorKind::Validation(err.into()),
                 })
             }
-            let bal_hash = built_bal.as_ref().map(|bal| bal.compute_hash_with_buf(&mut bal_buf));
-
             if let Err(err) =
                 self.consensus.validate_block_post_execution(&block, &result, None, bal_hash)
             {
+                info!(target: "sync::stages::execution", number = block_number, hash = %block.hash(), %err, "Stage post-execution validation failed");
                 return Err(StageError::Block {
                     block: Box::new(block.block_with_parent()),
                     error: BlockErrorKind::Validation(err),
