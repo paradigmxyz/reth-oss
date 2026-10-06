@@ -22,11 +22,11 @@ use alloy_rpc_types_engine::{
         ForkchoiceUpdateAmsterdam, ForkchoiceUpdateCancun, ForkchoiceUpdateOsaka,
         ForkchoiceUpdateParis, ForkchoiceUpdatePrague, ForkchoiceUpdateResponse,
         ForkchoiceUpdateShanghai, Optional, PayloadStatus as EngineSszPayloadStatus,
-        PayloadStatusKind, MAX_BLOBS_REQUEST, MAX_BODIES_REQUEST,
+        PayloadStatusKind, MAX_BLOBS_REQUEST, MAX_BODIES_REQUEST, MAX_ERROR_BYTES,
     },
     CancunPayloadFields, ExecutionData, ExecutionPayload, ExecutionPayloadBodyV1,
-    ExecutionPayloadFieldV2, ExecutionPayloadSidecar, ForkchoiceState, PayloadAttributes,
-    PayloadId, PraguePayloadFields,
+    ExecutionPayloadEnvelopeV2, ExecutionPayloadFieldV2, ExecutionPayloadSidecar, ForkchoiceState,
+    PayloadAttributes, PayloadId, PayloadStatus, PayloadStatusEnum, PraguePayloadFields,
 };
 use futures::future::{BoxFuture, Either};
 use http_body_util::{BodyExt, LengthLimitError, Limited};
@@ -210,7 +210,7 @@ where
     }
 
     fn call(&mut self, request: HttpRequest) -> Self::Future {
-        if !request.uri().path().starts_with("/engine/") {
+        if request.uri().path() != "/engine" && !request.uri().path().starts_with("/engine/") {
             return Either::Left(self.inner.call(request))
         }
 
@@ -449,14 +449,7 @@ where
                 Err(err) => engine_error_response(err),
             },
             EngineSszFork::Shanghai => match self.get_payload_v2_metered(payload_id).await {
-                Ok(payload) => match BuiltPayloadShanghai::try_from(payload) {
-                    Ok(payload) => get_payload_response(payload),
-                    Err(err) => problem_response(
-                        STATUS_UNPROCESSABLE_ENTITY,
-                        "invalid-body",
-                        Some(err.to_string()),
-                    ),
-                },
+                Ok(payload) => shanghai_payload_response(payload),
                 Err(err) => engine_error_response(err),
             },
             EngineSszFork::Cancun => self
@@ -502,14 +495,17 @@ where
         };
 
         match response {
-            Ok(updated) => match ForkchoiceUpdateResponse::try_from(updated) {
-                Ok(updated) => ssz_response(updated),
-                Err(err) => problem_response(
-                    STATUS_INTERNAL_SERVER_ERROR,
-                    "internal",
-                    Some(err.to_string()),
-                ),
-            },
+            Ok(mut updated) => {
+                bound_validation_error(&mut updated.payload_status);
+                match ForkchoiceUpdateResponse::try_from(updated) {
+                    Ok(updated) => ssz_response(updated),
+                    Err(err) => problem_response(
+                        STATUS_INTERNAL_SERVER_ERROR,
+                        "internal",
+                        Some(err.to_string()),
+                    ),
+                }
+            }
             Err(err) => engine_error_response(err),
         }
     }
@@ -586,8 +582,38 @@ where
         return problem_response(STATUS_NOT_FOUND, "method-not-found", None)
     };
 
+    let no_store = matches!(&endpoint, EngineSszEndpoint::GetPayload(_));
+    let mut response = dispatch_engine_ssz_request(handle, request, endpoint).await;
+    if no_store {
+        response
+            .headers_mut()
+            .insert(CACHE_CONTROL, "no-store".parse().expect("valid cache control"));
+    }
+    response
+}
+
+async fn dispatch_engine_ssz_request<Api>(
+    handle: EngineSszProxyHandle<Api>,
+    request: HttpRequest,
+    endpoint: EngineSszEndpoint,
+) -> HttpResponse
+where
+    Api: EngineSszApi,
+{
     if request.method() != endpoint.method() {
-        return problem_response(STATUS_METHOD_NOT_ALLOWED, "method-not-allowed", None)
+        let mut response = problem_response(STATUS_METHOD_NOT_ALLOWED, "method-not-allowed", None);
+        response.headers_mut().insert("allow", endpoint.method().parse().expect("valid method"));
+        return response
+    }
+
+    let expected_content_type = match endpoint {
+        EngineSszEndpoint::Capabilities | EngineSszEndpoint::Identity => APPLICATION_JSON,
+        _ => OCTET_STREAM,
+    };
+    if let Some(content_type) = request.headers().get(CONTENT_TYPE) &&
+        content_type != expected_content_type
+    {
+        return problem_response(STATUS_UNSUPPORTED_MEDIA_TYPE, "unsupported-media-type", None)
     }
 
     match endpoint {
@@ -812,7 +838,7 @@ where
     Validator: EngineApiValidator<EthEngineTypes>,
     ChainSpec: EthereumHardforks + Send + Sync + 'static,
 {
-    let status = match fork.payloads_version() {
+    let mut status = match fork.payloads_version() {
         1 => engine_api.new_payload_v1(payload).await,
         2 => engine_api.new_payload_v2(payload).await,
         3 => engine_api.new_payload_v3(payload).await,
@@ -821,13 +847,17 @@ where
         _ => return Err(problem_response(STATUS_BAD_REQUEST, "unsupported-fork", None)),
     }
     .map_err(engine_error_response)?;
+    bound_validation_error(&mut status);
     EngineSszPayloadStatus::try_from(status).map_err(|error| {
         problem_response(STATUS_INTERNAL_SERVER_ERROR, "internal", Some(error.to_string()))
     })
 }
 
 fn engine_error_response(err: EngineApiError) -> HttpResponse {
-    let detail = err.to_string();
+    let detail = match &err {
+        EngineApiError::Other(error) => error.message().to_owned(),
+        _ => err.to_string(),
+    };
     let error: jsonrpsee::types::ErrorObjectOwned = err.into();
     let (status, problem_type) = match error.code() {
         -32700 => (STATUS_BAD_REQUEST, "parse-error"),
@@ -1245,11 +1275,35 @@ fn problem_response(
         None => serde_json::json!({ "type": problem_type }),
     };
 
-    HttpResponse::builder()
+    let mut response = HttpResponse::builder()
         .status(status)
         .header(CONTENT_TYPE, PROBLEM_JSON)
         .body(HttpBody::from(body.to_string()))
-        .expect("valid response")
+        .expect("valid response");
+    if status == STATUS_SERVICE_UNAVAILABLE {
+        response.headers_mut().insert("retry-after", "1".parse().expect("valid retry delay"));
+    }
+    response
+}
+
+/// Keep validation outcomes in HTTP 200 even when their explanatory text exceeds the wire bound.
+fn bound_validation_error(status: &mut PayloadStatus) {
+    if let PayloadStatusEnum::Invalid { validation_error } = &mut status.status &&
+        validation_error.len() > MAX_ERROR_BYTES
+    {
+        let mut end = MAX_ERROR_BYTES;
+        while !validation_error.is_char_boundary(end) {
+            end -= 1;
+        }
+        validation_error.truncate(end);
+    }
+}
+
+fn shanghai_payload_response(payload: ExecutionPayloadEnvelopeV2) -> HttpResponse {
+    match BuiltPayloadShanghai::try_from(payload) {
+        Ok(payload) => get_payload_response(payload),
+        Err(err) => problem_response(STATUS_BAD_REQUEST, "unsupported-fork", Some(err.to_string())),
+    }
 }
 
 #[cfg(test)]
@@ -1259,6 +1313,7 @@ mod tests {
         PayloadAttributesAmsterdam, PayloadAttributesCancun, PayloadAttributesParis,
         PayloadAttributesShanghai,
     };
+    use reth_node_builder::rpc::NoopEngineApi;
     use ssz::Encode;
 
     #[tokio::test]
@@ -1749,5 +1804,235 @@ mod tests {
         assert!(decoded_attrs.withdrawals.as_ref().unwrap().is_empty());
         assert_eq!(decoded_attrs.parent_beacon_block_root, Some(B256::with_last_byte(3)));
         assert!(custody_columns.is_none());
+    }
+
+    #[tokio::test]
+    async fn all_spec_error_codes_use_problem_details() {
+        for (code, status, kind) in [
+            (-32700, 400, "parse-error"),
+            (-32600, 400, "invalid-request"),
+            (-32601, 404, "method-not-found"),
+            (-32602, 422, "invalid-body"),
+            (-38001, 404, "unknown-payload"),
+            (-38002, 409, "invalid-forkchoice"),
+            (-38003, 422, "invalid-attributes"),
+            (-38004, 413, "request-too-large"),
+            (-38005, 400, "unsupported-fork"),
+            (-38006, 409, "reorg-too-deep"),
+            (-32603, 500, "internal"),
+            (-32000, 500, "internal"),
+            (-32099, 500, "internal"),
+        ] {
+            let error = EngineApiError::Other(jsonrpsee::types::ErrorObjectOwned::owned(
+                code,
+                "engine failure",
+                None::<()>,
+            ));
+            let detail = "engine failure";
+            let response = engine_error_response(error);
+            assert_eq!(response.status(), status, "code {code}");
+            assert_eq!(response.headers()[CONTENT_TYPE], PROBLEM_JSON);
+            let bytes = response.into_body().collect().await.unwrap().to_bytes();
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&bytes).unwrap(),
+                serde_json::json!({"type": format!("/engine-api/errors/{kind}"), "detail": detail}),
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn every_endpoint_rejects_incorrect_media_types() {
+        for (method, path, content_type) in [
+            ("GET", "/engine/v1/capabilities", OCTET_STREAM),
+            ("GET", "/engine/v1/identity", OCTET_STREAM),
+            ("GET", "/engine/v1/payloads/0x0000000000000001", APPLICATION_JSON),
+            ("GET", "/engine/v1/bodies?from=1&count=1", APPLICATION_JSON),
+            ("POST", "/engine/v1/payloads", APPLICATION_JSON),
+            ("POST", "/engine/v1/payloads/witness", APPLICATION_JSON),
+            ("POST", "/engine/v1/forkchoice", APPLICATION_JSON),
+            ("POST", "/engine/v1/bodies/hash", APPLICATION_JSON),
+            ("POST", "/engine/v1/blobs/v1", APPLICATION_JSON),
+            ("POST", "/engine/v1/blobs/v2", APPLICATION_JSON),
+            ("POST", "/engine/v1/blobs/v3", APPLICATION_JSON),
+            ("POST", "/engine/v1/blobs/v4", APPLICATION_JSON),
+        ] {
+            let request = HttpRequest::builder()
+                .method(method)
+                .uri(path)
+                .header(CONTENT_TYPE, content_type)
+                .header(ETH_EXECUTION_VERSION, "amsterdam")
+                .body(HttpBody::empty())
+                .unwrap();
+            let response =
+                handle_engine_ssz_request(EngineSszProxyHandle::<NoopEngineApi>::new(), request)
+                    .await;
+            assert_eq!(response.status(), 415, "{method} {path}");
+            assert_eq!(response.headers()[CONTENT_TYPE], PROBLEM_JSON);
+            let bytes = response.into_body().collect().await.unwrap().to_bytes();
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&bytes).unwrap(),
+                serde_json::json!({"type": "/engine-api/errors/unsupported-media-type"}),
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn routing_errors_have_problem_bodies_and_http_headers() {
+        for (method, path, fork, status, kind) in [
+            ("GET", "/engine/v1/unknown", None, 404, "method-not-found"),
+            ("GET", "/engine/v2/capabilities", None, 404, "method-not-found"),
+            ("GET", "/engine/v1/payloads/0x01", Some("paris"), 400, "invalid-request"),
+            ("GET", "/engine/v1/payloads/0x0000000000000001", None, 400, "unsupported-fork"),
+            ("GET", "/engine/v1/bodies?from=1&count=1", Some("future"), 400, "unsupported-fork"),
+            ("POST", "/engine/v1/payloads", None, 400, "unsupported-fork"),
+            ("POST", "/engine/v1/forkchoice", None, 400, "unsupported-fork"),
+            ("POST", "/engine/v1/bodies/hash", None, 400, "unsupported-fork"),
+            ("GET", "/engine/v1/bodies?from=1", Some("paris"), 400, "invalid-request"),
+            ("GET", "/engine/v1/bodies?from=1&count=33", Some("paris"), 413, "request-too-large"),
+            ("POST", "/engine/v1/bodies/hash", Some("paris"), 400, "ssz-decode-error"),
+            ("POST", "/engine/v1/identity", None, 405, "method-not-allowed"),
+            ("GET", "/engine/v1/forkchoice", None, 405, "method-not-allowed"),
+            ("GET", "/engine/v1/capabilities", None, 503, "service-unavailable"),
+            (
+                "GET",
+                "/engine/v1/payloads/0x0000000000000001",
+                Some("paris"),
+                503,
+                "service-unavailable",
+            ),
+            ("GET", "/engine/v1/bodies?from=1&count=1", Some("paris"), 503, "service-unavailable"),
+        ] {
+            let mut request = HttpRequest::builder().method(method).uri(path);
+            if method == "POST" {
+                request = request.header(CONTENT_TYPE, OCTET_STREAM);
+            }
+            if let Some(fork) = fork {
+                request = request.header(ETH_EXECUTION_VERSION, fork);
+            }
+            let response = handle_engine_ssz_request(
+                EngineSszProxyHandle::<NoopEngineApi>::new(),
+                request.body(HttpBody::empty()).unwrap(),
+            )
+            .await;
+            assert_eq!(response.status(), status, "{method} {path}");
+            assert_eq!(response.headers()[CONTENT_TYPE], PROBLEM_JSON);
+            if path.starts_with("/engine/v1/payloads/") {
+                assert_eq!(response.headers()[CACHE_CONTROL], "no-store");
+            }
+            if status == 405 {
+                assert_eq!(
+                    response.headers()["allow"],
+                    if method == "GET" { "POST" } else { "GET" }
+                );
+            }
+            if status == 503 {
+                assert_eq!(response.headers()["retry-after"], "1");
+            }
+            let bytes = response.into_body().collect().await.unwrap().to_bytes();
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&bytes).unwrap(),
+                serde_json::json!({"type": format!("/engine-api/errors/{kind}")}),
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn shanghai_retrieval_rejects_a_paris_payload_as_unsupported_fork() {
+        let payload = ExecutionPayloadEnvelopeV2 {
+            execution_payload: ExecutionPayloadFieldV2::V1(
+                alloy_rpc_types_engine::ExecutionPayloadV1::from_block_unchecked(
+                    B256::ZERO,
+                    &reth_ethereum_primitives::Block::default(),
+                ),
+            ),
+            block_value: Default::default(),
+        };
+        let response = shanghai_payload_response(payload);
+        assert_eq!(response.status(), 400);
+        assert_eq!(response.headers()[CONTENT_TYPE], PROBLEM_JSON);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let problem: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(problem["type"], "/engine-api/errors/unsupported-fork");
+    }
+
+    #[tokio::test]
+    async fn long_validation_errors_preserve_http_success_and_utf8() {
+        for message in
+            ["x".repeat(1024), "x".repeat(1025), format!("{}é", "x".repeat(1023)), "🦀".repeat(300)]
+        {
+            let mut status = PayloadStatus {
+                status: PayloadStatusEnum::Invalid { validation_error: message.clone() },
+                latest_valid_hash: Some(B256::ZERO),
+            };
+            bound_validation_error(&mut status);
+            let response = ssz_response(EngineSszPayloadStatus::try_from(status).unwrap());
+            assert_eq!(response.status(), 200);
+            assert_eq!(response.headers()[CONTENT_TYPE], OCTET_STREAM);
+            let bytes = response.into_body().collect().await.unwrap().to_bytes();
+            let status = EngineSszPayloadStatus::from_ssz_bytes(&bytes).unwrap();
+            assert_eq!(status.status, PayloadStatusKind::Invalid);
+            assert_eq!(status.latest_valid_hash.as_ref(), Some(&B256::ZERO));
+            let legacy: PayloadStatus = status.into();
+            let PayloadStatusEnum::Invalid { validation_error } = legacy.status else {
+                panic!("expected INVALID")
+            };
+            assert!(validation_error.len() <= MAX_ERROR_BYTES);
+            assert!(message.starts_with(&validation_error));
+            assert!(
+                message.len() <= MAX_ERROR_BYTES || validation_error.len() > MAX_ERROR_BYTES - 4
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn payload_lookup_errors_cannot_be_cached() {
+        #[derive(Clone)]
+        struct Api;
+        impl EngineSszApi for Api {
+            async fn get_payload(&self, _: EngineSszFork, _: PayloadId) -> HttpResponse {
+                engine_error_response(EngineApiError::UnknownPayload)
+            }
+        }
+        let response = handle_engine_ssz_request(
+            EngineSszProxyHandle::with_engine_api(Api),
+            HttpRequest::builder()
+                .uri("/engine/v1/payloads/0x0000000000000001")
+                .header(ETH_EXECUTION_VERSION, "paris")
+                .body(HttpBody::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), 404);
+        assert_eq!(response.headers()[CACHE_CONTROL], "no-store");
+        assert_eq!(response.headers()[CONTENT_TYPE], PROBLEM_JSON);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let problem: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(problem["type"], "/engine-api/errors/unknown-payload");
+    }
+
+    #[tokio::test]
+    async fn engine_root_is_a_rest_error_and_legacy_root_is_forwarded() {
+        let inner = tower::service_fn(|_: HttpRequest| async {
+            Ok::<_, BoxError>(HttpResponse::new(HttpBody::from("legacy response")))
+        });
+        let (layer, _) = EngineSszProxyLayer::<NoopEngineApi>::new();
+        let mut service = layer.layer(inner);
+        for path in ["/engine", "/engine/", "/engine/v1/unknown"] {
+            let response = service
+                .call(HttpRequest::builder().uri(path).body(HttpBody::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), 404);
+            assert_eq!(response.headers()[CONTENT_TYPE], PROBLEM_JSON);
+            let bytes = response.into_body().collect().await.unwrap().to_bytes();
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&bytes).unwrap(),
+                serde_json::json!({"type": "/engine-api/errors/method-not-found"}),
+            );
+        }
+        let response = service.call(HttpRequest::new(HttpBody::empty())).await.unwrap();
+        assert_eq!(response.status(), 200);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(bytes.as_ref(), b"legacy response");
     }
 }

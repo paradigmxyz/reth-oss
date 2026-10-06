@@ -1,5 +1,5 @@
 use super::AuthValidator;
-use jsonrpsee_http_client::{HttpRequest, HttpResponse};
+use jsonrpsee_http_client::{HttpBody, HttpRequest, HttpResponse};
 use pin_project::pin_project;
 use std::{
     future::Future,
@@ -97,7 +97,28 @@ where
     fn call(&mut self, req: HttpRequest) -> Self::Future {
         match self.validator.validate(req.headers()) {
             Ok(_) => ResponseFuture::future(self.inner.call(req)),
-            Err(res) => ResponseFuture::invalid_auth(res),
+            Err(mut res) => {
+                // Authentication runs outside the SSZ proxy, so format REST errors here.
+                if (req.uri().path() == "/engine" || req.uri().path().starts_with("/engine/")) &&
+                    res.status() == http::StatusCode::UNAUTHORIZED
+                {
+                    res.headers_mut().insert(
+                        http::header::CONTENT_TYPE,
+                        http::HeaderValue::from_static("application/problem+json"),
+                    );
+                    res.headers_mut().remove(http::header::CONTENT_LENGTH);
+                    res.headers_mut()
+                        .entry(http::header::WWW_AUTHENTICATE)
+                        .or_insert(http::HeaderValue::from_static("Bearer"));
+                    res.headers_mut().insert(
+                        http::header::CACHE_CONTROL,
+                        http::HeaderValue::from_static("no-store"),
+                    );
+                    *res.body_mut() =
+                        HttpBody::from(r#"{"type":"/engine-api/errors/unauthorized"}"#);
+                }
+                ResponseFuture::invalid_auth(res)
+            }
         }
     }
 }
@@ -154,6 +175,7 @@ mod tests {
     use super::*;
     use crate::JwtAuthValidator;
     use alloy_rpc_types_engine::{Claims, JwtError, JwtSecret};
+    use http_body_util::BodyExt;
     use jsonrpsee::{
         server::{RandomStringIdProvider, ServerBuilder, ServerConfig, ServerHandle},
         RpcModule,
@@ -277,5 +299,61 @@ mod tests {
 
     fn to_u64(time: SystemTime) -> u64 {
         time.duration_since(UNIX_EPOCH).unwrap().as_secs()
+    }
+
+    #[tokio::test]
+    async fn rest_auth_errors_use_problem_json_and_legacy_errors_stay_plain_text() {
+        let secret = JwtSecret::from_hex(SECRET).unwrap();
+        let bad_signature = JwtSecret::random()
+            .encode(&Claims { iat: to_u64(SystemTime::now()), exp: None })
+            .unwrap();
+        let stale_token = secret.encode(&Claims { iat: 0, exp: None }).unwrap();
+        let validator = JwtAuthValidator::new(secret);
+        for token in [None, Some("invalid".to_string()), Some(bad_signature), Some(stale_token)] {
+            for path in [
+                "/",
+                "/engine",
+                "/engine/v1/capabilities",
+                "/engine/v1/forkchoice",
+                "/engine/v1/payloads/0x0000000000000001",
+            ] {
+                let mut request = HttpRequest::builder().uri(path);
+                if let Some(token) = &token {
+                    request = request.header(header::AUTHORIZATION, format!("Bearer {token}"));
+                }
+                let request = request.body(HttpBody::empty()).unwrap();
+                let expected = validator
+                    .validate(request.headers())
+                    .unwrap_err()
+                    .into_body()
+                    .collect()
+                    .await
+                    .unwrap()
+                    .to_bytes();
+                let inner = tower::service_fn(|_: HttpRequest| async {
+                    Err::<HttpResponse, _>(std::io::Error::other(
+                        "unauthorized requests must not reach the inner service",
+                    ))
+                });
+                let mut service = AuthLayer::new(validator.clone()).layer(inner);
+                let response = service.call(request).await.unwrap();
+                assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+                if path != "/" {
+                    assert_eq!(
+                        response.headers()[header::CONTENT_TYPE],
+                        "application/problem+json"
+                    );
+                    assert!(!response.headers().contains_key(header::CONTENT_LENGTH));
+                    assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+                    assert_eq!(response.headers()[header::WWW_AUTHENTICATE], "Bearer");
+                }
+                let bytes = response.into_body().collect().await.unwrap().to_bytes();
+                if path != "/" {
+                    assert_eq!(bytes.as_ref(), br#"{"type":"/engine-api/errors/unauthorized"}"#);
+                } else {
+                    assert_eq!(bytes, expected);
+                }
+            }
+        }
     }
 }
