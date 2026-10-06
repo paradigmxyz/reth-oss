@@ -69,6 +69,8 @@ serde_json.workspace = true
 tower.workspace = true
 
 [dev-dependencies]
+reth-network-api.workspace = true
+reth-payload-builder = { workspace = true, features = ["test-utils"] }
 reth-db.workspace = true
 reth-exex.workspace = true
 reth-e2e-test-utils.workspace = true
@@ -128,6 +130,7 @@ js-tracer = [
 ]
 test-utils = [
     "reth-node-builder/test-utils",
+    "reth-payload-builder/test-utils",
     "reth-chainspec/test-utils",
     "reth-network/test-utils",
     "reth-ethereum-primitives/test-utils",

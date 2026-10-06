@@ -497,9 +497,17 @@ where
             1 => self.fork_choice_updated_v1_metered(state, attrs).await,
             2 => self.fork_choice_updated_v2_metered(state, attrs).await,
             3 => self.fork_choice_updated_v3_metered(state, attrs).await,
-            4 => self.fork_choice_updated_v4_ssz_metered(state, attrs, custody_columns).await,
+            4 => self.fork_choice_updated_v4_metered(state, attrs, None).await,
             _ => return problem_response(STATUS_BAD_REQUEST, "unsupported-fork", None),
         };
+
+        // REST custody changes follow successful forkchoice processing and any requested build.
+        if let Ok(updated) = &response &&
+            updated.payload_status.is_valid() &&
+            let Some(custody_columns) = custody_columns
+        {
+            self.cell_custody().set_from_engine_api(custody_columns);
+        }
 
         match response {
             Ok(updated) => match ForkchoiceUpdateResponse::try_from(updated) {
@@ -1254,11 +1262,23 @@ fn problem_response(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_rpc_types_engine::ssz_engine_types::{
-        PayloadAttributesAmsterdam, PayloadAttributesCancun, PayloadAttributesParis,
-        PayloadAttributesShanghai,
+    use alloy_rpc_types_engine::{
+        ssz_engine_types::{
+            PayloadAttributesAmsterdam, PayloadAttributesCancun, PayloadAttributesParis,
+            PayloadAttributesShanghai,
+        },
+        ClientCode, ClientVersionV1, PayloadStatus, PayloadStatusEnum,
     };
+    use reth_chainspec::ChainSpecBuilder;
+    use reth_engine_primitives::{BeaconEngineMessage, ConsensusEngineHandle, OnForkChoiceUpdated};
+    use reth_network_api::{noop::NoopNetwork, NetworkInfo};
+    use reth_payload_builder::test_utils::spawn_test_payload_service;
+    use reth_provider::test_utils::MockEthProvider;
+    use reth_rpc_engine_api::capabilities::EngineCapabilities;
+    use reth_tasks::Runtime;
+    use reth_transaction_pool::noop::NoopTransactionPool;
     use ssz::Encode;
+    use tokio::sync::{mpsc::unbounded_channel, oneshot};
 
     #[tokio::test]
     async fn witness_capabilities_follow_both_wiring_orders() {
@@ -1708,5 +1728,148 @@ mod tests {
         assert!(decoded_attrs.withdrawals.as_ref().unwrap().is_empty());
         assert_eq!(decoded_attrs.parent_beacon_block_root, Some(B256::with_last_byte(3)));
         assert!(custody_columns.is_none());
+    }
+
+    #[tokio::test]
+    async fn forkchoice_custody_is_applied_only_after_success() {
+        let chain_spec = Arc::new(ChainSpecBuilder::mainnet().amsterdam_activated().build());
+        let (to_engine, mut engine_rx) = unbounded_channel();
+        let network = NoopNetwork::default();
+        let custody = network.cell_custody().clone();
+        let api = EngineApi::new(
+            Arc::new(MockEthProvider::default()),
+            chain_spec.clone(),
+            ConsensusEngineHandle::new(to_engine),
+            spawn_test_payload_service::<EthEngineTypes>().into(),
+            NoopTransactionPool::default(),
+            Runtime::test(),
+            ClientVersionV1 {
+                code: ClientCode::RH,
+                name: "Reth".into(),
+                version: "test".into(),
+                commit: "test".into(),
+            },
+            EngineCapabilities::default(),
+            crate::EthereumEngineValidator::new(chain_spec),
+            false,
+            network,
+        );
+        let previous = B128::from(0b0101u128);
+        let adopted = B128::from(0b1010u128);
+        for outcome in [
+            "valid",
+            "omitted",
+            "syncing",
+            "invalid",
+            "invalid-state",
+            "invalid-attributes",
+            "too-deep-reorg",
+            "engine-unavailable",
+            "build-failure",
+            "build-success",
+            "malformed",
+            "unsupported-fork",
+        ] {
+            custody.set(previous);
+            let has_attributes =
+                matches!(outcome, "build-failure" | "build-success" | "unsupported-fork");
+            let envelope = ForkchoiceUpdateAmsterdam {
+                forkchoice_state: ForkchoiceState::same_hash(B256::repeat_byte(0x33)),
+                payload_attributes: if has_attributes {
+                    Optional::some(PayloadAttributesAmsterdam {
+                        timestamp: 1,
+                        ..Default::default()
+                    })
+                } else {
+                    Optional::none()
+                },
+                custody_columns: if outcome == "omitted" {
+                    Optional::none()
+                } else {
+                    Optional::some(B128::from(0b1010u128.to_le_bytes()))
+                },
+            };
+            let (fork, body) = match outcome {
+                "malformed" => (EngineSszFork::Amsterdam, Bytes::new()),
+                "unsupported-fork" => (
+                    EngineSszFork::Osaka,
+                    ForkchoiceUpdateOsaka {
+                        forkchoice_state: envelope.forkchoice_state,
+                        payload_attributes: Optional::some(Default::default()),
+                    }
+                    .as_ssz_bytes()
+                    .into(),
+                ),
+                _ => (EngineSszFork::Amsterdam, envelope.as_ssz_bytes().into()),
+            };
+            let api = api.clone();
+            let task = tokio::spawn(async move { api.forkchoice_updated(fork, body).await });
+            if matches!(outcome, "malformed" | "unsupported-fork") {
+                let response = task.await.unwrap();
+                assert_eq!(response.status(), STATUS_BAD_REQUEST, "{outcome}");
+                assert_eq!(custody.get(), previous, "{outcome}");
+                assert!(matches!(
+                    engine_rx.try_recv(),
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+                ));
+                continue
+            }
+            let request = tokio::time::timeout(std::time::Duration::from_secs(1), engine_rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            let response_tx = match request {
+                BeaconEngineMessage::ForkchoiceUpdated { payload_attrs, tx, .. } => {
+                    assert_eq!(payload_attrs.is_some(), has_attributes, "{outcome}");
+                    tx
+                }
+                other => panic!("unexpected engine message: {other:?}"),
+            };
+            assert_eq!(custody.get(), previous, "{outcome} pending forkchoice");
+            if outcome == "engine-unavailable" {
+                drop(response_tx);
+            } else if matches!(outcome, "build-failure" | "build-success") {
+                let (payload_id_tx, payload_id_rx) = oneshot::channel();
+                response_tx
+                    .send(Ok(OnForkChoiceUpdated::updated_with_pending_payload_id(
+                        PayloadStatus::from_status(PayloadStatusEnum::Valid),
+                        payload_id_rx,
+                    )))
+                    .unwrap();
+                assert_eq!(custody.get(), previous, "{outcome} pending build");
+                assert!(!task.is_finished());
+                if outcome == "build-success" {
+                    payload_id_tx.send(Ok(PayloadId::new([1; 8]))).unwrap();
+                } else {
+                    drop(payload_id_tx);
+                }
+            } else {
+                let response = match outcome {
+                    "valid" | "omitted" => OnForkChoiceUpdated::valid(PayloadStatus::from_status(
+                        PayloadStatusEnum::Valid,
+                    )),
+                    "syncing" => OnForkChoiceUpdated::syncing(),
+                    "invalid" => OnForkChoiceUpdated::with_invalid(PayloadStatus::from_status(
+                        PayloadStatusEnum::Invalid { validation_error: "invalid head".into() },
+                    )),
+                    "invalid-state" => OnForkChoiceUpdated::invalid_state(),
+                    "invalid-attributes" => OnForkChoiceUpdated::invalid_payload_attributes(),
+                    "too-deep-reorg" => OnForkChoiceUpdated::too_deep_reorg(),
+                    _ => unreachable!(),
+                };
+                response_tx.send(Ok(response)).unwrap();
+            }
+            let response = task.await.unwrap();
+            let expected_status = match outcome {
+                "invalid-state" | "too-deep-reorg" => STATUS_CONFLICT,
+                "invalid-attributes" | "build-failure" => STATUS_UNPROCESSABLE_ENTITY,
+                "engine-unavailable" => STATUS_INTERNAL_SERVER_ERROR,
+                _ => STATUS_OK,
+            };
+            assert_eq!(response.status(), expected_status, "{outcome}");
+            let expected =
+                if matches!(outcome, "valid" | "build-success") { adopted } else { previous };
+            assert_eq!(custody.get(), expected, "{outcome}");
+        }
     }
 }
