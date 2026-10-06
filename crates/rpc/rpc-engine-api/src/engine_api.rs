@@ -446,6 +446,29 @@ where
         res
     }
 
+    /// Processes an SSZ/REST forkchoice update, applying custody after successful processing.
+    ///
+    /// Unlike JSON-RPC, the REST specification requires failed forkchoice updates to leave
+    /// custody unchanged. Custody is committed only after a VALID result and successful build.
+    /// See <https://github.com/ethereum/execution-apis/blob/main/src/engine/refactor.md#forkchoice-update>.
+    pub async fn fork_choice_updated_v4_ssz_metered(
+        &self,
+        state: ForkchoiceState,
+        payload_attrs: Option<EngineT::PayloadAttributes>,
+        custody_columns: Option<B128>,
+    ) -> EngineApiResult<ForkchoiceUpdated> {
+        let start = Instant::now();
+        let response = self.fork_choice_updated_v4(state, payload_attrs, None).await;
+        if let Ok(updated) = &response &&
+            updated.payload_status.is_valid() &&
+            let Some(custody_columns) = custody_columns
+        {
+            self.inner.cell_custody.set_from_engine_api(custody_columns);
+        }
+        self.inner.metrics.latency.fork_choice_updated_v4.record(start.elapsed());
+        response
+    }
+
     /// Handler for `engine_forkchoiceUpdatedV5`.
     ///
     /// See also <https://github.com/ethereum/execution-apis/blob/main/src/engine/bogota.md#engine_forkchoiceupdatedv5>
@@ -2440,7 +2463,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fcu_v4_updates_shared_cell_custody_before_forkchoice_result() {
+    async fn fcu_ssz_updates_shared_cell_custody_after_forkchoice_result() {
         let chain_spec: Arc<ChainSpec> =
             Arc::new(ChainSpecBuilder::mainnet().amsterdam_activated().build());
         let provider = Arc::new(MockEthProvider::default());
@@ -2448,6 +2471,8 @@ mod tests {
         let (to_engine, mut engine_rx) = unbounded_channel();
         let network = NoopNetwork::default();
         let cell_custody = network.cell_custody().clone();
+        let previous_custody = B128::from(0b0101u128);
+        cell_custody.set(previous_custody);
 
         let api = EngineApi::new(
             provider,
@@ -2477,7 +2502,7 @@ mod tests {
         let expected_custody_columns = B128::from(0b1010u128);
 
         let api_task = tokio::spawn(async move {
-            api.fork_choice_updated_v4(state, None, Some(custody_columns)).await
+            api.fork_choice_updated_v4_ssz_metered(state, None, Some(custody_columns)).await
         });
 
         let request = tokio::time::timeout(std::time::Duration::from_secs(1), engine_rx.recv())
@@ -2491,7 +2516,7 @@ mod tests {
             }
             other => panic!("unexpected engine message: {other:?}"),
         };
-        assert_eq!(cell_custody.get(), expected_custody_columns);
+        assert_eq!(cell_custody.get(), previous_custody);
 
         response_tx
             .send(Ok(OnForkChoiceUpdated::valid(PayloadStatus::from_status(
@@ -2507,7 +2532,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fcu_v4_updates_shared_cell_custody_when_payload_attrs_invalid() {
+    async fn fcu_ssz_preserves_shared_cell_custody_when_payload_attrs_invalid() {
         let chain_spec: Arc<ChainSpec> =
             Arc::new(ChainSpecBuilder::mainnet().amsterdam_activated().build());
         let provider = Arc::new(MockEthProvider::default());
@@ -2515,6 +2540,8 @@ mod tests {
         let (to_engine, mut engine_rx) = unbounded_channel();
         let network = NoopNetwork::default();
         let cell_custody = network.cell_custody().clone();
+        let previous_custody = B128::from(0b0101u128);
+        cell_custody.set(previous_custody);
 
         let api = EngineApi::new(
             provider,
@@ -2550,10 +2577,14 @@ mod tests {
             ..Default::default()
         };
         let custody_columns = B128::from(0b1010u128.to_le_bytes());
-        let expected_custody_columns = B128::from(0b1010u128);
 
         let api_task = tokio::spawn(async move {
-            api.fork_choice_updated_v4(state, Some(payload_attributes), Some(custody_columns)).await
+            api.fork_choice_updated_v4_ssz_metered(
+                state,
+                Some(payload_attributes),
+                Some(custody_columns),
+            )
+            .await
         });
 
         let request = tokio::time::timeout(std::time::Duration::from_secs(1), engine_rx.recv())
@@ -2570,7 +2601,7 @@ mod tests {
             }
             other => panic!("unexpected engine message: {other:?}"),
         };
-        assert_eq!(cell_custody.get(), expected_custody_columns);
+        assert_eq!(cell_custody.get(), previous_custody);
 
         response_tx
             .send(Ok(OnForkChoiceUpdated::valid(PayloadStatus::from_status(
@@ -2579,12 +2610,107 @@ mod tests {
             .expect("send valid response");
 
         let response = api_task.await.expect("api task should not panic");
+        assert_eq!(cell_custody.get(), previous_custody);
         assert_matches!(
             response,
             Err(EngineApiError::EngineObjectValidationError(
                 reth_payload_primitives::EngineObjectValidationError::PayloadAttributes(_)
             ))
         );
+    }
+
+    #[tokio::test]
+    async fn fcu_custody_respects_transport_semantics() {
+        for (transport, version) in [("ssz", 4), ("json-rpc", 4), ("json-rpc", 5)] {
+            for outcome in [
+                "valid",
+                "omitted",
+                "syncing",
+                "invalid",
+                "invalid-state",
+                "invalid-attributes",
+                "too-deep-reorg",
+                "engine-unavailable",
+                "build-failure",
+            ] {
+                let (mut handle, api) = setup_engine_api();
+                let custody = api.inner.cell_custody.clone();
+                let previous = B128::from(0b0101u128);
+                custody.set(previous);
+                let requested =
+                    (outcome != "omitted").then_some(B128::from(0b1010u128.to_le_bytes()));
+                let state = ForkchoiceState {
+                    head_block_hash: B256::repeat_byte(0x33),
+                    ..Default::default()
+                };
+                let task = tokio::spawn(async move {
+                    if transport == "ssz" {
+                        api.fork_choice_updated_v4_ssz_metered(state, None, requested)
+                            .await
+                            .map(|_| ())
+                    } else if version == 4 {
+                        api.fork_choice_updated_v4(state, None, requested).await.map(|_| ())
+                    } else {
+                        api.fork_choice_updated_v5(state, None, requested).await.map(|_| ())
+                    }
+                });
+                let request =
+                    tokio::time::timeout(std::time::Duration::from_secs(1), handle.from_api.recv())
+                        .await
+                        .expect("forkchoice request timeout")
+                        .expect("forkchoice request");
+                let response_tx = match request {
+                    BeaconEngineMessage::ForkchoiceUpdated { tx, .. } => tx,
+                    other => panic!("unexpected engine message: {other:?}"),
+                };
+                let adopted = B128::from(0b1010u128);
+                let pending =
+                    if transport == "json-rpc" && requested.is_some() { adopted } else { previous };
+                assert_eq!(custody.get(), pending, "{transport} v{version} {outcome} pending");
+                if outcome == "engine-unavailable" {
+                    drop(response_tx);
+                } else {
+                    let valid_status = PayloadStatus::from_status(PayloadStatusEnum::Valid);
+                    let response = match outcome {
+                        "valid" | "omitted" => Ok(OnForkChoiceUpdated::valid(valid_status)),
+                        "syncing" => Ok(OnForkChoiceUpdated::syncing()),
+                        "invalid" => Ok(OnForkChoiceUpdated::with_invalid(
+                            PayloadStatus::from_status(PayloadStatusEnum::Invalid {
+                                validation_error: "invalid head".into(),
+                            }),
+                        )),
+                        "invalid-state" => Ok(OnForkChoiceUpdated::invalid_state()),
+                        "invalid-attributes" => {
+                            Ok(OnForkChoiceUpdated::invalid_payload_attributes())
+                        }
+                        "too-deep-reorg" => Ok(OnForkChoiceUpdated::too_deep_reorg()),
+                        "build-failure" => {
+                            let (payload_id_tx, payload_id_rx) = tokio::sync::oneshot::channel();
+                            drop(payload_id_tx);
+                            Ok(OnForkChoiceUpdated::updated_with_pending_payload_id(
+                                valid_status,
+                                payload_id_rx,
+                            ))
+                        }
+                        _ => unreachable!(),
+                    };
+                    response_tx.send(response).expect("send forkchoice response");
+                }
+                let result = task.await.expect("forkchoice task");
+                assert_eq!(
+                    result.is_ok(),
+                    matches!(outcome, "valid" | "omitted" | "syncing" | "invalid"),
+                    "{transport} v{version} {outcome}",
+                );
+                let expected =
+                    if outcome != "omitted" && (transport == "json-rpc" || outcome == "valid") {
+                        adopted
+                    } else {
+                        previous
+                    };
+                assert_eq!(custody.get(), expected, "{transport} v{version} {outcome}");
+            }
+        }
     }
 
     #[tokio::test]

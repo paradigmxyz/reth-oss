@@ -497,7 +497,7 @@ where
             1 => self.fork_choice_updated_v1_metered(state, attrs).await,
             2 => self.fork_choice_updated_v2_metered(state, attrs).await,
             3 => self.fork_choice_updated_v3_metered(state, attrs).await,
-            4 => self.fork_choice_updated_v4_metered(state, attrs, custody_columns).await,
+            4 => self.fork_choice_updated_v4_ssz_metered(state, attrs, custody_columns).await,
             _ => return problem_response(STATUS_BAD_REQUEST, "unsupported-fork", None),
         };
 
