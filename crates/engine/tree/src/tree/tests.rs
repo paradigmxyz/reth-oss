@@ -1246,6 +1246,7 @@ async fn test_holesky_payload() {
                     payload: payload.clone().into(),
                     sidecar: ExecutionPayloadSidecar::none(),
                 },
+                inclusion_list_transactions: None,
                 tx,
             }
             .into(),
