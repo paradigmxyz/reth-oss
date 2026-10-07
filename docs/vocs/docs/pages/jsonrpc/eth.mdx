@@ -5,3 +5,51 @@ description: Standard Ethereum JSON-RPC API methods.
 # `eth` Namespace
 
 Documentation for the API methods in the `eth` namespace can be found on [ethereum.org](https://ethereum.org/en/developers/docs/apis/json-rpc/).
+
+## `eth_getLogsV2` (draft)
+
+An experimental implementation of [Execution APIs PR #900](https://github.com/ethereum/execution-apis/pull/900).
+The proposal has not been finalized; its interface and behavior may change.
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "eth_getLogsV2",
+  "params": [{
+    "fromBlockHash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+    "toBlock": "latest",
+    "address": "0x0000000000000000000000000000000000000001",
+    "topics": []
+  }]
+}
+```
+
+Replace `fromBlockHash` with a known canonical block hash. It is required and inclusive.
+`toBlock` is optional and defaults to the canonical head captured when the query starts.
+Numbers and the `earliest`, `latest`, `safe`, and `finalized` tags are accepted; `pending` is rejected.
+Address and topic matching follow `eth_getLogs`. Other filter fields are rejected.
+
+The result contains `logs`, `cursorBlock`, and `headBlock`. Both block references contain
+`number` (a hexadecimal quantity), `hash`, and `parentHash`. `cursorBlock` identifies the last
+fully scanned block, including blocks without matching logs. `headBlock` identifies the
+captured canonical head, even when the page ends earlier.
+
+Repeat a request with `fromBlockHash` set to `cursorBlock.hash` and keep the numeric upper bound
+fixed if you want to finish a particular range. Stop when `cursorBlock.number` reaches that bound.
+The current proposal makes the anchor inclusive while also describing overlap-free resumption.
+This draft follows the inclusive schema: the boundary block's logs repeat on the next page, so
+consumers must deduplicate them using block hash and log index. A cursor cannot represent a
+position within a block.
+
+Pages obey `--rpc.max-blocks-per-filter` and `--rpc.max-logs-per-response`. If the corresponding
+setting is unlimited, V2 uses defaults of 100,000 blocks and 20,000 logs. Blocks are never split
+between pages. If a block cannot fit, or the budgets cannot advance an inclusive cursor, the
+request fails rather than silently dropping logs or returning a cursor that repeats forever.
+
+An unknown or noncanonical anchor returns `-32001` (`fromBlockHash not on canonical chain`).
+A detected reorg during the scan also returns `-32001`; normal head growth is permitted.
+Clients must re-anchor after a reorg. A page that cannot make progress within its limits returns
+`-32005` (`Scan limit exceeded`). Invalid ranges return `-32602`; unavailable historical receipts
+retain the existing pruned-history error (`4444`). The proposal's error codes and pagination
+semantics remain under discussion.

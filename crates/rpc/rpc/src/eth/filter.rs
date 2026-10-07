@@ -2,7 +2,7 @@
 
 use alloy_consensus::BlockHeader;
 use alloy_eips::BlockNumberOrTag;
-use alloy_primitives::{Sealable, TxHash};
+use alloy_primitives::{Sealable, TxHash, U64};
 use alloy_rpc_types_eth::{
     error::EthRpcErrorCode, Filter, FilterBlockOption, FilterChanges, FilterId,
     PendingTransactionFilterKind,
@@ -24,9 +24,14 @@ use reth_rpc_eth_api::{
 };
 use reth_rpc_eth_types::{
     logs_utils::{self, append_matching_block_logs, ProviderOrBlock},
-    EthApiError, EthFilterConfig, EthStateCache, EthSubscriptionIdProvider,
+    EthApiError, EthFilterConfig, EthStateCache, EthSubscriptionIdProvider, LogsV2BlockRef,
+    LogsV2Filter, LogsV2Result,
 };
-use reth_rpc_server_types::{result::rpc_error_with_code, ToRpcResult};
+use reth_rpc_server_types::{
+    constants::{DEFAULT_MAX_BLOCKS_PER_FILTER, DEFAULT_MAX_LOGS_PER_RESPONSE},
+    result::rpc_error_with_code,
+    ToRpcResult,
+};
 use reth_storage_api::{
     BlockHashReader, BlockIdReader, BlockNumReader, BlockReader, HeaderProvider, ProviderBlock,
     ProviderReceipt, ReceiptProvider,
@@ -438,6 +443,15 @@ where
         trace!(target: "rpc::eth", "Serving eth_getLogs");
         Ok(self.logs_for_filter(filter, self.inner.query_limits).await?)
     }
+
+    /// Handler for the draft `eth_getLogsV2` method.
+    async fn logs_v2(
+        &self,
+        filter: LogsV2Filter,
+    ) -> RpcResult<LogsV2Result<RpcLog<Eth::NetworkTypes>>> {
+        trace!(target: "rpc::eth", "Serving eth_getLogsV2");
+        Ok(self.inner.clone().logs_v2(filter).await?)
+    }
 }
 
 impl<Eth> std::fmt::Debug for EthFilter<Eth>
@@ -827,6 +841,202 @@ where
 
         Ok(all_logs)
     }
+
+    /// Runs a hash-anchored scan on the shared blocking IO budget.
+    async fn logs_v2(
+        self: Arc<Self>,
+        request: LogsV2Filter,
+    ) -> Result<LogsV2Result<RpcLog<Eth::NetworkTypes>>, EthFilterError> {
+        let permit = self
+            .eth_api
+            .acquire_owned_blocking_io()
+            .await
+            .map_err(|_| EthFilterError::InternalError)?;
+        let (mut tx, rx) = oneshot::channel();
+        self.task_spawner.clone().spawn_blocking_task(async move {
+            let _permit = permit;
+            let fut = self.logs_v2_inner(request);
+            tokio::pin!(fut);
+            let result = tokio::select! {
+                biased;
+                _ = tx.closed() => None,
+                result = &mut fut => Some(result),
+            };
+            if let Some(result) = result {
+                let _ = tx.send(result);
+            }
+        });
+        rx.await.map_err(|_| EthFilterError::InternalError)?
+    }
+
+    /// Resolves the anchor and head once, then returns only complete blocks of logs.
+    /// Must run on a blocking task because provider reads are synchronous.
+    async fn logs_v2_inner(
+        self: Arc<Self>,
+        request: LogsV2Filter,
+    ) -> Result<LogsV2Result<RpcLog<Eth::NetworkTypes>>, EthFilterError> {
+        if request.topics.as_ref().is_some_and(|topics| topics.len() > 4) ||
+            request.to_block.is_some_and(|block| block.is_pending())
+        {
+            return Err(EthFilterError::InvalidBlockRangeParams)
+        }
+
+        let info = self.provider().chain_info()?;
+        let head = self
+            .provider()
+            .header_by_hash_or_number(info.best_hash.into())?
+            .ok_or_else(|| ProviderError::HeaderNotFound(info.best_hash.into()))?;
+        let head_block = LogsV2BlockRef {
+            number: U64::from(info.best_number),
+            hash: info.best_hash,
+            parent_hash: head.parent_hash(),
+        };
+        let anchor = self
+            .provider()
+            .header_by_hash_or_number(request.from_block_hash.into())?
+            .ok_or(EthFilterError::LogsV2AnchorNotCanonical)?;
+        let from = anchor.number();
+        if self.provider().block_hash(from)? != Some(request.from_block_hash) {
+            return Err(EthFilterError::LogsV2AnchorNotCanonical)
+        }
+        let anchor_block = LogsV2BlockRef {
+            number: U64::from(from),
+            hash: request.from_block_hash,
+            parent_hash: anchor.parent_hash(),
+        };
+        let to = match request.to_block.unwrap_or(BlockNumberOrTag::Latest) {
+            BlockNumberOrTag::Latest => info.best_number,
+            block => self
+                .provider()
+                .convert_block_number(block)?
+                .ok_or(EthFilterError::InvalidBlockRangeParams)?,
+        };
+        if from > to {
+            return Err(EthFilterError::InvalidBlockRangeParams)
+        }
+        if to > info.best_number {
+            return Err(EthFilterError::BlockRangeExceedsHead {
+                requested: to,
+                head: info.best_number,
+            })
+        }
+        let earliest_available = self.provider().earliest_block_number()?;
+        if from < earliest_available {
+            return Err(EthApiError::PrunedHistoryUnavailable {
+                requested: from,
+                earliest_available,
+            }
+            .into())
+        }
+
+        // V2 remains bounded even when the older getLogs endpoint has unlimited query settings.
+        let max_blocks =
+            self.query_limits.max_blocks_per_filter.unwrap_or(DEFAULT_MAX_BLOCKS_PER_FILTER);
+        let max_logs =
+            self.query_limits.max_logs_per_response.unwrap_or(DEFAULT_MAX_LOGS_PER_RESPONSE);
+        if max_blocks == 0 {
+            return Err(EthFilterError::LogsV2ScanLimitExceeded)
+        }
+        let page_to = from.saturating_add(max_blocks - 1).min(to);
+        let filter = request.into_filter(from, to);
+        let mut result = LogsV2Result { logs: Vec::new(), cursor_block: anchor_block, head_block };
+        let mut expected_number = from;
+        let mut last_hash = anchor_block.parent_hash;
+
+        'scan: for (window_from, window_to) in
+            BlockRangeInclusiveIter::new(from..=page_to, self.max_headers_range)
+        {
+            tokio::task::yield_now().await;
+            let headers = self.provider().headers_range(window_from..=window_to)?;
+            if headers.is_empty() {
+                return Err(ProviderError::HeaderNotFound(expected_number.into()).into())
+            }
+            for header in headers {
+                let number = header.number();
+                if number != expected_number {
+                    return Err(ProviderError::HeaderNotFound(expected_number.into()).into())
+                }
+                if header.parent_hash() != last_hash {
+                    return Err(EthFilterError::LogsV2ChainChanged)
+                }
+                let hash = header.hash_slow();
+                if number == from && hash != anchor_block.hash {
+                    return Err(EthFilterError::LogsV2ChainChanged)
+                }
+                let block_ref = LogsV2BlockRef {
+                    number: U64::from(number),
+                    hash,
+                    parent_hash: header.parent_hash(),
+                };
+                if filter.matches_bloom(header.logs_bloom()) {
+                    // Fetch by the captured header's hash rather than by a moving canonical number.
+                    let sealed_header = SealedHeader::new(header, hash);
+                    let Some((receipts, maybe_block)) =
+                        self.eth_cache().get_receipts_and_maybe_block(hash).await?
+                    else {
+                        return Err(EthFilterError::ReceiptsUnavailable(number))
+                    };
+                    let mut block_logs = Vec::new();
+                    if !receipts.is_empty() {
+                        // Pin transaction hashes to the same block as the receipts. Looking them
+                        // up by canonical transaction number could race with a reorg.
+                        let block = match maybe_block {
+                            Some(block) => block,
+                            None => self
+                                .eth_cache()
+                                .get_recovered_block(hash)
+                                .await?
+                                .ok_or(ProviderError::UnknownBlockHash(hash))?,
+                        };
+                        append_matching_block_logs(
+                            &mut block_logs,
+                            self.eth_api.converter(),
+                            ProviderOrBlock::<Eth::Provider>::Block(block),
+                            &filter,
+                            &sealed_header,
+                            &receipts,
+                            false,
+                        )?;
+                    }
+                    if result.logs.len().saturating_add(block_logs.len()) > max_logs {
+                        if number == from {
+                            return Err(EthFilterError::LogsV2ScanLimitExceeded)
+                        }
+                        break 'scan
+                    }
+                    result.logs.extend(block_logs);
+                }
+                result.cursor_block = block_ref;
+                last_hash = hash;
+                expected_number = number.saturating_add(1);
+            }
+            if result.cursor_block.number.to::<u64>() != window_to {
+                return Err(ProviderError::HeaderNotFound(expected_number.into()).into())
+            }
+        }
+
+        self.ensure_logs_v2_canonical(anchor_block, result.cursor_block, head_block)?;
+        // An inclusive cursor that stays on the anchor would repeat forever on the next page.
+        if result.cursor_block.number.to::<u64>() == from && from < to {
+            return Err(EthFilterError::LogsV2ScanLimitExceeded)
+        }
+        Ok(result)
+    }
+
+    /// Rejects reorgs during a query, while permitting ordinary extensions of the captured head.
+    fn ensure_logs_v2_canonical(
+        &self,
+        anchor: LogsV2BlockRef,
+        cursor: LogsV2BlockRef,
+        head: LogsV2BlockRef,
+    ) -> Result<(), EthFilterError> {
+        for block in [anchor, cursor, head] {
+            if self.provider().block_hash(block.number.to())? != Some(block.hash) {
+                return Err(EthFilterError::LogsV2ChainChanged)
+            }
+        }
+        Ok(())
+    }
 }
 
 /// All active filters
@@ -1046,11 +1256,25 @@ pub enum EthFilterError {
     /// Error thrown when a spawned task failed to deliver a response.
     #[error("internal filter error")]
     InternalError,
+    /// The V2 anchor is unknown or not on the canonical chain.
+    #[error("fromBlockHash not on canonical chain")]
+    LogsV2AnchorNotCanonical,
+    /// A reorg invalidated the captured chain during a V2 scan.
+    #[error("canonical chain changed during eth_getLogsV2 query")]
+    LogsV2ChainChanged,
+    /// A V2 page cannot fit a whole block or advance its inclusive cursor.
+    #[error("Scan limit exceeded")]
+    LogsV2ScanLimitExceeded,
 }
 
 impl From<EthFilterError> for jsonrpsee::types::error::ErrorObject<'static> {
     fn from(err: EthFilterError) -> Self {
         match err {
+            err @ (EthFilterError::LogsV2AnchorNotCanonical |
+            EthFilterError::LogsV2ChainChanged) => rpc_error_with_code(-32001, err.to_string()),
+            err @ EthFilterError::LogsV2ScanLimitExceeded => {
+                rpc_error_with_code(-32005, err.to_string())
+            }
             // geth and Nethermind answer -32000 for unknown filter ids
             EthFilterError::FilterNotFound(_) => rpc_error_with_code(
                 jsonrpsee::types::error::CALL_EXECUTION_FAILED_CODE,
@@ -1440,11 +1664,13 @@ impl<
 mod tests {
     use super::*;
     use crate::{eth::EthApi, EthApiBuilder};
+    use alloy_consensus::TxLegacy;
     use alloy_network::Ethereum;
-    use alloy_primitives::FixedBytes;
+    use alloy_primitives::{Address, Bytes, FixedBytes, Log, LogData, Signature};
     use rand::Rng;
     use reth_chainspec::{ChainSpec, ChainSpecProvider};
-    use reth_ethereum_primitives::TxType;
+    use reth_db_api::models::StoredBlockBodyIndices;
+    use reth_ethereum_primitives::{Block, BlockBody, Receipt, TransactionSigned, TxType};
     use reth_evm_ethereum::EthEvmConfig;
     use reth_network_api::noop::NoopNetwork;
     use reth_provider::test_utils::MockEthProvider;
@@ -1454,6 +1680,7 @@ mod tests {
     use reth_tasks::Runtime;
     use reth_testing_utils::generators;
     use reth_transaction_pool::test_utils::{testing_pool, TestPool};
+    use serde_json::json;
     use std::{collections::VecDeque, sync::Arc};
 
     #[test]
@@ -2342,5 +2569,263 @@ mod tests {
             .await
             .unwrap();
         assert!(logs.is_empty());
+    }
+
+    fn logs_v2_chain(log_counts: &[usize]) -> (MockEthProvider, Vec<FixedBytes<32>>) {
+        let provider = MockEthProvider::default();
+        let mut parent_hash = FixedBytes::ZERO;
+        let mut hashes = Vec::new();
+        let mut tx_number = 0;
+        for (number, &count) in log_counts.iter().enumerate() {
+            let logs = (0..count)
+                .map(|index| Log {
+                    address: Address::with_last_byte(1),
+                    data: LogData::new_unchecked(
+                        vec![FixedBytes::with_last_byte(2)],
+                        Bytes::from(vec![index as u8]),
+                    ),
+                })
+                .collect::<Vec<_>>();
+            let header = alloy_consensus::Header {
+                number: number as u64,
+                parent_hash,
+                logs_bloom: logs.iter().collect(),
+                ..Default::default()
+            };
+            let hash = header.hash_slow();
+            let transactions = if count == 0 {
+                Vec::new()
+            } else {
+                vec![TransactionSigned::new_unhashed(
+                    TxLegacy {
+                        chain_id: Some(1),
+                        nonce: number as u64,
+                        gas_price: 21_000,
+                        gas_limit: 21_000,
+                        ..Default::default()
+                    }
+                    .into(),
+                    Signature::test_signature(),
+                )]
+            };
+            let receipts = if count == 0 {
+                Vec::new()
+            } else {
+                vec![Receipt {
+                    tx_type: TxType::Legacy,
+                    cumulative_gas_used: 21_000,
+                    logs,
+                    success: true,
+                }]
+            };
+            let tx_count = transactions.len() as u64;
+            provider.add_block(
+                hash,
+                Block { header, body: BlockBody { transactions, ..Default::default() } },
+            );
+            provider.add_block_body_indices(
+                number as u64,
+                StoredBlockBodyIndices { first_tx_num: tx_number, tx_count },
+            );
+            provider.add_receipts(number as u64, receipts);
+            tx_number += tx_count;
+            hashes.push(hash);
+            parent_hash = hash;
+        }
+        (provider, hashes)
+    }
+
+    fn logs_v2_request(hash: FixedBytes<32>) -> LogsV2Filter {
+        LogsV2Filter { from_block_hash: hash, to_block: None, address: None, topics: None }
+    }
+
+    #[tokio::test]
+    async fn logs_v2_rpc_is_registered_and_returns_empty_block_progress() {
+        let (provider, hashes) = logs_v2_chain(&[0, 1, 0, 0]);
+        let filter =
+            EthFilter::new(build_test_eth_api(provider), Default::default(), Runtime::test());
+        let module = filter.into_rpc();
+        let request = json!({
+            "jsonrpc": "2.0", "id": 1, "method": "eth_getLogsV2",
+            "params": [{"fromBlockHash": hashes[0]}]
+        });
+        let (response, _) = module.raw_json_request(&request.to_string(), 1).await.unwrap();
+        let response: serde_json::Value = serde_json::from_str(response.get()).unwrap();
+        assert_eq!(response["result"]["cursorBlock"]["number"], "0x3");
+        assert_eq!(response["result"]["cursorBlock"]["hash"], json!(hashes[3]));
+        assert_eq!(response["result"]["cursorBlock"]["parentHash"], json!(hashes[2]));
+        assert_eq!(response["result"]["headBlock"], response["result"]["cursorBlock"]);
+        assert_eq!(response["result"]["logs"].as_array().unwrap().len(), 1);
+        assert_eq!(response["result"]["logs"][0]["blockNumber"], "0x1");
+        assert_eq!(response["result"]["logs"][0]["blockHash"], json!(hashes[1]));
+    }
+
+    #[tokio::test]
+    async fn logs_v2_pages_by_blocks_and_repeats_the_inclusive_anchor() {
+        let (provider, hashes) = logs_v2_chain(&[0, 1, 1, 0, 1, 0]);
+        let filter = EthFilter::new(
+            build_test_eth_api(provider),
+            EthFilterConfig::default().max_blocks_per_filter(3),
+            Runtime::test(),
+        );
+        let first = filter.logs_v2(logs_v2_request(hashes[0])).await.unwrap();
+        assert_eq!(first.cursor_block.hash, hashes[2]);
+        assert_eq!(first.head_block.hash, hashes[5]);
+        assert_eq!(
+            first.logs.iter().map(|log| log.block_number.unwrap()).collect::<Vec<_>>(),
+            [1, 2]
+        );
+        let second = filter.logs_v2(logs_v2_request(first.cursor_block.hash)).await.unwrap();
+        assert_eq!(second.cursor_block.hash, hashes[4]);
+        assert_eq!(
+            second.logs.iter().map(|log| log.block_number.unwrap()).collect::<Vec<_>>(),
+            [2, 4]
+        );
+        let last = filter.logs_v2(logs_v2_request(second.cursor_block.hash)).await.unwrap();
+        assert_eq!(last.cursor_block.hash, hashes[5]);
+        assert_eq!(last.logs.iter().map(|log| log.block_number.unwrap()).collect::<Vec<_>>(), [4]);
+    }
+
+    #[tokio::test]
+    async fn logs_v2_log_limit_keeps_whole_blocks() {
+        let (provider, hashes) = logs_v2_chain(&[0, 1, 2, 0]);
+        let filter = EthFilter::new(
+            build_test_eth_api(provider),
+            EthFilterConfig::default().max_logs_per_response(2),
+            Runtime::test(),
+        );
+        let page = filter.logs_v2(logs_v2_request(hashes[0])).await.unwrap();
+        assert_eq!(page.cursor_block.hash, hashes[1]);
+        assert_eq!(page.logs.len(), 1);
+        assert_eq!(page.logs[0].log_index, Some(0));
+        assert_eq!(page.head_block.hash, hashes[3]);
+        // The repeated anchor fills the next page's budget, so an unchanged cursor is an error.
+        let error = filter.logs_v2(logs_v2_request(hashes[1])).await.unwrap_err();
+        assert_eq!(error.code(), -32005);
+        assert_eq!(error.message(), "Scan limit exceeded");
+    }
+
+    #[tokio::test]
+    async fn logs_v2_rejects_oversized_anchor_and_nonadvancing_block_budget() {
+        let (provider, hashes) = logs_v2_chain(&[2, 0]);
+        let filter = EthFilter::new(
+            build_test_eth_api(provider),
+            EthFilterConfig::default().max_logs_per_response(1),
+            Runtime::test(),
+        );
+        let error = filter.logs_v2(logs_v2_request(hashes[0])).await.unwrap_err();
+        assert_eq!(error.code(), -32005);
+        let (provider, hashes) = logs_v2_chain(&[0, 0]);
+        let filter = EthFilter::new(
+            build_test_eth_api(provider),
+            EthFilterConfig::default().max_blocks_per_filter(1),
+            Runtime::test(),
+        );
+        assert_eq!(filter.logs_v2(logs_v2_request(hashes[0])).await.unwrap_err().code(), -32005);
+        let result = filter.logs_v2(logs_v2_request(hashes[1])).await.unwrap();
+        assert_eq!(result.cursor_block.hash, hashes[1]);
+    }
+
+    #[tokio::test]
+    async fn logs_v2_matches_addresses_topics_and_explicit_end() {
+        let (provider, hashes) = logs_v2_chain(&[0, 2, 1, 1]);
+        let filter =
+            EthFilter::new(build_test_eth_api(provider), Default::default(), Runtime::test());
+        let mut request = logs_v2_request(hashes[0]);
+        request.to_block = Some(BlockNumberOrTag::Number(2));
+        request.address = Some(Address::with_last_byte(1).into());
+        request.topics = Some(vec![alloy_rpc_types_eth::ValueOrArray::Value(Some(
+            FixedBytes::with_last_byte(2),
+        ))]);
+        let result = filter.logs_v2(request.clone()).await.unwrap();
+        assert_eq!(result.cursor_block.hash, hashes[2]);
+        assert_eq!(result.head_block.hash, hashes[3]);
+        assert_eq!(
+            result.logs.iter().map(|log| log.log_index.unwrap()).collect::<Vec<_>>(),
+            [0, 1, 0]
+        );
+        request.address = Some(Address::with_last_byte(99).into());
+        let empty = filter.logs_v2(request).await.unwrap();
+        assert!(empty.logs.is_empty());
+        assert_eq!(empty.cursor_block.hash, hashes[2]);
+    }
+
+    #[tokio::test]
+    async fn logs_v2_rejects_unknown_anchor_and_reorg_between_pages() {
+        let (provider, hashes) = logs_v2_chain(&[0, 1, 0, 1]);
+        let filter = EthFilter::new(
+            build_test_eth_api(provider.clone()),
+            EthFilterConfig::default().max_blocks_per_filter(3),
+            Runtime::test(),
+        );
+        let error = filter.logs_v2(logs_v2_request(FixedBytes::ZERO)).await.unwrap_err();
+        assert_eq!(error.code(), -32001);
+        assert_eq!(error.message(), "fromBlockHash not on canonical chain");
+        let page = filter.logs_v2(logs_v2_request(hashes[0])).await.unwrap();
+        assert_eq!(page.cursor_block.hash, hashes[2]);
+        // Replace the canonical cursor block; the old hash must not silently resolve by number.
+        let mut replacement = provider.headers.lock().remove(&hashes[2]).unwrap();
+        replacement.extra_data = Bytes::from_static(b"reorg");
+        provider.add_header(replacement.hash_slow(), replacement);
+        let error = filter.logs_v2(logs_v2_request(page.cursor_block.hash)).await.unwrap_err();
+        assert_eq!(error.code(), -32001);
+    }
+
+    #[tokio::test]
+    async fn logs_v2_snapshot_check_rejects_reorg_but_accepts_head_growth() {
+        let (provider, hashes) = logs_v2_chain(&[0, 0, 0]);
+        let filter = EthFilter::new(
+            build_test_eth_api(provider.clone()),
+            Default::default(),
+            Runtime::test(),
+        );
+        let page = filter.logs_v2(logs_v2_request(hashes[0])).await.unwrap();
+        let extension =
+            alloy_consensus::Header { number: 3, parent_hash: hashes[2], ..Default::default() };
+        provider.add_header(extension.hash_slow(), extension);
+        let anchor =
+            LogsV2BlockRef { number: U64::ZERO, hash: hashes[0], parent_hash: FixedBytes::ZERO };
+        filter.inner.ensure_logs_v2_canonical(anchor, page.cursor_block, page.head_block).unwrap();
+        let mut replaced = provider.headers.lock().remove(&hashes[2]).unwrap();
+        replaced.extra_data = Bytes::from_static(b"reorg");
+        provider.add_header(replaced.hash_slow(), replaced);
+        assert!(matches!(
+            filter.inner.ensure_logs_v2_canonical(anchor, page.cursor_block, page.head_block),
+            Err(EthFilterError::LogsV2ChainChanged)
+        ));
+    }
+
+    #[tokio::test]
+    async fn logs_v2_rejects_invalid_ranges_and_missing_receipts() {
+        let (provider, hashes) = logs_v2_chain(&[0, 1, 0]);
+        let filter = EthFilter::new(
+            build_test_eth_api(provider.clone()),
+            Default::default(),
+            Runtime::test(),
+        );
+        for to_block in
+            [BlockNumberOrTag::Number(0), BlockNumberOrTag::Number(3), BlockNumberOrTag::Pending]
+        {
+            let mut request = logs_v2_request(hashes[1]);
+            request.to_block = Some(to_block);
+            assert_eq!(filter.logs_v2(request).await.unwrap_err().code(), -32602);
+        }
+        provider.receipts.lock().remove(&1);
+        assert_eq!(filter.logs_v2(logs_v2_request(hashes[0])).await.unwrap_err().code(), 4444);
+    }
+
+    #[tokio::test]
+    async fn logs_v2_rpc_rejects_unknown_fields() {
+        let (provider, hashes) = logs_v2_chain(&[0]);
+        let filter =
+            EthFilter::new(build_test_eth_api(provider), Default::default(), Runtime::test());
+        let request = json!({
+            "jsonrpc": "2.0", "id": 1, "method": "eth_getLogsV2",
+            "params": [{"fromBlockHash": hashes[0], "fromBlock": "0x0"}]
+        });
+        let (response, _) =
+            filter.into_rpc().raw_json_request(&request.to_string(), 1).await.unwrap();
+        let response: serde_json::Value = serde_json::from_str(response.get()).unwrap();
+        assert_eq!(response["error"]["code"], -32602);
     }
 }
