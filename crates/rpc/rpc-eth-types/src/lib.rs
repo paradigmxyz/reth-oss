@@ -43,7 +43,7 @@ pub use gas_oracle::{
     GasCap, GasPriceOracle, GasPriceOracleConfig, GasPriceOracleResult, RPC_DEFAULT_GAS_CAP,
 };
 pub use id_provider::EthSubscriptionIdProvider;
-pub use logs_v2::{LogsV2BlockRef, LogsV2Filter, LogsV2Result};
+pub use logs_v2::{LogsV2BlockRef, LogsV2Filter, LogsV2Result, LogsV2Topics};
 pub use pending_block::{PendingBlock, PendingBlockEnv, PendingBlockEnvOrigin};
 pub use settings::EthApiSettings;
 pub use transaction::TransactionSource;

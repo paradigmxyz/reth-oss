@@ -32,7 +32,7 @@ pub struct LogsV2Filter {
         skip_serializing_if = "Option::is_none",
         deserialize_with = "deserialize_topics"
     )]
-    pub topics: Option<Vec<ValueOrArray<Option<B256>>>>,
+    pub topics: Option<LogsV2Topics>,
 }
 
 impl LogsV2Filter {
@@ -74,6 +74,9 @@ pub struct LogsV2Result<L> {
     pub head_block: LogsV2BlockRef,
 }
 
+/// Positional topic selectors with per-position alternatives and null wildcards.
+pub type LogsV2Topics = Vec<ValueOrArray<Option<B256>>>;
+
 fn deserialize_to_block<'de, D>(deserializer: D) -> Result<Option<BlockNumberOrTag>, D::Error>
 where
     D: Deserializer<'de>,
@@ -85,13 +88,11 @@ where
     Ok(Some(block))
 }
 
-fn deserialize_topics<'de, D>(
-    deserializer: D,
-) -> Result<Option<Vec<ValueOrArray<Option<B256>>>>, D::Error>
+fn deserialize_topics<'de, D>(deserializer: D) -> Result<Option<LogsV2Topics>, D::Error>
 where
     D: Deserializer<'de>,
 {
-    let topics = Option::<Vec<ValueOrArray<Option<B256>>>>::deserialize(deserializer)?;
+    let topics = Option::<LogsV2Topics>::deserialize(deserializer)?;
     if topics.as_ref().is_some_and(|topics| topics.len() > 4) {
         return Err(D::Error::custom("topics must contain at most four positions"));
     }
