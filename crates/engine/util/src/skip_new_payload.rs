@@ -41,7 +41,12 @@ where
         loop {
             let next = ready!(this.stream.poll_next_unpin(cx));
             let item = match next {
-                Some(BeaconEngineMessage::NewPayload { cause, payload, inclusion_list_transactions, tx }) => {
+                Some(BeaconEngineMessage::NewPayload {
+                    cause,
+                    payload,
+                    inclusion_list_transactions,
+                    tx,
+                }) => {
                     if this.skipped < this.threshold {
                         *this.skipped += 1;
                         tracing::warn!(
@@ -56,7 +61,12 @@ where
                         continue
                     }
                     *this.skipped = 0;
-                    Some(BeaconEngineMessage::NewPayload { cause, payload, inclusion_list_transactions, tx })
+                    Some(BeaconEngineMessage::NewPayload {
+                        cause,
+                        payload,
+                        inclusion_list_transactions,
+                        tx,
+                    })
                 }
                 next => next,
             };

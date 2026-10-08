@@ -131,11 +131,11 @@ mod tests {
     use alloy_consensus::{
         BlobTransactionSidecar, Block, Header, SidecarBuilder, SimpleCoder, Transaction,
     };
-    use alloy_eips::eip2718::Encodable2718;
+    use alloy_eips::{
+        eip2718::Encodable2718,
+        eip8141::{Frame, FrameAddress, FrameLimits, FrameMode},
+    };
     use alloy_primitives::{bytes, map::AddressMap, Address, Bytes, Signature, U256};
-    use alloy_rpc_types_eth::request::TransactionRequest;
-    use alloy_eips::eip8141::{Frame, FrameAddress, FrameLimits, FrameMode};
-    use alloy_primitives::{map::AddressMap, Address, Bytes, U256};
     use alloy_rpc_types_eth::{request::TransactionRequest, state::EvmOverrides};
     use reth_chainspec::{ChainSpec, ChainSpecBuilder};
     use reth_ethereum_primitives::TransactionSigned;

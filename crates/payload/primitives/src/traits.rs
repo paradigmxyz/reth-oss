@@ -4,6 +4,7 @@ use crate::PayloadBuilderError;
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use alloy_eips::{eip4895::Withdrawal, eip7685::Requests};
 use alloy_primitives::{Bytes, B256, U256};
+use alloy_rlp::Encodable;
 use alloy_rpc_types_engine::{PayloadAttributes as EthPayloadAttributes, PayloadId};
 use core::fmt;
 use either::Either;

@@ -8,7 +8,7 @@ use crate::{
     AllPoolTransactions, BlobTransactionSidecarVariant, BlockInfo, PoolTransaction, PoolUpdateKind,
     TransactionOrigin,
 };
-use alloy_consensus::{transaction::TxHashRef, BlockHeader, Transaction, Typed2718};
+use alloy_consensus::{transaction::TxHashRef, BlockHeader, Transaction};
 use alloy_eips::{merge::SLOT_DURATION_SECS, BlockNumberOrTag, Decodable2718};
 use alloy_primitives::{
     map::{AddressSet, B256Set, HashSet},

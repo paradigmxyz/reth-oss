@@ -335,7 +335,6 @@ where
                                 let _parent = span.enter();
                                 let _span = trace_span!(target: "engine::tree::payload_processor", "convert_transaction", idx).entered();
                                 let tx = convert.convert(tx).map(|tx| WithTxEnv::new_with_gas_params(tx, &gas_params));
-                                let failed = tx.is_err();
                                 if let (Some(prewarm_tx), Ok(tx)) = (&prewarm_tx, &tx) {
                                     let _ = prewarm_tx.send((idx, tx.clone()));
                                 }

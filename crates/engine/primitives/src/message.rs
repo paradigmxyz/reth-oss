@@ -389,6 +389,7 @@ where
         let (tx, rx) = oneshot::channel();
         let _ = self.to_engine.send(BeaconEngineMessage::NewPayload {
             payload,
+            cause: Span::current(),
             inclusion_list_transactions: Some(inclusion_list_transactions),
             tx,
         });

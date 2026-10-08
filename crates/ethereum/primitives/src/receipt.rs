@@ -453,9 +453,8 @@ mod tests {
         eip8141::{FrameGasUsed, FrameReceipt, FrameStatus},
     };
     #[cfg(feature = "reth-codec")]
-    use alloy_primitives::Bytes;
     use alloy_primitives::{
-        address, b256, bloom, bytes, hex_literal::hex, Address, Bloom, Bytes, Log, LogData,
+        address, b256, bytes, hex_literal::hex, Address, Bloom, Bytes, Log, LogData,
     };
     use alloy_rlp::{Decodable, Encodable};
     #[cfg(feature = "reth-codec")]

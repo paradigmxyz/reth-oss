@@ -5,7 +5,7 @@ use reth_ethereum_primitives::TransactionSigned;
 use reth_evm::{ConfigureEvm, Evm, FromRecoveredTx, TxEnvFor};
 use reth_node_api::{FullNodeTypes, NodePrimitives, NodeTypes, PrimitivesTy};
 use reth_revm::database::StateProviderDatabase;
-use reth_storage_api::{AccountReader, BlockReaderIdExt, StateProviderFactory};
+use reth_storage_api::{AccountReader, BlockReaderIdExt, StateProvider, StateProviderFactory};
 use reth_tracing::tracing::info;
 use reth_transaction_pool::{
     error::{Eip8141PoolTransactionError, InvalidPoolTransactionError},
@@ -84,8 +84,11 @@ where
         &env.cfg_env.gas_params,
     );
     let inspector = FrameValidationInspector::new(frame.sender, prefix);
-    let mut evm =
-        evm_config.evm_with_env_and_inspector(StateProviderDatabase::new(&state), env, inspector);
+    let mut evm = evm_config.evm_with_env_and_inspector(
+        StateProviderDatabase::new((&state).into_evm_state_provider()),
+        env,
+        inspector,
+    );
     let result = match evm.validate_frame_transaction(tx, prefix.prefix_end) {
         Some(Ok(result)) => result,
         Some(Err(error)) => {

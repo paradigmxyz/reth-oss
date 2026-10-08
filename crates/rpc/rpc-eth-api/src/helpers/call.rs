@@ -50,7 +50,6 @@ use reth_rpc_eth_types::{
 };
 use reth_storage_api::{BlockIdReader, ProviderTx, StateProvider};
 use reth_tasks::{cancel::is_cancelled, CancelOnDrop};
-use reth_storage_api::{BlockIdReader, ProviderTx};
 use reth_transaction_pool::validate::{FrameValidationInspector, FrameValidationPolicy};
 use revm::{
     context::Block,

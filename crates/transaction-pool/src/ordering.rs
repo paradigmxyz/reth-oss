@@ -263,13 +263,14 @@ mod tests {
         let bumped = fee / U256::from(100) * U256::from(110);
         let existing = valid(frame(fee, fee));
         let config = PriceBumpConfig::default();
-        assert!(existing.is_underpriced(&valid(frame(fee, fee)), &config));
-        assert!(existing.is_underpriced(&valid(frame(bumped, fee)), &config));
-        assert!(existing.is_underpriced(&valid(frame(bumped, U256::ZERO)), &config));
-        assert!(existing.is_underpriced(&valid(frame(bumped - U256::from(1), bumped)), &config));
-        assert!(!existing.is_underpriced(&valid(frame(bumped, bumped)), &config));
+        assert!(existing.is_replacement_underpriced(&valid(frame(fee, fee)), &config));
+        assert!(existing.is_replacement_underpriced(&valid(frame(bumped, fee)), &config));
+        assert!(existing.is_replacement_underpriced(&valid(frame(bumped, U256::ZERO)), &config));
+        assert!(existing
+            .is_replacement_underpriced(&valid(frame(bumped - U256::from(1), bumped)), &config));
+        assert!(!existing.is_replacement_underpriced(&valid(frame(bumped, bumped)), &config));
         let maximum = valid(frame(U256::MAX, U256::MAX));
-        assert!(maximum.is_underpriced(&maximum, &config));
+        assert!(maximum.is_replacement_underpriced(&maximum, &config));
     }
 
     #[test]
@@ -279,14 +280,22 @@ mod tests {
         let existing = valid(frame_with_blob_fee(fee, fee, Some(fee)));
         let doubled = fee * U256::from(2);
         let below = doubled - U256::from(1);
-        assert!(existing
-            .is_underpriced(&valid(frame_with_blob_fee(doubled, doubled, Some(below))), &config));
-        assert!(existing
-            .is_underpriced(&valid(frame_with_blob_fee(below, doubled, Some(doubled))), &config));
-        assert!(existing
-            .is_underpriced(&valid(frame_with_blob_fee(doubled, below, Some(doubled))), &config));
-        assert!(!existing
-            .is_underpriced(&valid(frame_with_blob_fee(doubled, doubled, Some(doubled))), &config));
+        assert!(existing.is_replacement_underpriced(
+            &valid(frame_with_blob_fee(doubled, doubled, Some(below))),
+            &config
+        ));
+        assert!(existing.is_replacement_underpriced(
+            &valid(frame_with_blob_fee(below, doubled, Some(doubled))),
+            &config
+        ));
+        assert!(existing.is_replacement_underpriced(
+            &valid(frame_with_blob_fee(doubled, below, Some(doubled))),
+            &config
+        ));
+        assert!(!existing.is_replacement_underpriced(
+            &valid(frame_with_blob_fee(doubled, doubled, Some(doubled))),
+            &config
+        ));
     }
 
     #[test]

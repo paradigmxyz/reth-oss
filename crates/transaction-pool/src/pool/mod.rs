@@ -580,7 +580,7 @@ where
                 queue.cancel(hash);
             }
             if !affected.is_empty() {
-                let mined: HashSet<_> = mined_transactions.iter().copied().collect();
+                let mined: B256Set = mined_transactions.iter().copied().collect();
                 for tx in pool.remove_transactions(affected) {
                     if !mined.contains(tx.hash()) {
                         queue.insert(tx);
@@ -616,7 +616,8 @@ where
                 if !self.frame_revalidation.lock().take_current(&candidate) {
                     continue
                 }
-                let (_, meta) = self.add_transaction(&mut pool, candidate.origin, validation);
+                let (_, meta) =
+                    self.add_transaction(&mut pool, candidate.origin, validation, Instant::now());
                 let discarded = if meta.is_some() {
                     let discarded = pool.discard_worst();
                     pool.update_size_metrics();

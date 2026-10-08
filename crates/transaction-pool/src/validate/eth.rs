@@ -22,8 +22,8 @@ use alloy_consensus::{
     BlockHeader,
 };
 use alloy_eips::{
-    eip1559::ETHEREUM_BLOCK_GAS_LIMIT_30M, eip2718::EIP8141_TX_TYPE_ID,
-    eip4844::env_settings::EnvKzgSettings, eip7840::BlobParams, merge::SLOT_DURATION_SECS, BlockId,
+    eip2718::EIP8141_TX_TYPE_ID, eip4844::env_settings::EnvKzgSettings, eip7840::BlobParams,
+    merge::SLOT_DURATION_SECS, BlockId,
 };
 use alloy_primitives::U256;
 use alloy_rlp::Encodable;

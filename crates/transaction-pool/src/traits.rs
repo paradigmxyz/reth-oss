@@ -2027,7 +2027,7 @@ impl EthPoolTransaction for EthPooledTransaction {
         sidecar: Arc<BlobTransactionSidecarVariant>,
     ) -> Option<Recovered<Self::Pooled>> {
         self.into_consensus()
-            .try_map(|tx| tx.try_into_pooled_eip4844(Arc::unwrap_or_clone(sidecar)))
+            .try_map(|tx| tx.try_into_pooled_eip4844(Arc::unwrap_or_clone(sidecar)).map(Into::into))
             .ok()
     }
 
