@@ -1,6 +1,5 @@
 //! End-to-end EIP-8141 pool coverage using externally submitted frame envelopes.
 
-use crate::utils::eth_payload_attributes_amsterdam;
 use alloy_consensus::{BlockHeader, TxEip8141};
 use alloy_eips::eip8141::{
     Frame, FrameAddress, FrameLimits, FrameMode, FrameSignature, SignatureScheme, TransactionFees,
@@ -9,11 +8,10 @@ use alloy_eips::eip8141::{
 use alloy_primitives::{Address, Bytes, U256};
 use alloy_signer::SignerSync;
 use alloy_signer_local::PrivateKeySigner;
-use reth_chainspec::{ChainSpecBuilder, MAINNET};
-use reth_e2e_test_utils::{setup_engine, wallet::Wallet};
+use reth_chainspec::EthereumHardfork;
+use reth_e2e_test_utils::E2ETestSetupExt;
 use reth_node_ethereum::EthereumNode;
 use reth_transaction_pool::TransactionPool;
-use std::sync::Arc;
 
 const VERIFY_GAS: u64 = 10_000;
 const USER_OP_GAS: u64 = 30_000;
@@ -21,18 +19,6 @@ const MAX_FEE_PER_GAS: u64 = 20_000_000_000;
 const MAX_PRIORITY_FEE_PER_GAS: u64 = 2_000_000_000;
 const fn recipient() -> Address {
     Address::repeat_byte(0x11)
-}
-
-fn chain_spec() -> Arc<reth_chainspec::ChainSpec> {
-    Arc::new(
-        ChainSpecBuilder::default()
-            .chain(MAINNET.chain)
-            .genesis(serde_json::from_str(include_str!("../assets/genesis.json")).unwrap())
-            // The Frames devnet aliases Bogotá to Amsterdam. The E2E chain enables both so the
-            // pool gate and the V6 payload path exercise the same configuration.
-            .bogota_activated()
-            .build(),
-    )
 }
 
 fn self_verify_frame() -> Frame {
@@ -143,16 +129,9 @@ async fn assert_mined_from_pool(
 #[tokio::test]
 async fn self_verify_frame_is_admitted_and_mined() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
-    let signer = Wallet::default().wallet_gen().into_iter().next().unwrap();
-    let (mut nodes, _) = setup_engine::<EthereumNode>(
-        1,
-        chain_spec(),
-        false,
-        Default::default(),
-        eth_payload_attributes_amsterdam,
-    )
-    .await?;
-    let mut node = nodes.pop().unwrap();
+    let (mut node, wallet) =
+        EthereumNode::test_setup_for(EthereumHardfork::Bogota).build_single().await?;
+    let signer = wallet.signer(0);
     let raw = frame_tx(&signer, 0, vec![self_verify_frame(), sender_frame(recipient())]);
     let hash = node.rpc.inject_tx(raw).await?;
 
@@ -162,16 +141,9 @@ async fn self_verify_frame_is_admitted_and_mined() -> eyre::Result<()> {
 #[tokio::test]
 async fn expiry_prefix_frame_is_admitted_and_mined() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
-    let signer = Wallet::default().wallet_gen().into_iter().next().unwrap();
-    let (mut nodes, _) = setup_engine::<EthereumNode>(
-        1,
-        chain_spec(),
-        false,
-        Default::default(),
-        eth_payload_attributes_amsterdam,
-    )
-    .await?;
-    let mut node = nodes.pop().unwrap();
+    let (mut node, wallet) =
+        EthereumNode::test_setup_for(EthereumHardfork::Bogota).build_single().await?;
+    let signer = wallet.signer(0);
     let deadline = node.payload.timestamp.saturating_add(600).to_be_bytes();
     let expiry = Frame {
         mode: FrameMode::Verify,
@@ -189,16 +161,9 @@ async fn expiry_prefix_frame_is_admitted_and_mined() -> eyre::Result<()> {
 #[tokio::test]
 async fn atomic_frame_body_is_admitted_and_mined() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
-    let signer = Wallet::default().wallet_gen().into_iter().next().unwrap();
-    let (mut nodes, _) = setup_engine::<EthereumNode>(
-        1,
-        chain_spec(),
-        false,
-        Default::default(),
-        eth_payload_attributes_amsterdam,
-    )
-    .await?;
-    let mut node = nodes.pop().unwrap();
+    let (mut node, wallet) =
+        EthereumNode::test_setup_for(EthereumHardfork::Bogota).build_single().await?;
+    let signer = wallet.signer(0);
     let mut first = sender_frame(recipient());
     first.flags = ATOMIC_BATCH_FLAG;
     let mut second = sender_frame(recipient());
@@ -213,16 +178,9 @@ async fn atomic_frame_body_is_admitted_and_mined() -> eyre::Result<()> {
 #[tokio::test]
 async fn sequential_frames_share_a_payload() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
-    let signer = Wallet::default().wallet_gen().into_iter().next().unwrap();
-    let (mut nodes, _) = setup_engine::<EthereumNode>(
-        1,
-        chain_spec(),
-        false,
-        Default::default(),
-        eth_payload_attributes_amsterdam,
-    )
-    .await?;
-    let mut node = nodes.pop().unwrap();
+    let (mut node, wallet) =
+        EthereumNode::test_setup_for(EthereumHardfork::Bogota).build_single().await?;
+    let signer = wallet.signer(0);
     let first = node
         .rpc
         .inject_tx(frame_tx(&signer, 0, vec![self_verify_frame(), sender_frame(recipient())]))
