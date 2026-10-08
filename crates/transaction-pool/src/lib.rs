@@ -619,10 +619,10 @@ where
             }
 
             let encoded = pool_tx.encoded_2718_consensus();
-            // The cap bounds the RLP encoding of the whole list, so account for each item's
-            // header and the list header rather than the raw transaction bytes.
-            let new_size = total_size + alloy_rlp::Encodable::length(&encoded);
-            if new_size + alloy_rlp::length_of_length(new_size) > max_size {
+            // EIP-7805 bounds the sum of the EIP-2718 transaction bytes, without wrapping
+            // those already encoded transactions in another RLP list.
+            let new_size = total_size + encoded.len();
+            if new_size > max_size {
                 break
             }
 
