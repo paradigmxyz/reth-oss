@@ -863,6 +863,7 @@ mod tests {
             count,
             true,
             false,
+            Default::default(),
         );
         let mut indices = Vec::new();
         for _ in 0..count {
@@ -1249,6 +1250,7 @@ mod tests {
             count,
             bal,
             false,
+            Default::default(),
         );
         let mut indices = Vec::new();
         loop {
