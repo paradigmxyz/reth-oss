@@ -1809,7 +1809,7 @@ mod tests {
     fn eip8141_validated_prefix_still_checks_state_nonce() {
         let sender = Address::repeat_byte(0x41);
         for (tx_nonce, state_nonce, valid) in [(0, 0, true), (0, 1, false), (2, 1, true)] {
-            let provider = MockEthProvider::default().with_genesis_block();
+            let provider = mock_provider();
             let mut validator =
                 EthTransactionValidatorBuilder::new(provider.clone(), test_evm_config())
                     .set_bogota(true)
@@ -1865,7 +1865,7 @@ mod tests {
 
     #[test]
     fn eip8141_external_transactions_require_public_validation() {
-        let provider = MockEthProvider::default().with_genesis_block();
+        let provider = mock_provider();
         let validator = EthTransactionValidatorBuilder::new(provider, test_evm_config())
             .set_bogota(true)
             .build(InMemoryBlobStore::default());
@@ -1881,7 +1881,7 @@ mod tests {
 
     #[test]
     fn eip8141_blob_count_obeys_active_limit() {
-        let provider = MockEthProvider::default().with_genesis_block();
+        let provider = mock_provider();
         let validator = EthTransactionValidatorBuilder::new(provider, test_evm_config())
             .set_bogota(true)
             .set_cancun(true)
@@ -1904,7 +1904,7 @@ mod tests {
     #[test]
     fn eip8141_local_transaction_skips_eoa_and_sender_balance_checks() {
         let sender = Address::repeat_byte(0x41);
-        let provider = MockEthProvider::default().with_genesis_block();
+        let provider = mock_provider();
         provider.add_account(
             sender,
             ExtendedAccount::new(0, U256::ZERO).with_bytecode(Bytes::from_static(&[0x60, 0x00])),
