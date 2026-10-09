@@ -340,6 +340,9 @@ impl<N: NetworkPrimitives> ActiveSession<N> {
             EthMessage::NewPooledTransactionHashes72(msg) => {
                 self.try_emit_broadcast(PeerMessage::PooledTransactions(msg.into())).into()
             }
+            EthMessage::NewPooledTransactionHashes73(msg) => {
+                self.try_emit_broadcast(PeerMessage::PooledTransactions(msg.into())).into()
+            }
             EthMessage::GetBlockHeaders(req) => {
                 on_request!(req, BlockHeaders, GetBlockHeaders)
             }
@@ -1152,6 +1155,7 @@ impl<N: NetworkPrimitives> OutgoingMessage<N> {
                 EthMessage::NewPooledTransactionHashes66(h) => h.len(),
                 EthMessage::NewPooledTransactionHashes68(h) => h.hashes.len(),
                 EthMessage::NewPooledTransactionHashes72(h) => h.hashes.len(),
+                EthMessage::NewPooledTransactionHashes73(h) => h.hashes.len(),
                 _ => 0,
             },
             Self::Broadcast(msg) => match msg {
@@ -1198,6 +1202,21 @@ impl<N: NetworkPrimitives> OutgoingMessage<N> {
                 existing.hashes.extend(inc.hashes);
                 existing.sizes.extend(inc.sizes);
                 existing.types.extend(inc.types);
+                None
+            }
+            (
+                EthMessage::NewPooledTransactionHashes73(existing),
+                NewPooledTransactionHashes::Eth73(inc),
+            ) => {
+                // One mask describes every blob transaction in the message.
+                if existing.cell_mask != inc.cell_mask {
+                    return Some(inc.into())
+                }
+                existing.hashes.extend(inc.hashes);
+                existing.sizes.extend(inc.sizes);
+                existing.types.extend(inc.types);
+                existing.tx_sources.extend(inc.tx_sources);
+                existing.tx_nonces.extend(inc.tx_nonces);
                 None
             }
             (_, incoming) => Some(incoming),
@@ -2231,5 +2250,39 @@ mod tests {
         assert!(calculate_new_timeout(timeout, rtt / 2) > timeout / 2);
         assert!(calculate_new_timeout(timeout, rtt * 2) > timeout);
         assert!(calculate_new_timeout(timeout, rtt * 2) < timeout * 2);
+    }
+
+    #[test]
+    fn eth73_merging_preserves_all_metadata() {
+        let announcement = |byte| reth_eth_wire::NewPooledTransactionHashes73 {
+            types: vec![2],
+            sizes: vec![100],
+            hashes: vec![B256::repeat_byte(byte)],
+            cell_mask: None,
+            tx_sources: vec![alloy_primitives::Address::repeat_byte(byte)],
+            tx_nonces: vec![byte as u64],
+        };
+        let mut outgoing: OutgoingMessage<EthNetworkPrimitives> =
+            EthMessage::NewPooledTransactionHashes73(announcement(1)).into();
+        assert!(outgoing.try_merge_hashes(announcement(2).into()).is_none());
+        assert_eq!(outgoing.broadcast_item_count(), 2);
+        let OutgoingMessage::Eth(EthMessage::NewPooledTransactionHashes73(msg)) = &outgoing else {
+            unreachable!()
+        };
+        assert_eq!(
+            msg.tx_sources,
+            vec![
+                alloy_primitives::Address::repeat_byte(1),
+                alloy_primitives::Address::repeat_byte(2)
+            ]
+        );
+        assert_eq!(msg.tx_nonces, vec![1, 2]);
+        let mut different_mask = announcement(3);
+        different_mask.cell_mask = Some(alloy_primitives::B128::repeat_byte(1));
+        assert_eq!(
+            outgoing.try_merge_hashes(different_mask.clone().into()),
+            Some(different_mask.into())
+        );
+        assert_eq!(outgoing.broadcast_item_count(), 2);
     }
 }

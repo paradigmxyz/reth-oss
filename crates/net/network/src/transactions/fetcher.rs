@@ -229,6 +229,14 @@ impl<N: NetworkPrimitives> TransactionFetcher<N> {
                     if let Some(candidate) = entry.candidate_mut(key) {
                         // announced before by this peer, keep the latest size
                         candidate.set_size(size);
+                        if let Some(metadata) =
+                            metadata.filter(|metadata| metadata.source_nonce.is_some())
+                        {
+                            **candidate.metadata.get_or_insert_with(|| Box::new(metadata)) =
+                                metadata;
+                        } else {
+                            candidate.metadata = None;
+                        }
                         continue
                     }
                     if tracked >= max_per_peer {
@@ -255,9 +263,9 @@ impl<N: NetworkPrimitives> TransactionFetcher<N> {
                         (entry.fetching_by.is_none() &&
                             !entry.candidates.iter().any(Candidate::is_queued));
                     let candidate = if eager {
-                        Candidate::queued(key, size)
+                        Candidate::queued(key, size, metadata)
                     } else {
-                        Candidate::unqueued(key, size)
+                        Candidate::unqueued(key, size, metadata)
                     };
                     entry.candidates.push(candidate);
                     (eager, entry.generation)
@@ -282,9 +290,9 @@ impl<N: NetworkPrimitives> TransactionFetcher<N> {
                             dropped_at_capacity += 1;
                             continue
                         }
-                        self.hashes.insert(hash, TxEntry::new(key, size, generation));
+                        self.hashes.insert(hash, TxEntry::new(key, size, generation, metadata));
                     } else {
-                        vacant.insert(TxEntry::new(key, size, generation));
+                        vacant.insert(TxEntry::new(key, size, generation, metadata));
                     }
                     self.record_order(hash, generation);
                     (true, generation)
@@ -440,6 +448,29 @@ impl<N: NetworkPrimitives> TransactionFetcher<N> {
         for hash in hashes {
             self.remove_hash(hash);
         }
+    }
+
+    /// Copies eth/73 announcement evidence before delivered hashes leave the fetcher.
+    pub fn announcements_for<'a>(
+        &self,
+        hashes: impl IntoIterator<Item = &'a TxHash>,
+    ) -> B256Map<Vec<(PeerId, TransactionMetadata)>> {
+        let mut announcements = B256Map::default();
+        for hash in hashes {
+            if let Some(entry) = self.hashes.get(hash) {
+                for candidate in &entry.candidates {
+                    if let Some(metadata) = &candidate.metadata &&
+                        let Some(peer) = self.peers.get(&candidate.peer)
+                    {
+                        announcements
+                            .entry(*hash)
+                            .or_insert_with(Vec::new)
+                            .push((peer.peer_id, **metadata));
+                    }
+                }
+            }
+        }
+        announcements
     }
 
     /// Removes the peer as a candidate for all hashes it announced and drops pending hashes that
@@ -820,6 +851,7 @@ impl<N: NetworkPrimitives> TransactionFetcher<N> {
             Err(error) => Err(error),
         };
 
+        let announcements = self.announcements_for(delivered.iter());
         let timed_out = matches!(&outcome, Err(RequestError::Timeout));
         self.on_delivery(key, request_id, &requested, &delivered, timed_out);
         self.scratch_delivered = delivered;
@@ -842,6 +874,7 @@ impl<N: NetworkPrimitives> TransactionFetcher<N> {
                         version,
                         client_version,
                         transactions,
+                        announcements,
                         report_peer: unsolicited > 0,
                     }
                 } else if unsolicited > 0 {
@@ -1159,6 +1192,8 @@ pub enum FetchEvent<T = PooledTransaction> {
         client_version: Arc<str>,
         /// The transactions that were fetched, if available.
         transactions: PooledTransactions<T>,
+        /// Unverified eth/73 metadata, attributed to each announcing peer.
+        announcements: B256Map<Vec<(PeerId, TransactionMetadata)>>,
         /// Whether the peer should be penalized for sending unsolicited transactions or for
         /// misbehavior.
         report_peer: bool,
@@ -1237,9 +1272,14 @@ struct TxEntry {
 
 impl TxEntry {
     /// A new entry for a hash that is queued for the announcing peer.
-    fn new(peer: PeerKey, size: u32, generation: u64) -> Self {
+    fn new(
+        peer: PeerKey,
+        size: u32,
+        generation: u64,
+        metadata: Option<TransactionMetadata>,
+    ) -> Self {
         let mut candidates = SmallVec::new();
-        candidates.push(Candidate::queued(peer, size));
+        candidates.push(Candidate::queued(peer, size, metadata));
         Self { candidates, generation, fetching_by: None, attempts: 0 }
     }
 
@@ -1262,12 +1302,15 @@ impl TxEntry {
 }
 
 /// A peer that announced a hash.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct Candidate {
     peer: PeerKey,
     /// The size the peer announced for the transaction, 0 if unknown, with
     /// [`Self::QUEUED`] set while the hash is in the peer's queue.
     size_and_queued: u32,
+    /// eth/73 evidence kept per announcing peer until delivery. Boxed to keep older
+    /// versions' candidates compact without allocating metadata they do not carry.
+    metadata: Option<Box<TransactionMetadata>>,
 }
 
 impl Candidate {
@@ -1275,13 +1318,21 @@ impl Candidate {
     const QUEUED: u32 = 1 << 31;
 
     /// A candidate that has the hash queued.
-    const fn queued(peer: PeerKey, size: u32) -> Self {
-        Self { peer, size_and_queued: size | Self::QUEUED }
+    fn queued(peer: PeerKey, size: u32, metadata: Option<TransactionMetadata>) -> Self {
+        Self {
+            peer,
+            size_and_queued: size | Self::QUEUED,
+            metadata: metadata.filter(|metadata| metadata.source_nonce.is_some()).map(Box::new),
+        }
     }
 
     /// A candidate that doesn't have the hash queued.
-    const fn unqueued(peer: PeerKey, size: u32) -> Self {
-        Self { peer, size_and_queued: size }
+    fn unqueued(peer: PeerKey, size: u32, metadata: Option<TransactionMetadata>) -> Self {
+        Self {
+            peer,
+            size_and_queued: size,
+            metadata: metadata.filter(|metadata| metadata.source_nonce.is_some()).map(Box::new),
+        }
     }
 
     const fn is_queued(&self) -> bool {
@@ -1549,7 +1600,7 @@ mod tests {
                 peer_id,
                 entries.into_iter().map(|(hash, size)| AnnouncedTransaction {
                     hash,
-                    metadata: Some(TransactionMetadata { tx_type: 2, size }),
+                    metadata: Some(TransactionMetadata { tx_type: 2, size, source_nonce: None }),
                 }),
             );
             self.verify();
@@ -3086,5 +3137,38 @@ mod tests {
 
         rig.fail(peer_a, RequestError::Timeout);
         assert_eq!(rig.fetcher.queued_hashes(&peer_b), hashes[1..], "no duplicates");
+    }
+
+    #[test]
+    fn eth73_delivery_retains_evidence_from_each_announcer() {
+        let mut rig = Rig::new();
+        let first = peer(1);
+        let second = peer(2);
+        rig.add_peer(first);
+        rig.add_peer(second);
+        let txs = pooled_txs(1);
+        let hash = *txs[0].tx_hash();
+        let metadata = [1, 2].map(|nonce| TransactionMetadata {
+            tx_type: 2,
+            size: 100,
+            source_nonce: Some((alloy_primitives::Address::repeat_byte(nonce as u8), nonce)),
+        });
+        for (peer_id, metadata) in [(first, metadata[0]), (second, metadata[1])] {
+            rig.fetcher.on_announcement(
+                peer_id,
+                [AnnouncedTransaction { hash, metadata: Some(metadata) }],
+            );
+        }
+        assert_eq!(
+            rig.fetcher.announcements_for([&hash])[&hash],
+            vec![(first, metadata[0]), (second, metadata[1])]
+        );
+        rig.dispatch();
+        let FetchEvent::TransactionsFetched { announcements, .. } = rig.respond(first, txs) else {
+            panic!("expected fetched transactions")
+        };
+        assert_eq!(announcements[&hash], vec![(first, metadata[0]), (second, metadata[1])]);
+        assert!(rig.fetcher.announcements_for([&hash]).is_empty());
+        rig.verify();
     }
 }
