@@ -55,7 +55,8 @@ pub mod fuzz_rlp {
         BlockBodies, BlockHeaders, DisconnectReason, GetBlockBodies, GetBlockHeaders, GetNodeData,
         GetPooledTransactions, GetReceipts, HelloMessage, NewBlock, NewBlockHashes,
         NewPooledTransactionHashes66, NewPooledTransactionHashes68, NewPooledTransactionHashes72,
-        NodeData, P2PMessage, PooledTransactions, Receipts, Status, Transactions,
+        NewPooledTransactionHashes73, NodeData, P2PMessage, PooledTransactions, Receipts, Status,
+        Transactions,
     };
     use serde::{Deserialize, Serialize};
     use test_fuzz::test_fuzz;
@@ -155,6 +156,7 @@ pub mod fuzz_rlp {
     fuzz_type_and_name!(NewPooledTransactionHashes66, fuzz_NewPooledTransactionHashes66);
     fuzz_type_and_name!(NewPooledTransactionHashes68, fuzz_NewPooledTransactionHashes68);
     fuzz_type_and_name!(NewPooledTransactionHashes72, fuzz_NewPooledTransactionHashes72);
+    fuzz_type_and_name!(NewPooledTransactionHashes73, fuzz_NewPooledTransactionHashes73);
     fuzz_type_and_name!(GetPooledTransactions, fuzz_GetPooledTransactions);
     fuzz_type_and_name!(PooledTransactions, fuzz_PooledTransactions);
     fuzz_type_and_name!(GetNodeData, fuzz_GetNodeData);

@@ -1,4 +1,4 @@
-//! Implements Ethereum wire protocol for versions 66 through 71.
+//! Implements Ethereum wire protocol for versions 66 through 73.
 //! Defines structs/enums for messages, request-response pairs, and broadcasts.
 //! Handles compatibility with [`EthVersion`].
 //!
@@ -15,7 +15,7 @@ use super::{
 use crate::{
     status::StatusMessage, BlockRangeUpdate, BroadcastPoolTransactions, Cells,
     EthNetworkPrimitives, EthVersion, GetCells, NetworkPrimitives, NewPooledTransactionHashes72,
-    RawCapabilityMessage, Receipts69, Receipts70, SharedTransactions,
+    NewPooledTransactionHashes73, RawCapabilityMessage, Receipts69, Receipts70, SharedTransactions,
 };
 use alloc::{boxed::Box, string::String, sync::Arc};
 use alloy_primitives::{
@@ -130,7 +130,11 @@ impl<N: NetworkPrimitives> ProtocolMessage<N> {
                 Transactions::decode_with_memory_budget(buf, tx_memory_budget)?,
             ),
             EthMessageID::NewPooledTransactionHashes => {
-                if version >= EthVersion::Eth72 {
+                if version >= EthVersion::Eth73 {
+                    EthMessage::NewPooledTransactionHashes73(NewPooledTransactionHashes73::decode(
+                        buf,
+                    )?)
+                } else if version >= EthVersion::Eth72 {
                     EthMessage::NewPooledTransactionHashes72(NewPooledTransactionHashes72::decode(
                         buf,
                     )?)
@@ -332,6 +336,8 @@ pub enum EthMessage<N: NetworkPrimitives = EthNetworkPrimitives> {
     NewPooledTransactionHashes68(NewPooledTransactionHashes68),
     /// Represents a `NewPooledTransactionHashes` message for eth/72 version.
     NewPooledTransactionHashes72(NewPooledTransactionHashes72),
+    /// Announces transactions with source addresses and nonces, introduced in eth/73.
+    NewPooledTransactionHashes73(NewPooledTransactionHashes73),
 
     // The following messages are request-response message pairs
     /// Represents a `GetBlockHeaders` request-response pair.
@@ -420,7 +426,8 @@ impl<N: NetworkPrimitives> EthMessage<N> {
             Self::Transactions(_) => EthMessageID::Transactions,
             Self::NewPooledTransactionHashes66(_) |
             Self::NewPooledTransactionHashes68(_) |
-            Self::NewPooledTransactionHashes72(_) => EthMessageID::NewPooledTransactionHashes,
+            Self::NewPooledTransactionHashes72(_) |
+            Self::NewPooledTransactionHashes73(_) => EthMessageID::NewPooledTransactionHashes,
             Self::GetBlockHeaders(_) => EthMessageID::GetBlockHeaders,
             Self::BlockHeaders(_) => EthMessageID::BlockHeaders,
             Self::GetBlockBodies(_) => EthMessageID::GetBlockBodies,
@@ -510,6 +517,7 @@ impl<N: NetworkPrimitives> Encodable for EthMessage<N> {
             Self::NewPooledTransactionHashes66(hashes) => hashes.encode(out),
             Self::NewPooledTransactionHashes68(hashes) => hashes.encode(out),
             Self::NewPooledTransactionHashes72(hashes) => hashes.encode(out),
+            Self::NewPooledTransactionHashes73(hashes) => hashes.encode(out),
             Self::GetBlockHeaders(request) => request.encode(out),
             Self::BlockHeaders(headers) => headers.encode(out),
             Self::GetBlockBodies(request) => request.encode(out),
@@ -540,6 +548,7 @@ impl<N: NetworkPrimitives> Encodable for EthMessage<N> {
             Self::NewPooledTransactionHashes66(hashes) => hashes.length(),
             Self::NewPooledTransactionHashes68(hashes) => hashes.length(),
             Self::NewPooledTransactionHashes72(hashes) => hashes.length(),
+            Self::NewPooledTransactionHashes73(hashes) => hashes.length(),
             Self::GetBlockHeaders(request) => request.length(),
             Self::BlockHeaders(headers) => headers.length(),
             Self::GetBlockBodies(request) => request.length(),
@@ -707,9 +716,9 @@ impl EthMessageID {
 
     /// Returns the max value for the given version.
     pub const fn max(version: EthVersion) -> u8 {
-        if version.is_eth72() {
+        if version as u8 >= EthVersion::Eth72 as u8 {
             Self::Cells.to_u8()
-        } else if version.is_eth71() {
+        } else if version as u8 >= EthVersion::Eth71 as u8 {
             Self::BlockAccessLists.to_u8()
         } else if version.is_eth69_or_newer() {
             Self::BlockRangeUpdate.to_u8()
@@ -886,7 +895,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::MessageError;
+    use super::*;
     use crate::{
         message::RequestPair, BlockAccessLists, EthMessage, EthMessageID, EthNetworkPrimitives,
         EthVersion, GetBlockAccessLists, GetNodeData, NodeData, ProtocolMessage,
@@ -1164,5 +1173,28 @@ mod tests {
             result,
             Err(MessageError::ExpectedStatusMessage(EthMessageID::GetBlockBodies))
         ));
+    }
+
+    #[test]
+    fn eth73_announcement_is_version_gated_and_keeps_eth72_message_ids() {
+        let msg = NewPooledTransactionHashes73::default();
+        let protocol = ProtocolMessage::<EthNetworkPrimitives>::from(
+            EthMessage::NewPooledTransactionHashes73(msg.clone()),
+        );
+        let bytes = alloy_rlp::encode(&protocol);
+        assert_eq!(bytes[0], 0x08);
+        let decoded = ProtocolMessage::<EthNetworkPrimitives>::decode_message(
+            EthVersion::Eth73,
+            &mut bytes.as_slice(),
+        )
+        .unwrap();
+        assert_eq!(decoded.message, EthMessage::NewPooledTransactionHashes73(msg));
+        assert!(ProtocolMessage::<EthNetworkPrimitives>::decode_message(
+            EthVersion::Eth72,
+            &mut bytes.as_slice()
+        )
+        .is_err());
+        assert_eq!(EthMessageID::message_count(EthVersion::Eth73), 22);
+        assert_eq!(EthMessageID::max(EthVersion::Eth73), EthMessageID::Cells.to_u8());
     }
 }

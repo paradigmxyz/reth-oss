@@ -1,7 +1,7 @@
 //! Transactions management for the p2p network.
 
 use alloy_consensus::{constants::EIP4844_TX_TYPE_ID, transaction::TxHashRef};
-use rayon::iter::{IntoParallelIterator, ParallelIterator};
+use rayon::iter::{IntoParallelIterator, IntoParallelRefIterator, ParallelIterator};
 use smallvec::SmallVec;
 
 /// Normalized transaction announcements.
@@ -22,7 +22,7 @@ pub use self::constants::{
     tx_fetcher::DEFAULT_SOFT_LIMIT_BYTE_SIZE_POOLED_TRANSACTIONS_RESP_ON_PACK_GET_POOLED_TRANSACTIONS_REQ,
     SOFT_LIMIT_BYTE_SIZE_POOLED_TRANSACTIONS_RESPONSE,
 };
-use announcement::TransactionAnnouncement;
+use announcement::{TransactionAnnouncement, TransactionMetadata};
 use config::AnnouncementAcceptance;
 pub use config::{
     AnnouncementFilteringPolicy, TransactionFetcherConfig, TransactionIngressPolicy,
@@ -51,7 +51,7 @@ use alloy_eips::eip2718::Typed2718;
 use alloy_primitives::{
     bytes::BufMut,
     map::{hash_map::Entry, B256Map, B256Set, FbBuildHasher, HashMap, HashSet},
-    TxHash, B256,
+    Address, TxHash, B256,
 };
 use alloy_rlp::Encodable;
 use constants::SOFT_LIMIT_COUNT_HASHES_IN_NEW_POOLED_TRANSACTIONS_BROADCAST_MESSAGE;
@@ -60,7 +60,7 @@ use reth_eth_wire::{
     BroadcastPoolTransactions, Cells, EthNetworkPrimitives, EthVersion, GetCells,
     GetPooledTransactions, LazyEncoded, LazyEncodedTransaction, NetworkPrimitives,
     NewPooledTransactionHashes, NewPooledTransactionHashes66, NewPooledTransactionHashes68,
-    NewPooledTransactionHashes72, PooledTransactions, Transactions,
+    NewPooledTransactionHashes72, NewPooledTransactionHashes73, PooledTransactions, Transactions,
 };
 use reth_ethereum_primitives::TxType;
 use reth_evm::SenderRecoveryCache;
@@ -1343,7 +1343,7 @@ where
                 let Some(peer) = self.peers.get(&peer_id) else { return };
                 (peer.version(), peer.client_version.clone())
             }
-            TransactionSource::Response { version, client_version } => {
+            TransactionSource::Response { version, client_version, .. } => {
                 (*version, client_version.clone())
             }
         };
@@ -1368,6 +1368,45 @@ where
 
         let start = Instant::now();
 
+        let announcements = match source {
+            TransactionSource::Broadcast => self
+                .transaction_fetcher
+                .announcements_for(transactions.iter().map(|tx| tx.tx_hash())),
+            TransactionSource::Response { announcements, .. } => announcements,
+        };
+        // Validate metadata before filtering known transactions or dropping sparse blob bodies.
+        // Only the announcing peer is responsible for its claims, even if another peer delivers.
+        let recovered_announcements = if announcements.is_empty() {
+            B256Map::default()
+        } else {
+            transactions
+                .par_iter()
+                .filter(|tx| announcements.contains_key(tx.tx_hash()))
+                .map(|tx| {
+                    (
+                        *tx.tx_hash(),
+                        Pool::Transaction::try_recover_with_cache_opt(
+                            tx.clone(),
+                            self.sender_recovery_cache.as_ref(),
+                        ),
+                    )
+                })
+                .collect::<B256Map<_>>()
+        };
+        let mut offenders = HashSet::<PeerId>::default();
+        for (hash, recovered) in &recovered_announcements {
+            if let Ok(recovered) = recovered {
+                for &(announcer, metadata) in &announcements[hash] {
+                    if !metadata.matches_transaction(recovered) {
+                        offenders.insert(announcer);
+                    }
+                }
+            }
+        }
+        for announcer in offenders {
+            self.report_peer(announcer, ReputationChangeKind::BadAnnouncement);
+        }
+
         // Stop fetching transactions received through either broadcasts or responses.
         self.transaction_fetcher
             .on_transactions_received(transactions.iter().map(|tx| tx.tx_hash()));
@@ -1389,7 +1428,7 @@ where
         // EIP-8070, so their sidecars can never validate. Drop them before touching the pool;
         // geth equivalently diverts these bodies into a buffer that is completed with cells
         // fetched via `GetCells`, which is not implemented yet.
-        if version.is_eth72() {
+        if version >= EthVersion::Eth72 {
             let len_before = transactions.len();
             transactions.retain(|tx| !tx.is_eip4844());
             let dropped = len_before - transactions.len();
@@ -1440,11 +1479,14 @@ where
 
         let txs_len = transactions.len();
 
-        let recover = |tx| {
-            let recovered = Pool::Transaction::try_recover_with_cache_opt(
-                tx,
-                self.sender_recovery_cache.as_ref(),
-            );
+        let recover = |tx: N::PooledTransaction| {
+            let recovered =
+                recovered_announcements.get(tx.tx_hash()).cloned().unwrap_or_else(|| {
+                    Pool::Transaction::try_recover_with_cache_opt(
+                        tx,
+                        self.sender_recovery_cache.as_ref(),
+                    )
+                });
             match recovered {
                 Ok(tx) => Some(tx),
                 Err(badtx) => {
@@ -1528,11 +1570,12 @@ where
                 report_peer,
                 version,
                 client_version,
+                announcements,
             } => {
                 self.import_transactions(
                     peer_id,
                     transactions,
-                    TransactionSource::Response { version, client_version },
+                    TransactionSource::Response { version, client_version, announcements },
                 );
                 if report_peer {
                     self.report_peer(peer_id, ReputationChangeKind::BadTransactions);
@@ -1766,6 +1809,10 @@ struct PropagateTransaction {
     /// `PooledTransactions`.
     propagation_size: usize,
     transaction: LazyEncodedTransaction,
+    /// Recovered sender; absent if a manually broadcast transaction has an invalid signature.
+    source: Option<Address>,
+    /// Cached nonce for eth/73 announcements.
+    nonce: u64,
 }
 
 impl PropagateTransaction {
@@ -1777,11 +1824,15 @@ impl PropagateTransaction {
     fn new<T: SignedTransaction>(transaction: T) -> Self {
         let is_broadcastable_in_full = transaction.is_broadcastable_in_full();
         let propagation_size = transaction.encode_2718_len();
+        let source = transaction.recover_signer().ok();
+        let nonce = transaction.nonce();
 
         Self {
             is_broadcastable_in_full,
             propagation_size,
             transaction: LazyEncoded::new(transaction),
+            source,
+            nonce,
         }
     }
 
@@ -1793,10 +1844,14 @@ impl PropagateTransaction {
     fn pool_tx<P: PoolTransaction>(tx: Arc<ValidPoolTransaction<P>>) -> Self {
         let is_broadcastable_in_full = tx.transaction.consensus_ref().is_broadcastable_in_full();
         let propagation_size = tx.encoded_length();
+        let source = Some(tx.sender());
+        let nonce = tx.nonce();
         Self {
             is_broadcastable_in_full,
             propagation_size,
             transaction: LazyEncoded::new(PropagatePooledTransactionEncoder::new(tx)),
+            source,
+            nonce,
         }
     }
 
@@ -2018,6 +2073,7 @@ enum PooledTransactionsHashesBuilder {
     Eth66(NewPooledTransactionHashes66),
     Eth68(NewPooledTransactionHashes68),
     Eth72(NewPooledTransactionHashes72),
+    Eth73(NewPooledTransactionHashes73),
 }
 
 // === impl PooledTransactionsHashesBuilder ===
@@ -2042,6 +2098,18 @@ impl PooledTransactionsHashesBuilder {
                     msg.cell_mask = Some(NewPooledTransactionHashes72::ALL_CELLS_MASK);
                 }
             }
+            Self::Eth73(msg) => {
+                msg.tx_sources.push(pooled_tx.sender());
+                msg.tx_nonces.push(pooled_tx.nonce());
+                msg.hashes.push(*pooled_tx.hash());
+                msg.sizes.push(pooled_tx.encoded_length());
+                let ty = pooled_tx.transaction.ty();
+                msg.types.push(ty);
+                if ty == EIP4844_TX_TYPE_ID {
+                    // The pool holds the full sidecar, so every cell can be served.
+                    msg.cell_mask = Some(NewPooledTransactionHashes73::ALL_CELLS_MASK);
+                }
+            }
         }
     }
 
@@ -2051,6 +2119,7 @@ impl PooledTransactionsHashesBuilder {
             Self::Eth66(hashes) => hashes.is_empty(),
             Self::Eth68(hashes) => hashes.is_empty(),
             Self::Eth72(hashes) => hashes.is_empty(),
+            Self::Eth73(hashes) => hashes.is_empty(),
         }
     }
 
@@ -2060,6 +2129,7 @@ impl PooledTransactionsHashesBuilder {
             Self::Eth66(hashes) => hashes.len(),
             Self::Eth68(hashes) => hashes.len(),
             Self::Eth72(hashes) => hashes.len(),
+            Self::Eth73(hashes) => hashes.len(),
         }
     }
 
@@ -2088,6 +2158,19 @@ impl PooledTransactionsHashesBuilder {
                     msg.cell_mask = Some(NewPooledTransactionHashes72::ALL_CELLS_MASK);
                 }
             }
+            Self::Eth73(msg) => {
+                let Some(source) = tx.source else { return };
+                msg.tx_sources.push(source);
+                msg.tx_nonces.push(tx.nonce);
+                msg.hashes.push(*tx.tx_hash());
+                msg.sizes.push(tx.propagation_size());
+                let ty = tx.tx_type();
+                msg.types.push(ty);
+                if ty == EIP4844_TX_TYPE_ID {
+                    // The pool holds the full sidecar, so every cell can be served.
+                    msg.cell_mask = Some(NewPooledTransactionHashes73::ALL_CELLS_MASK);
+                }
+            }
         }
     }
 
@@ -2099,6 +2182,7 @@ impl PooledTransactionsHashesBuilder {
                 Self::Eth68(Default::default())
             }
             EthVersion::Eth72 => Self::Eth72(Default::default()),
+            EthVersion::Eth73 => Self::Eth73(Default::default()),
         }
     }
 
@@ -2113,6 +2197,7 @@ impl PooledTransactionsHashesBuilder {
                 Self::Eth68(NewPooledTransactionHashes68::with_capacity(capacity))
             }
             EthVersion::Eth72 => Self::Eth72(NewPooledTransactionHashes72::with_capacity(capacity)),
+            EthVersion::Eth73 => Self::Eth73(NewPooledTransactionHashes73::with_capacity(capacity)),
         }
     }
 
@@ -2130,6 +2215,10 @@ impl PooledTransactionsHashesBuilder {
                 msg.shrink_to_fit();
                 msg.into()
             }
+            Self::Eth73(mut msg) => {
+                msg.shrink_to_fit();
+                msg.into()
+            }
         }
     }
 }
@@ -2144,6 +2233,8 @@ enum TransactionSource {
         /// Session metadata remains available after the responding peer disconnects.
         version: EthVersion,
         client_version: Arc<str>,
+        /// Metadata retained before fetched hashes are removed.
+        announcements: B256Map<Vec<(PeerId, TransactionMetadata)>>,
     },
 }
 
@@ -3538,5 +3629,47 @@ mod tests {
         );
 
         network_service_handle.abort();
+    }
+
+    #[test]
+    fn eth73_builders_use_cached_sender_and_nonce() {
+        let mut generator = TransactionGenerator::new(rand::rng());
+        let plain = valid_eth_pool_transaction(generator.gen_eip1559_pooled());
+        let blob = valid_eth_pool_transaction(generator.gen_eip4844_pooled());
+        for capacity in [0, 2] {
+            let mut builder =
+                PooledTransactionsHashesBuilder::with_capacity(EthVersion::Eth73, capacity);
+            builder.push(&PropagateTransaction::pool_tx(plain.clone()));
+            builder.push_pooled(blob.clone());
+            let NewPooledTransactionHashes::Eth73(msg) = builder.build() else { unreachable!() };
+            assert_eq!(msg.hashes, vec![*plain.hash(), *blob.hash()]);
+            assert_eq!(msg.tx_sources, vec![plain.sender(), blob.sender()]);
+            assert_eq!(msg.tx_nonces, vec![plain.nonce(), blob.nonce()]);
+            assert_eq!(msg.sizes, vec![plain.encoded_length(), blob.encoded_length()]);
+            assert_eq!(msg.cell_mask, Some(NewPooledTransactionHashes73::ALL_CELLS_MASK));
+        }
+    }
+
+    #[test]
+    fn eth73_metadata_mismatch_is_detected() {
+        let mut generator = TransactionGenerator::new(rand::rng());
+        let tx = valid_eth_pool_transaction(generator.gen_eip1559_pooled());
+        let metadata = TransactionMetadata {
+            tx_type: tx.transaction.ty(),
+            size: tx.encoded_length(),
+            source_nonce: Some((tx.sender(), tx.nonce())),
+        };
+        assert!(metadata.matches_transaction(&tx.transaction));
+        let mut wrong = metadata;
+        wrong.tx_type = 1;
+        assert!(!wrong.matches_transaction(&tx.transaction));
+        wrong = metadata;
+        wrong.size += 1;
+        assert!(!wrong.matches_transaction(&tx.transaction));
+        wrong = metadata;
+        wrong.source_nonce = Some((Address::ZERO, tx.nonce()));
+        assert!(!wrong.matches_transaction(&tx.transaction));
+        wrong.source_nonce = Some((tx.sender(), tx.nonce() + 1));
+        assert!(!wrong.matches_transaction(&tx.transaction));
     }
 }

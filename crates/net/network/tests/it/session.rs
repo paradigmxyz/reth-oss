@@ -175,3 +175,19 @@ async fn connect<Pool>(peer: &PeerHandle<Pool>, other: &PeerHandle<Pool>) -> Opt
         event => panic!("unexpected event {event:?}"),
     }
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_eth73_negotiation_and_fallback() {
+    for version in [EthVersion::Eth73, EthVersion::Eth72, EthVersion::Eth68] {
+        let negotiated = negotiated_version(
+            PeerConfig::default().with_protocols([
+                EthVersion::Eth73,
+                EthVersion::Eth72,
+                EthVersion::Eth68,
+            ]),
+            PeerConfig::default().with_protocols([version]),
+        )
+        .await;
+        assert_eq!(negotiated, Some(version));
+    }
+}
