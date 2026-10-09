@@ -516,6 +516,11 @@ impl DbTxMut for Tx<RW> {
             shared.invalidate_trie_root(None)?;
         }
         self.inner.clear_db(self.get_dbi::<T>()?).map_err(|e| DatabaseError::Delete(e.into()))?;
+        if let Some(shared) = &self.packing &&
+            T::NAME == "StoragesTrie"
+        {
+            shared.trie_changed();
+        }
 
         Ok(())
     }

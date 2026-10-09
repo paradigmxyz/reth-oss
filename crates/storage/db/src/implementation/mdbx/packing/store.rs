@@ -33,6 +33,8 @@ pub(crate) struct Shared {
     pub(crate) depth: usize,
     pub(crate) dbi: MDBX_dbi,
     pub(crate) generation: AtomicU64,
+    /// Changes to retained trie rows, independent of canonical storage mutations.
+    pub(crate) trie_epoch: AtomicU64,
     pub(crate) closed: AtomicBool,
     writer: Option<Transaction<RW>>,
     pending: Mutex<Pending>,
@@ -58,6 +60,7 @@ impl Shared {
             depth,
             dbi,
             generation: AtomicU64::new(0),
+            trie_epoch: AtomicU64::new(0),
             closed: AtomicBool::new(false),
             writer,
             pending: Mutex::new(Pending::default()),
@@ -200,6 +203,10 @@ impl Shared {
             pending.trie_generation.clear();
         }
         Ok(())
+    }
+
+    pub(crate) fn trie_changed(&self) {
+        self.trie_epoch.fetch_add(1, Ordering::Release);
     }
 
     pub(crate) fn flush(&self) -> Result<(), DatabaseError> {

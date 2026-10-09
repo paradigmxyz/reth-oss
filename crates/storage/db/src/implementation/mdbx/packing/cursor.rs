@@ -43,9 +43,22 @@ pub(crate) struct Logical<K: TransactionKind> {
     store: Store<K>,
     physical: reth_libmdbx::Cursor<K>,
     trie: bool,
-    position: Option<RawRow>,
-    upper: Option<(B256, u64, BTreeMap<Nibbles, BranchNodeCompact>)>,
+    position: Position,
+    upper: Option<(B256, u64, u64, BTreeMap<Nibbles, BranchNodeCompact>)>,
     region: Option<(B256, Nibbles, u64, BTreeMap<Nibbles, BranchNodeCompact>)>,
+    #[cfg(test)]
+    pub(crate) upper_rebuilds: usize,
+    #[cfg(test)]
+    pub(crate) upper_leaves: usize,
+}
+
+/// A failed seek must not be confused with a cursor that has never been positioned.
+#[derive(Debug)]
+enum Position {
+    Uninitialized,
+    Row(RawRow),
+    Boundary(B256, Vec<u8>),
+    Missing,
 }
 
 impl<K: TransactionKind> Logical<K> {
@@ -61,9 +74,13 @@ impl<K: TransactionKind> Logical<K> {
             shared,
             physical,
             trie,
-            position: None,
+            position: Position::Uninitialized,
             upper: None,
             region: None,
+            #[cfg(test)]
+            upper_rebuilds: 0,
+            #[cfg(test)]
+            upper_leaves: 0,
         })
     }
 
@@ -80,31 +97,48 @@ impl<K: TransactionKind> Logical<K> {
         }
         let scope = B256::from_slice(scope);
         let sub = sub.map(Vec::from).unwrap_or_else(|| vec![0; if self.trie { 33 } else { 32 }]);
-        let result = self.find(Some((scope, sub)), true, false)?;
-        self.position =
-            if exact_scope { result.filter(|(k, _)| k[..] == scope[..]) } else { result };
-        Ok(self.position.clone())
+        let result = self.find(Some((scope, sub.clone())), true, false)?;
+        let result = if exact_scope { result.filter(|(k, _)| k[..] == scope[..]) } else { result };
+        self.position = if let Some(row) = &result {
+            Position::Row(row.clone())
+        } else if exact_scope {
+            Position::Missing
+        } else {
+            Position::Boundary(scope, sub)
+        };
+        Ok(result)
     }
 
     pub(crate) fn movement(&mut self, movement: Move) -> Result<Option<RawRow>, DatabaseError> {
         self.tx.txn_execute(|_| ()).map_err(|e| DatabaseError::Read(e.into()))?;
         self.shared.check()?;
         if matches!(movement, Move::Current) {
-            let Some((key, value)) = self.position.clone() else { return Ok(None) };
+            let Position::Row((key, value)) = &self.position else { return Ok(None) };
+            let (key, value) = (key.clone(), value.clone());
             let bound = (B256::from_slice(&key), value[..if self.trie { 33 } else { 32 }].to_vec());
             let current = self.find(Some(bound), true, false)?.filter(|(k, v)| {
                 *k == key &&
                     v[..if self.trie { 33 } else { 32 }] ==
                         value[..if self.trie { 33 } else { 32 }]
             });
-            self.position = current.clone();
+            if let Some(row) = &current {
+                self.position = Position::Row(row.clone());
+            }
             return Ok(current);
         }
-        let old_scope = self.position.as_ref().map(|(k, _)| B256::from_slice(k));
-        let bound = self
-            .position
-            .as_ref()
-            .map(|(k, v)| (B256::from_slice(k), v[..if self.trie { 33 } else { 32 }].to_vec()));
+        if matches!(self.position, Position::Missing) &&
+            !matches!(movement, Move::First | Move::Last)
+        {
+            return Ok(None);
+        }
+        let bound = match &self.position {
+            Position::Row((k, v)) => {
+                Some((B256::from_slice(k), v[..if self.trie { 33 } else { 32 }].to_vec()))
+            }
+            Position::Boundary(scope, sub) => Some((*scope, sub.clone())),
+            Position::Uninitialized | Position::Missing => None,
+        };
+        let old_scope = bound.as_ref().map(|(s, _)| *s);
         let (bound, inclusive, reverse) = match movement {
             Move::First => (None, true, false),
             Move::Last => (None, true, true),
@@ -119,7 +153,7 @@ impl<K: TransactionKind> Logical<K> {
                     false,
                 )?;
                 let Some((scope, _)) = next else {
-                    self.position = None;
+                    self.position = Position::Missing;
                     return Ok(None);
                 };
                 (Some((scope, vec![0; if self.trie { 33 } else { 32 }])), true, false)
@@ -145,9 +179,12 @@ impl<K: TransactionKind> Logical<K> {
             // MDBX leaves a duplicate cursor on the last valid item at end-of-scope.
             return Ok(None);
         }
-        // Preserve the last position on exhaustion, as native MDBX does.
-        if next.is_some() {
-            self.position = next.clone();
+        if let Some(row) = &next {
+            self.position = Position::Row(row.clone());
+        } else if matches!(movement, Move::First | Move::Last) ||
+            matches!(self.position, Position::Row(_))
+        {
+            self.position = Position::Missing;
         }
         Ok(next)
     }
@@ -222,6 +259,10 @@ impl<K: TransactionKind> Logical<K> {
         prefix: &Nibbles,
         upper: bool,
     ) -> Result<BTreeMap<Nibbles, BranchNodeCompact>, DatabaseError> {
+        #[cfg(test)]
+        if upper {
+            self.upper_rebuilds += 1;
+        }
         let mut builder = HashBuilder::default().with_updates(true);
         let mut nodes = BTreeMap::new();
         let mut lower = [0u8; 32];
@@ -251,6 +292,10 @@ impl<K: TransactionKind> Logical<K> {
         }
         builder.root();
         Self::drain(&mut builder, &mut nodes, self.shared.depth, upper);
+        #[cfg(test)]
+        if upper {
+            self.upper_leaves += count;
+        }
         Ok(nodes)
     }
 
@@ -273,8 +318,14 @@ impl<K: TransactionKind> Logical<K> {
         reverse: bool,
     ) -> Result<Option<(Nibbles, BranchNodeCompact)>, DatabaseError> {
         let generation = self.shared.generation.load(Ordering::Acquire);
-        if self.upper.as_ref().is_none_or(|(s, g, _)| *s != scope || *g != generation) {
-            let nodes = if self.shared.dirty(scope)? {
+        let trie_epoch = self.shared.trie_epoch.load(Ordering::Acquire);
+        let dirty = self.shared.dirty(scope)?;
+        // Dirty-contract nodes are derived from storage, so trie persistence cannot change them.
+        // Clean-contract caches may reflect retained rows written through a different cursor.
+        if self.upper.as_ref().is_none_or(|(s, g, t, _)| {
+            *s != scope || *g != generation || (!dirty && *t != trie_epoch)
+        }) {
+            let nodes = if dirty {
                 self.rebuild(scope, &Nibbles::default(), true)?
             } else {
                 let mut nodes = BTreeMap::new();
@@ -302,7 +353,7 @@ impl<K: TransactionKind> Logical<K> {
                 }
                 nodes
             };
-            self.upper = Some((scope, generation, nodes));
+            self.upper = Some((scope, generation, trie_epoch, nodes));
         }
         let accepts = |p: &Nibbles| {
             if reverse {
@@ -311,7 +362,7 @@ impl<K: TransactionKind> Logical<K> {
                 p > query || (inclusive && p == query)
             }
         };
-        let nodes = &self.upper.as_ref().ok_or(DatabaseError::Decode)?.2;
+        let nodes = &self.upper.as_ref().ok_or(DatabaseError::Decode)?.3;
         let candidate = if reverse {
             nodes.iter().rev().find(|(p, _)| accepts(p))
         } else {
@@ -443,29 +494,30 @@ impl Logical<RW> {
                     self.physical
                         .del(WriteFlags::CURRENT)
                         .map_err(|e| DatabaseError::Delete(e.into()))?;
+                    self.shared.trie_changed();
                 }
                 self.physical
                     .put(scope, value, WriteFlags::UPSERT)
                     .map_err(|e| DatabaseError::Read(e.into()))?;
+                self.shared.trie_changed();
             }
             if entry.nibbles.0.is_empty() {
                 self.shared.mark_trie_root_written(s)?;
             }
-            self.upper = None;
         } else {
             if value.len() > 64 {
                 return Err(DatabaseError::Decode);
             }
             self.shared.put(s, StorageEntry::from_compact(value, value.len()).0)?;
         }
-        self.position = Some((scope.to_vec(), value.to_vec()));
+        self.position = Position::Row((scope.to_vec(), value.to_vec()));
         Ok(())
     }
 
     pub(crate) fn delete(&mut self, duplicates: bool) -> Result<(), DatabaseError> {
         self.tx.txn_execute(|_| ()).map_err(|e| DatabaseError::Read(e.into()))?;
         self.shared.check()?;
-        let Some((scope, value)) = &self.position else { return Ok(()) };
+        let Position::Row((scope, value)) = &self.position else { return Ok(()) };
         if self.trie {
             if duplicates || value[..33].iter().all(|b| *b == 0) {
                 self.shared.invalidate_trie_root(Some(B256::from_slice(scope)))?;
@@ -481,6 +533,7 @@ impl Logical<RW> {
                     self.physical
                         .del(WriteFlags::NO_DUP_DATA)
                         .map_err(|e| DatabaseError::Delete(e.into()))?;
+                    self.shared.trie_changed();
                 }
             } else if self
                 .physical
@@ -491,8 +544,8 @@ impl Logical<RW> {
                 self.physical
                     .del(WriteFlags::CURRENT)
                     .map_err(|e| DatabaseError::Delete(e.into()))?;
+                self.shared.trie_changed();
             }
-            self.upper = None;
         } else if duplicates {
             self.shared.clear_contract(B256::from_slice(scope))?;
         } else {

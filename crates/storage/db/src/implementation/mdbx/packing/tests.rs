@@ -2,9 +2,9 @@
 
 use super::*;
 use crate::{
-    cursor::{DbCursorRO, DbCursorRW, DbDupCursorRO},
+    cursor::{DbCursorRO, DbCursorRW, DbDupCursorRO, DbDupCursorRW},
     init_db,
-    mdbx::DatabaseArguments,
+    mdbx::{cursor::Cursor, DatabaseArguments},
     tables::{HashedStorages, PackedStoragesTrie},
     Database,
 };
@@ -12,11 +12,11 @@ use alloy_primitives::{keccak256, B256, U256};
 use alloy_trie::{HashBuilder, Nibbles};
 use proptest::prelude::*;
 use reth_db_api::{
-    table::Table,
+    table::{DupSort, Table},
     transaction::{DbTx, DbTxMut},
 };
 use reth_primitives_traits::StorageEntry;
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, time::Instant};
 use tempfile::tempdir;
 
 type TrieEntry = <PackedStoragesTrie as Table>::Value;
@@ -36,6 +36,77 @@ fn fixture(n: usize) -> Vec<StorageEntry> {
         .collect();
     rows.sort_by_key(|r| r.key);
     rows
+}
+
+#[test]
+fn cursor_seek_exhaustion_matches_native() {
+    let mut reference = None;
+    for mode in [None, Some(PackingMode::Dense), Some(PackingMode::Integer32)] {
+        let dir = tempdir().unwrap();
+        let db = init_db(dir.path(), DatabaseArguments::test().with_experimental_packing(mode, 3))
+            .unwrap();
+        let scope = B256::repeat_byte(1);
+        let beyond = B256::repeat_byte(2);
+        let rows = fixture(64);
+        let tx = db.tx_mut().unwrap();
+        let mut builder = HashBuilder::default().with_updates(true);
+        for row in &rows {
+            tx.put::<HashedStorages>(scope, *row).unwrap();
+            builder.add_leaf(
+                Nibbles::unpack(row.key),
+                alloy_rlp::encode_fixed_size(&row.value).as_ref(),
+            );
+        }
+        builder.root();
+        for (path, node) in builder.split().1 {
+            tx.put::<PackedStoragesTrie>(scope, TrieEntry { nibbles: path.into(), node }).unwrap();
+        }
+        tx.commit().unwrap();
+        let tx = db.tx().unwrap();
+        let mut storage = tx.cursor_dup_read::<HashedStorages>().unwrap();
+        let mut trie = tx.cursor_dup_read::<PackedStoragesTrie>().unwrap();
+        let storage_walk =
+            storage.walk(Some(beyond)).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
+        let trie_walk = trie.walk(Some(beyond)).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
+        let result = (
+            storage_walk,
+            trie_walk,
+            seek_trace(&mut storage, beyond),
+            seek_trace(&mut trie, beyond),
+        );
+        if let Some(expected) = &reference {
+            assert_eq!(&result, expected, "cursor positioning differs for {mode:?}");
+        } else {
+            reference = Some(result);
+        }
+    }
+}
+
+fn seek_trace<T: DupSort<Key = B256>>(
+    cursor: &mut (impl DbDupCursorRO<T> + DbCursorRO<T>),
+    key: B256,
+) -> Vec<Option<(B256, T::Value)>> {
+    vec![
+        cursor.seek(key).unwrap(),
+        cursor.next().unwrap(),
+        cursor.next().unwrap(),
+        cursor.prev().unwrap(),
+        cursor.current().unwrap(),
+        cursor.next().unwrap(),
+        cursor.next().unwrap(),
+        cursor.first().unwrap(),
+        cursor.seek_exact(key).unwrap(),
+        cursor.next().unwrap(),
+        cursor.prev().unwrap(),
+        cursor.last().unwrap(),
+        cursor.next_no_dup().unwrap(),
+        cursor.next_no_dup().unwrap(),
+        cursor.next().unwrap(),
+        cursor.prev().unwrap(),
+        cursor.last().unwrap(),
+        cursor.next().unwrap(),
+        cursor.prev().unwrap(),
+    ]
 }
 
 #[test]
@@ -254,4 +325,158 @@ fn reconstruction_handles_long_common_prefix_and_cross_cursor_updates() {
     assert_eq!(actual, expected);
     drop(c);
     tx.abort();
+}
+
+#[test]
+fn dirty_trie_writer_hashes_upper_once_per_storage_generation() {
+    for mode in [PackingMode::Dense, PackingMode::Integer32] {
+        let dir = tempdir().unwrap();
+        let db =
+            init_db(dir.path(), DatabaseArguments::test().with_experimental_packing(Some(mode), 3))
+                .unwrap();
+        let scope = B256::repeat_byte(6);
+        let mut rows = fixture(8192);
+        let tx = db.tx_mut().unwrap();
+        for row in &rows {
+            tx.put::<HashedStorages>(scope, *row).unwrap();
+        }
+        tx.commit().unwrap();
+        let tx = db.tx_mut().unwrap();
+        rows[0].value = U256::from(100_000);
+        tx.put::<HashedStorages>(scope, rows[0]).unwrap();
+        let expected = trie_nodes(&rows);
+        let mut writer = tx.cursor_dup_write::<PackedStoragesTrie>().unwrap();
+        let start = Instant::now();
+        for (path, node) in expected.iter().take(100) {
+            let found = writer.seek_by_key_subkey(scope, (*path).into()).unwrap().unwrap();
+            assert_eq!(found.nibbles.0, *path);
+            writer.delete_current().unwrap();
+            writer
+                .upsert(scope, &TrieEntry { nibbles: (*path).into(), node: node.clone() })
+                .unwrap();
+            assert_eq!(upper_stats(&writer), (1, rows.len()));
+        }
+        eprintln!(
+            "{mode:?}: 100 production-style trie replacements: {:?}; upper rebuilds={}, leaves={}",
+            start.elapsed(),
+            upper_stats(&writer).0,
+            upper_stats(&writer).1
+        );
+        writer.delete_current_duplicates().unwrap();
+        let root = writer.seek_by_key_subkey(scope, Nibbles::default().into()).unwrap().unwrap();
+        assert_eq!(root.node, expected[&Nibbles::default()]);
+        assert_eq!(upper_stats(&writer), (1, rows.len()));
+        rows[0].value = U256::from(100_001);
+        tx.put::<HashedStorages>(scope, rows[0]).unwrap();
+        let root = writer.seek_by_key_subkey(scope, Nibbles::default().into()).unwrap().unwrap();
+        assert_eq!(root.node, trie_nodes(&rows)[&Nibbles::default()]);
+        assert_eq!(upper_stats(&writer), (2, rows.len() * 2));
+    }
+}
+
+#[test]
+fn retained_trie_changes_invalidate_other_clean_cursors() {
+    for mode in [PackingMode::Dense, PackingMode::Integer32] {
+        let dir = tempdir().unwrap();
+        let db =
+            init_db(dir.path(), DatabaseArguments::test().with_experimental_packing(Some(mode), 3))
+                .unwrap();
+        let scope = B256::repeat_byte(7);
+        let rows = fixture(1024);
+        let tx = db.tx_mut().unwrap();
+        for row in &rows {
+            tx.put::<HashedStorages>(scope, *row).unwrap();
+        }
+        tx.commit().unwrap();
+        let tx = db.tx_mut().unwrap();
+        let mut reader = tx.cursor_dup_read::<PackedStoragesTrie>().unwrap();
+        let mut writer = tx.cursor_dup_write::<PackedStoragesTrie>().unwrap();
+        let mut root = reader.seek_exact(scope).unwrap().unwrap().1;
+        let canonical = root.clone();
+        root.node.root_hash = Some(B256::repeat_byte(9));
+        writer.upsert(scope, &root).unwrap();
+        assert_eq!(reader.current().unwrap().unwrap().1, root);
+        writer.seek_by_key_subkey(scope, Nibbles::default().into()).unwrap();
+        writer.delete_current().unwrap();
+        assert!(!reader.seek_exact(scope).unwrap().unwrap().1.nibbles.0.is_empty());
+        writer.upsert(scope, &canonical).unwrap();
+        assert_eq!(reader.seek_exact(scope).unwrap().unwrap().1, canonical);
+        tx.clear::<PackedStoragesTrie>().unwrap();
+        assert_eq!(reader.seek_exact(scope).unwrap().unwrap().1, canonical);
+    }
+}
+
+fn upper_stats<K: reth_libmdbx::TransactionKind>(
+    cursor: &Cursor<K, PackedStoragesTrie>,
+) -> (usize, usize) {
+    let Cursor::Packed(logical) = cursor else { panic!("expected packed cursor") };
+    (logical.upper_rebuilds, logical.upper_leaves)
+}
+
+fn trie_nodes(rows: &[StorageEntry]) -> BTreeMap<Nibbles, alloy_trie::BranchNodeCompact> {
+    let mut builder = HashBuilder::default().with_updates(true);
+    for row in rows {
+        builder
+            .add_leaf(Nibbles::unpack(row.key), alloy_rlp::encode_fixed_size(&row.value).as_ref());
+    }
+    builder.root();
+    builder.split().1.into_iter().collect()
+}
+
+#[test]
+fn scoped_seek_and_duplicate_iteration_match_native() {
+    let mut reference = None;
+    for mode in [None, Some(PackingMode::Dense), Some(PackingMode::Integer32)] {
+        let dir = tempdir().unwrap();
+        let db = init_db(dir.path(), DatabaseArguments::test().with_experimental_packing(mode, 3))
+            .unwrap();
+        let rows = fixture(64);
+        let nodes = trie_nodes(&rows);
+        let tx = db.tx_mut().unwrap();
+        for scope in [B256::repeat_byte(1), B256::repeat_byte(3), B256::repeat_byte(5)] {
+            for row in &rows {
+                tx.put::<HashedStorages>(scope, *row).unwrap();
+            }
+            for (path, node) in &nodes {
+                tx.put::<PackedStoragesTrie>(
+                    scope,
+                    TrieEntry { nibbles: (*path).into(), node: node.clone() },
+                )
+                .unwrap();
+            }
+        }
+        tx.commit().unwrap();
+        let tx = db.tx().unwrap();
+        let mut storage = tx.cursor_dup_read::<HashedStorages>().unwrap();
+        let mut trie = tx.cursor_dup_read::<PackedStoragesTrie>().unwrap();
+        let missing = B256::repeat_byte(2);
+        assert!(storage.walk_dup(Some(missing), None).unwrap().next().is_none());
+        assert!(trie.walk_dup(Some(missing), None).unwrap().next().is_none());
+        let scope = B256::repeat_byte(3);
+        let result = (
+            duplicate_seek_trace(&mut storage, scope, B256::repeat_byte(255)),
+            duplicate_seek_trace(&mut trie, scope, Nibbles::unpack(B256::repeat_byte(255)).into()),
+        );
+        if let Some(expected) = &reference {
+            assert_eq!(&result, expected, "duplicate positioning differs for {mode:?}");
+        } else {
+            reference = Some(result);
+        }
+    }
+}
+
+fn duplicate_seek_trace<T: DupSort<Key = B256>>(
+    cursor: &mut (impl DbDupCursorRO<T> + DbCursorRO<T>),
+    key: B256,
+    subkey: T::SubKey,
+) -> Vec<Option<(B256, T::Value)>> {
+    vec![
+        cursor.first().unwrap(),
+        cursor.seek_by_key_subkey(key, subkey).unwrap().map(|v| (key, v)),
+        cursor.next_dup().unwrap(),
+        cursor.prev_dup().unwrap(),
+        cursor.next_no_dup().unwrap(),
+        cursor.next().unwrap(),
+        cursor.prev().unwrap(),
+    ]
 }

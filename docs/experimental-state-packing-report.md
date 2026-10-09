@@ -2,6 +2,8 @@
 
 The implementation is on `feat/experimental-state-packing`, based on reth-oss commit `4e64212dff9d7f60a6214fa518b53b6e1b00121d` (Reth 2.7.0). It supplies dense and integer32 modes behind `--db.experimental-state-packing`, for fresh minimal-mode V2 databases. The default minimal database format is preserved.
 
+The subsequent [audit response](experimental-state-packing-audit-response.md) fixes repeated upper-trie hashing during writes and iteration after failed seeks. Its focused writer measurement is separate from the original fixture below; the disk/read/proof measurements here have not been rerun or extrapolated into new throughput claims.
+
 ## Scope
 
 Both modes pack hashed contract storage and reconstruct omitted lower storage-trie branches. Account state, account trie, code, history, static files, and RocksDB use their native formats. The provider supports MDBX snapshots, pending writes visible across cursors, abort, commit, ordering, and the production hashed/trie cursor factories. See [usage and design](experimental-state-packing.md).
