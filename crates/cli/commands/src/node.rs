@@ -210,6 +210,9 @@ where
         let data_dir = node_config.datadir();
         let db_path = data_dir.db();
 
+        eyre::ensure!(self.db.experimental_state_packing.is_none() || (node_config.pruning.minimal && node_config.storage.v2),
+            "--db.experimental-state-packing requires --minimal and storage V2; use a fresh dedicated data directory");
+
         tracing::info!(target: "reth::cli", path = ?db_path, "Opening database");
         let database = init_db(db_path.clone(), self.db.database_args())?
             .with_metrics_if(self.db.metrics_enabled());

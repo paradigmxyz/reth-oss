@@ -1512,11 +1512,16 @@ async fn close_database(database: TmpDB, data_dir: &ChainPath<DataDirPath>) -> e
     let database = Arc::into_inner(database)
         .ok_or_else(|| eyre!("the database of the stopped node is still in use"))?;
     // Unlike dropping the temporary database, this keeps the datadir.
-    drop(database.into_inner_db());
+    let database = database.into_inner_db();
+    let db_args = DatabaseArguments::test().with_experimental_packing(
+        database.experimental_packing(),
+        database.experimental_trie_depth(),
+    );
+    drop(database);
 
     // A database transaction keeps the database open without a handle of it. MDBX does not open
     // a database twice in a process, so opening it fails until the transaction is dropped.
-    open_db_read_only(data_dir.db(), DatabaseArguments::test()).wrap_err(
+    open_db_read_only(data_dir.db(), db_args).wrap_err(
         "the database of the stopped node is still open: drop all database transactions of the \
          node, e.g. providers of `database_provider_ro`, before stopping it",
     )?;
