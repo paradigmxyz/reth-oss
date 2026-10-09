@@ -81,6 +81,10 @@ impl<'a> Blob<'a> {
         self.mode
     }
 
+    pub(crate) const fn len(&self) -> usize {
+        self.count
+    }
+
     pub(crate) fn key(&self, row: usize) -> B256 {
         B256::from_slice(&self.bytes[HEADER + row * 32..HEADER + (row + 1) * 32])
     }

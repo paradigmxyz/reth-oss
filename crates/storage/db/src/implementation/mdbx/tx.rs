@@ -519,7 +519,7 @@ impl DbTxMut for Tx<RW> {
         if let Some(shared) = &self.packing &&
             T::NAME == "StoragesTrie"
         {
-            shared.trie_changed();
+            shared.trie_changed(None)?;
         }
 
         Ok(())

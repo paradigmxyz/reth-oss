@@ -1,6 +1,6 @@
 //! Logical storage and trie rows backed by packed blobs in the caller's MDBX snapshot.
 
-use super::{Shared, Store};
+use super::{cache::TrieNodes, store::rebuild_upper, Shared, Store};
 use crate::DatabaseError;
 use alloy_primitives::B256;
 use alloy_trie::{BranchNodeCompact, HashBuilder, Nibbles};
@@ -11,10 +11,7 @@ use reth_db_api::{
 };
 use reth_libmdbx::{Transaction, TransactionKind, WriteFlags, RW};
 use reth_primitives_traits::StorageEntry;
-use std::{
-    collections::BTreeMap,
-    sync::{atomic::Ordering, Arc},
-};
+use std::{collections::BTreeMap, sync::Arc};
 
 type TrieEntry = <PackedStoragesTrie as Table>::Value;
 type TrieKey = <PackedStoragesTrie as DupSort>::SubKey;
@@ -35,7 +32,7 @@ pub(crate) enum Move {
     LastDup,
 }
 
-/// An experimental cursor, using one validated state blob and one reconstructed region.
+/// An experimental cursor with transaction-shared reconstruction and a validated state blob.
 #[derive(Debug)]
 pub(crate) struct Logical<K: TransactionKind> {
     tx: Transaction<K>,
@@ -44,12 +41,14 @@ pub(crate) struct Logical<K: TransactionKind> {
     physical: reth_libmdbx::Cursor<K>,
     trie: bool,
     position: Position,
-    upper: Option<(B256, u64, u64, BTreeMap<Nibbles, BranchNodeCompact>)>,
-    region: Option<(B256, Nibbles, u64, BTreeMap<Nibbles, BranchNodeCompact>)>,
+    upper: Option<(B256, u64, u64, Arc<TrieNodes>)>,
+    region: Option<(B256, Nibbles, u64, Arc<TrieNodes>)>,
     #[cfg(test)]
     pub(crate) upper_rebuilds: usize,
     #[cfg(test)]
     pub(crate) upper_leaves: usize,
+    #[cfg(test)]
+    pub(crate) region_rebuilds: usize,
 }
 
 /// A failed seek must not be confused with a cursor that has never been positioned.
@@ -81,6 +80,8 @@ impl<K: TransactionKind> Logical<K> {
             upper_rebuilds: 0,
             #[cfg(test)]
             upper_leaves: 0,
+            #[cfg(test)]
+            region_rebuilds: 0,
         })
     }
 
@@ -259,9 +260,24 @@ impl<K: TransactionKind> Logical<K> {
         prefix: &Nibbles,
         upper: bool,
     ) -> Result<BTreeMap<Nibbles, BranchNodeCompact>, DatabaseError> {
-        #[cfg(test)]
         if upper {
-            self.upper_rebuilds += 1;
+            let (base, skips) = self.shared.unchanged(scope)?;
+            let (nodes, leaves) =
+                rebuild_upper(scope, self.shared.depth, &base, &skips, |bound, inclusive| {
+                    self.shared.find(&mut self.store, Some(bound), inclusive, false)
+                })?;
+            #[cfg(test)]
+            {
+                self.upper_rebuilds += 1;
+                self.upper_leaves += leaves;
+            }
+            #[cfg(not(test))]
+            let _ = leaves;
+            return Ok(nodes);
+        }
+        #[cfg(test)]
+        {
+            self.region_rebuilds += 1;
         }
         let mut builder = HashBuilder::default().with_updates(true);
         let mut nodes = BTreeMap::new();
@@ -280,7 +296,7 @@ impl<K: TransactionKind> Logical<K> {
                 break;
             }
             count += 1;
-            if !upper && count > MAX_REBUILD_LEAVES {
+            if count > MAX_REBUILD_LEAVES {
                 return Err(DatabaseError::Other("experimental trie region exceeds 262144 leaves; use a larger --db.experimental-trie-depth".into()));
             }
             builder.add_leaf(path, alloy_rlp::encode_fixed_size(&row.value).as_ref());
@@ -292,10 +308,6 @@ impl<K: TransactionKind> Logical<K> {
         }
         builder.root();
         Self::drain(&mut builder, &mut nodes, self.shared.depth, upper);
-        #[cfg(test)]
-        if upper {
-            self.upper_leaves += count;
-        }
         Ok(nodes)
     }
 
@@ -317,42 +329,45 @@ impl<K: TransactionKind> Logical<K> {
         inclusive: bool,
         reverse: bool,
     ) -> Result<Option<(Nibbles, BranchNodeCompact)>, DatabaseError> {
-        let generation = self.shared.generation.load(Ordering::Acquire);
-        let trie_epoch = self.shared.trie_epoch.load(Ordering::Acquire);
-        let dirty = self.shared.dirty(scope)?;
+        let (generation, physical_epoch, dirty) = self.shared.revision(scope)?;
+        let trie_epoch = if dirty { 0 } else { physical_epoch };
         // Dirty-contract nodes are derived from storage, so trie persistence cannot change them.
         // Clean-contract caches may reflect retained rows written through a different cursor.
         if self.upper.as_ref().is_none_or(|(s, g, t, _)| {
             *s != scope || *g != generation || (!dirty && *t != trie_epoch)
         }) {
-            let nodes = if dirty {
-                self.rebuild(scope, &Nibbles::default(), true)?
-            } else {
-                let mut nodes = BTreeMap::new();
-                let start = TrieKey::from(Nibbles::default()).encode();
-                let mut row = self
-                    .physical
-                    .get_both_range::<Vec<u8>>(scope.as_slice(), start.as_ref())
-                    .map_err(|e| DatabaseError::Read(e.into()))?;
-                while let Some(bytes) = row {
-                    if bytes.len() < 33 {
-                        return Err(DatabaseError::Decode);
-                    }
-                    let entry = TrieEntry::from_compact(&bytes, bytes.len()).0;
-                    if entry.nibbles.0.len() < self.shared.depth {
-                        nodes.insert(entry.nibbles.0, entry.node);
-                    }
-                    row = self
+            let nodes =
+                if let Some(nodes) = self.shared.cached(scope, None, (generation, trie_epoch))? {
+                    nodes
+                } else if dirty {
+                    Arc::new(self.rebuild(scope, &Nibbles::default(), true)?)
+                } else {
+                    let mut nodes = BTreeMap::new();
+                    let start = TrieKey::from(Nibbles::default()).encode();
+                    let mut row = self
                         .physical
-                        .next_dup::<Vec<u8>, Vec<u8>>()
-                        .map_err(|e| DatabaseError::Read(e.into()))?
-                        .map(|(_, v)| v);
-                }
-                if nodes.is_empty() {
-                    nodes = self.rebuild(scope, &Nibbles::default(), true)?;
-                }
-                nodes
-            };
+                        .get_both_range::<Vec<u8>>(scope.as_slice(), start.as_ref())
+                        .map_err(|e| DatabaseError::Read(e.into()))?;
+                    while let Some(bytes) = row {
+                        if bytes.len() < 33 {
+                            return Err(DatabaseError::Decode);
+                        }
+                        let entry = TrieEntry::from_compact(&bytes, bytes.len()).0;
+                        if entry.nibbles.0.len() < self.shared.depth {
+                            nodes.insert(entry.nibbles.0, entry.node);
+                        }
+                        row = self
+                            .physical
+                            .next_dup::<Vec<u8>, Vec<u8>>()
+                            .map_err(|e| DatabaseError::Read(e.into()))?
+                            .map(|(_, v)| v);
+                    }
+                    if nodes.is_empty() {
+                        nodes = self.rebuild(scope, &Nibbles::default(), true)?;
+                    }
+                    Arc::new(nodes)
+                };
+            self.shared.cache(scope, None, (generation, trie_epoch), Arc::clone(&nodes))?;
             self.upper = Some((scope, generation, trie_epoch, nodes));
         }
         let accepts = |p: &Nibbles| {
@@ -402,13 +417,27 @@ impl<K: TransactionKind> Logical<K> {
             {
                 return Ok(candidate);
             }
+            let region_generation = self.shared.region_generation(scope, prefix)?;
             if self
                 .region
                 .as_ref()
-                .is_none_or(|(s, p, g, _)| *s != scope || *p != prefix || *g != generation)
+                .is_none_or(|(s, p, g, _)| *s != scope || *p != prefix || *g != region_generation)
             {
-                let rebuilt = self.rebuild(scope, &prefix, false)?;
-                self.region = Some((scope, prefix, generation, rebuilt));
+                let rebuilt = if let Some(nodes) =
+                    self.shared.cached(scope, Some(prefix), (region_generation, 0))?
+                {
+                    nodes
+                } else {
+                    let nodes = Arc::new(self.rebuild(scope, &prefix, false)?);
+                    self.shared.cache(
+                        scope,
+                        Some(prefix),
+                        (region_generation, 0),
+                        Arc::clone(&nodes),
+                    )?;
+                    nodes
+                };
+                self.region = Some((scope, prefix, region_generation, rebuilt));
             }
             let nodes = &self.region.as_ref().ok_or(DatabaseError::Decode)?.3;
             let hit = if reverse {
@@ -494,12 +523,12 @@ impl Logical<RW> {
                     self.physical
                         .del(WriteFlags::CURRENT)
                         .map_err(|e| DatabaseError::Delete(e.into()))?;
-                    self.shared.trie_changed();
+                    self.shared.trie_changed(Some(s))?;
                 }
                 self.physical
                     .put(scope, value, WriteFlags::UPSERT)
                     .map_err(|e| DatabaseError::Read(e.into()))?;
-                self.shared.trie_changed();
+                self.shared.trie_changed(Some(s))?;
             }
             if entry.nibbles.0.is_empty() {
                 self.shared.mark_trie_root_written(s)?;
@@ -533,7 +562,7 @@ impl Logical<RW> {
                     self.physical
                         .del(WriteFlags::NO_DUP_DATA)
                         .map_err(|e| DatabaseError::Delete(e.into()))?;
-                    self.shared.trie_changed();
+                    self.shared.trie_changed(Some(B256::from_slice(scope)))?;
                 }
             } else if self
                 .physical
@@ -544,7 +573,7 @@ impl Logical<RW> {
                 self.physical
                     .del(WriteFlags::CURRENT)
                     .map_err(|e| DatabaseError::Delete(e.into()))?;
-                self.shared.trie_changed();
+                self.shared.trie_changed(Some(B256::from_slice(scope)))?;
             }
         } else if duplicates {
             self.shared.clear_contract(B256::from_slice(scope))?;

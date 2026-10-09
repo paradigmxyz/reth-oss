@@ -3,6 +3,7 @@
 use crate::{version::get_db_version, DatabaseError};
 use std::path::Path;
 
+mod cache;
 mod codec;
 mod cursor;
 mod store;

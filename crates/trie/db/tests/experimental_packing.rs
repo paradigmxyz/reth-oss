@@ -222,3 +222,77 @@ fn benchmark_packed_storage() {
 fn storage_root<TX: DbTx>(tx: &TX, scope: B256) -> B256 {
     StorageRoot::<DatabaseTrieCursorFactory<&TX,PackedKeyAdapter>,DatabaseHashedCursorFactory<&TX>>::from_tx_hashed(tx,scope).root().unwrap()
 }
+
+#[test]
+fn sparse_incremental_updates_preserve_roots_and_multiproofs() {
+    for mode in [PackingMode::Dense, PackingMode::Integer32] {
+        let native_dir = tempdir().unwrap();
+        let packed_dir = tempdir().unwrap();
+        let native = init_db(native_dir.path(), DatabaseArguments::test()).unwrap();
+        let packed = init_db(
+            packed_dir.path(),
+            DatabaseArguments::test().with_experimental_packing(Some(mode), 3),
+        )
+        .unwrap();
+        let scope = B256::repeat_byte(19);
+        let mut rows = fixture(8192);
+        let tx = packed.tx_mut().unwrap();
+        for row in &rows {
+            tx.put::<HashedStorages>(scope, *row).unwrap();
+        }
+        tx.commit().unwrap();
+        for round in 0..3 {
+            let tx = packed.tx_mut().unwrap();
+            let removed = rows.remove(round * 13);
+            tx.delete::<HashedStorages>(scope, Some(removed)).unwrap();
+            rows[100].value = U256::from(70000 + round);
+            tx.put::<HashedStorages>(scope, rows[100]).unwrap();
+            let inserted = StorageEntry::new(keccak256([round as u8, 252]), U256::MAX);
+            tx.put::<HashedStorages>(scope, inserted).unwrap();
+            rows.push(inserted);
+            rows.sort_by_key(|r| r.key);
+            tx.commit().unwrap();
+            let tx = native.tx_mut().unwrap();
+            tx.delete::<HashedStorages>(scope, None).unwrap();
+            tx.delete::<PackedStoragesTrie>(scope, None).unwrap();
+            let mut builder = HashBuilder::default().with_updates(true);
+            for row in &rows {
+                tx.put::<HashedStorages>(scope, *row).unwrap();
+                builder.add_leaf(
+                    Nibbles::unpack(row.key),
+                    alloy_rlp::encode_fixed_size(&row.value).as_ref(),
+                );
+            }
+            builder.root();
+            for (path, node) in builder.split().1 {
+                tx.put::<PackedStoragesTrie>(scope, TrieEntry { nibbles: path.into(), node })
+                    .unwrap();
+            }
+            tx.commit().unwrap();
+            let nt = native.tx().unwrap();
+            let pt = packed.tx().unwrap();
+            assert_eq!(storage_root(&pt, scope), storage_root(&nt, scope));
+            let targets = rows
+                .iter()
+                .step_by(511)
+                .map(|r| r.key)
+                .chain([removed.key, inserted.key, B256::ZERO])
+                .collect::<alloy_primitives::map::B256Set>();
+            let np = StorageProof::new_hashed(
+                DatabaseTrieCursorFactory::<_, PackedKeyAdapter>::new(&nt),
+                DatabaseHashedCursorFactory::new(&nt),
+                scope,
+            )
+            .storage_multiproof(targets.clone())
+            .unwrap();
+            let pp = StorageProof::new_hashed(
+                DatabaseTrieCursorFactory::<_, PackedKeyAdapter>::new(&pt),
+                DatabaseHashedCursorFactory::new(&pt),
+                scope,
+            )
+            .storage_multiproof(targets)
+            .unwrap();
+            assert_eq!(pp, np);
+        }
+    }
+}

@@ -2,6 +2,8 @@
 
 Audited baseline: `6ae848ff2141f4de2d7bdaea18bb3a098c841cd6`, branch `feat/experimental-state-packing`.
 
+The measurements and 52-test result below describe the original audit fix at `0a66cde013ecb8935632aa12df7d15c05dc443c3`. The subsequent [optimization report](experimental-state-packing-optimization-report.md) covers scoped generations, shared reconstruction caching, incremental upper hashing and blob merging. Its sparse-update regression reuses unchanged hashes rather than requiring the original 8,192-leaf upper pass.
+
 ## Confirmed issues
 
 ### P1: repeated full-contract hashing during trie persistence
@@ -49,9 +51,9 @@ Proposed implementation:
 
 The current fixed cutoff and 262,144-leaf lower-region error remain in place. This response does not claim that adaptive retention or removal of that limit is implemented.
 
-### Blob merging: compatible follow-up
+### Blob merging: implemented compatible follow-up
 
-Merging can reuse the current format, but is deferred so its extra reads and write amplification can be measured independently of the correctness fixes.
+Merging now reuses the current format. The optimization implements deletion-time low-water merging with the thresholds described below, snapshot/abort/reopen regressions, and a separate blob-target benchmark. Only a successor without remaining pending mutations can be consumed; predecessors already contain their applied changes. The original design notes follow.
 
 Proposed implementation:
 
@@ -60,7 +62,7 @@ Proposed implementation:
 3. Apply all pending changes for the selected blobs before encoding their merged rows. Atomically remove both old anchors and write the new first-slot anchor in the existing MDBX transaction. Never merge across contracts or change logical ordering or codec interpretation.
 4. Test clustered/random deletion, first-slot removal, empty blobs, inserts into merged ranges, clearing, both codecs, old read snapshots, abort, commit, and reopening. Compare live table pages and bytes rewritten per logical deletion. Reclaimed MDBX free pages do not by themselves shrink the database file.
 
-Neither suggestion is needed to fix P1 or P2. Both remain explicit follow-up work rather than implicit changes to the existing format or pruning preset.
+Neither suggestion is needed to fix P1 or P2. Adaptive retention remains a separate format milestone; merging is implemented without changing the format or pruning preset.
 
 ## Reproduce the regressions
 

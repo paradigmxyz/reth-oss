@@ -354,7 +354,8 @@ fn dirty_trie_writer_hashes_upper_once_per_storage_generation() {
             writer
                 .upsert(scope, &TrieEntry { nibbles: (*path).into(), node: node.clone() })
                 .unwrap();
-            assert_eq!(upper_stats(&writer), (1, rows.len()));
+            assert_eq!(upper_stats(&writer).0, 1);
+            assert!(upper_stats(&writer).1 < 256, "unchanged subtree hashes were not reused");
         }
         eprintln!(
             "{mode:?}: 100 production-style trie replacements: {:?}; upper rebuilds={}, leaves={}",
@@ -365,12 +366,14 @@ fn dirty_trie_writer_hashes_upper_once_per_storage_generation() {
         writer.delete_current_duplicates().unwrap();
         let root = writer.seek_by_key_subkey(scope, Nibbles::default().into()).unwrap().unwrap();
         assert_eq!(root.node, expected[&Nibbles::default()]);
-        assert_eq!(upper_stats(&writer), (1, rows.len()));
+        let first = upper_stats(&writer);
+        assert_eq!(first.0, 1);
         rows[0].value = U256::from(100_001);
         tx.put::<HashedStorages>(scope, rows[0]).unwrap();
         let root = writer.seek_by_key_subkey(scope, Nibbles::default().into()).unwrap().unwrap();
         assert_eq!(root.node, trie_nodes(&rows)[&Nibbles::default()]);
-        assert_eq!(upper_stats(&writer), (2, rows.len() * 2));
+        assert_eq!(upper_stats(&writer).0, 2);
+        assert!(upper_stats(&writer).1 < 512);
     }
 }
 
@@ -479,4 +482,349 @@ fn duplicate_seek_trace<T: DupSort<Key = B256>>(
         cursor.next().unwrap(),
         cursor.prev().unwrap(),
     ]
+}
+
+#[test]
+fn shared_reconstruction_survives_unrelated_writes() {
+    for mode in [PackingMode::Dense, PackingMode::Integer32] {
+        let dir = tempdir().unwrap();
+        let db =
+            init_db(dir.path(), DatabaseArguments::test().with_experimental_packing(Some(mode), 2))
+                .unwrap();
+        let scope = B256::repeat_byte(10);
+        let other = B256::repeat_byte(11);
+        let rows = fixture(8192);
+        let tx = db.tx_mut().unwrap();
+        for row in &rows {
+            tx.put::<HashedStorages>(scope, *row).unwrap();
+        }
+        tx.commit().unwrap();
+        let tx = db.tx_mut().unwrap();
+        let mut reader = tx.cursor_dup_read::<PackedStoragesTrie>().unwrap();
+        let expected = trie_nodes(&rows);
+        let paths: Vec<_> = expected.keys().filter(|p| p.len() >= 2).copied().collect();
+        let a = paths[0];
+        let b = *paths.iter().find(|p| p.slice(..2) != a.slice(..2)).unwrap();
+        for path in [a, b, a, b] {
+            let got = reader.seek_by_key_subkey(scope, path.into()).unwrap().unwrap();
+            assert_eq!(got.node, expected[&path]);
+        }
+        assert_eq!(region_stats(&reader), 2);
+        tx.put::<HashedStorages>(other, StorageEntry::new(rows[0].key, U256::ONE)).unwrap();
+        reader.seek_by_key_subkey(scope, a.into()).unwrap();
+        assert_eq!(region_stats(&reader), 2);
+        let mut second = tx.cursor_dup_read::<PackedStoragesTrie>().unwrap();
+        second.seek_by_key_subkey(scope, b.into()).unwrap();
+        assert_eq!(region_stats(&second), 0, "another cursor must share the cached region");
+        let changed =
+            *rows.iter().find(|r| Nibbles::unpack(r.key).starts_with(&a.slice(..2))).unwrap();
+        tx.put::<HashedStorages>(scope, StorageEntry::new(changed.key, U256::from(90000))).unwrap();
+        second.seek_by_key_subkey(scope, b.into()).unwrap();
+        assert_eq!(
+            region_stats(&second),
+            0,
+            "another region's mutation must not invalidate this one"
+        );
+        second.seek_by_key_subkey(scope, a.into()).unwrap();
+        assert_eq!(region_stats(&second), 1);
+        tx.delete::<HashedStorages>(scope, None).unwrap();
+        assert!(reader.seek_exact(scope).unwrap().is_none());
+        tx.clear::<HashedStorages>().unwrap();
+        assert!(second.first().unwrap().is_none());
+        for row in &rows[..64] {
+            tx.put::<HashedStorages>(scope, *row).unwrap();
+        }
+        let expected = trie_nodes(&rows[..64]);
+        assert_eq!(logical_nodes(&mut second, scope), expected);
+        drop(reader);
+        drop(second);
+        tx.commit().unwrap();
+        assert_eq!(
+            logical_nodes(
+                &mut db.tx().unwrap().cursor_dup_read::<PackedStoragesTrie>().unwrap(),
+                scope
+            ),
+            expected
+        );
+    }
+}
+
+fn region_stats<K: reth_libmdbx::TransactionKind>(cursor: &Cursor<K, PackedStoragesTrie>) -> usize {
+    let Cursor::Packed(logical) = cursor else { panic!("expected packed cursor") };
+    logical.region_rebuilds
+}
+
+#[test]
+fn incremental_upper_matches_complete_trie_after_mutations() {
+    for mode in [PackingMode::Dense, PackingMode::Integer32] {
+        for long_prefix in [false, true] {
+            let dir = tempdir().unwrap();
+            let args = DatabaseArguments::test().with_experimental_packing(Some(mode), 3);
+            let db = init_db(dir.path(), args.clone()).unwrap();
+            let scope = B256::repeat_byte(12);
+            let mut rows: BTreeMap<_, _> = fixture(2048)
+                .into_iter()
+                .map(|r| {
+                    let mut key = r.key;
+                    if long_prefix {
+                        key[..16].fill(0);
+                    }
+                    (key, r.value)
+                })
+                .collect();
+            let tx = db.tx_mut().unwrap();
+            for (key, value) in &rows {
+                tx.put::<HashedStorages>(scope, StorageEntry::new(*key, *value)).unwrap();
+            }
+            tx.commit().unwrap();
+            let old = db.tx().unwrap();
+            let old_expected = trie_nodes(
+                &rows.iter().map(|(k, v)| StorageEntry::new(*k, *v)).collect::<Vec<_>>(),
+            );
+            for round in 0..5 {
+                let tx = db.tx_mut().unwrap();
+                let keys: Vec<_> = rows.keys().step_by(31).copied().collect();
+                for key in keys {
+                    if round % 2 == 0 {
+                        tx.delete::<HashedStorages>(
+                            scope,
+                            Some(StorageEntry::new(key, rows[&key])),
+                        )
+                        .unwrap();
+                        rows.remove(&key);
+                    } else {
+                        rows.insert(key, U256::from(round + 900));
+                        tx.put::<HashedStorages>(scope, StorageEntry::new(key, rows[&key]))
+                            .unwrap();
+                    }
+                }
+                let new_key = B256::repeat_byte(round as u8 + 100);
+                rows.insert(new_key, U256::MAX);
+                tx.put::<HashedStorages>(scope, StorageEntry::new(new_key, U256::MAX)).unwrap();
+                let expected = trie_nodes(
+                    &rows.iter().map(|(k, v)| StorageEntry::new(*k, *v)).collect::<Vec<_>>(),
+                );
+                let mut cursor = tx.cursor_dup_read::<PackedStoragesTrie>().unwrap();
+                assert_eq!(logical_nodes(&mut cursor, scope), expected);
+                drop(cursor);
+                tx.commit().unwrap();
+                assert_eq!(
+                    logical_nodes(
+                        &mut db.tx().unwrap().cursor_dup_read::<PackedStoragesTrie>().unwrap(),
+                        scope
+                    ),
+                    expected
+                );
+            }
+            assert_eq!(
+                logical_nodes(&mut old.cursor_dup_read::<PackedStoragesTrie>().unwrap(), scope),
+                old_expected
+            );
+            old.abort();
+            drop(db);
+            let db = init_db(dir.path(), args).unwrap();
+            let expected = trie_nodes(
+                &rows.iter().map(|(k, v)| StorageEntry::new(*k, *v)).collect::<Vec<_>>(),
+            );
+            assert_eq!(
+                logical_nodes(
+                    &mut db.tx().unwrap().cursor_dup_read::<PackedStoragesTrie>().unwrap(),
+                    scope
+                ),
+                expected
+            );
+        }
+    }
+}
+
+fn logical_nodes<K: reth_libmdbx::TransactionKind>(
+    cursor: &mut Cursor<K, PackedStoragesTrie>,
+    scope: B256,
+) -> BTreeMap<Nibbles, alloy_trie::BranchNodeCompact> {
+    cursor
+        .walk_dup(Some(scope), None)
+        .unwrap()
+        .map(|r| r.map(|(_, e)| (e.nibbles.0, e.node)))
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+#[test]
+fn deletion_merges_blobs_atomically_and_preserves_snapshots() {
+    for mode in [PackingMode::Dense, PackingMode::Integer32] {
+        let dir = tempdir().unwrap();
+        let args = DatabaseArguments::test().with_experimental_packing(Some(mode), 3);
+        let db = init_db(dir.path(), args.clone()).unwrap();
+        let scope = B256::repeat_byte(13);
+        let other = B256::repeat_byte(14);
+        let rows = fixture(1024);
+        let tx = db.tx_mut().unwrap();
+        for row in &rows {
+            tx.put::<HashedStorages>(scope, *row).unwrap();
+        }
+        tx.put::<HashedStorages>(other, rows[0]).unwrap();
+        tx.commit().unwrap();
+        let old = db.tx().unwrap();
+        assert_eq!(blob_count(&old), 3);
+        let retained: Vec<_> =
+            rows.chunks(512).flat_map(|chunk| chunk.iter().skip(384)).copied().collect();
+        for abort in [true, false] {
+            let tx = db.tx_mut().unwrap();
+            for chunk in rows.chunks(512) {
+                for row in chunk.iter().take(384) {
+                    tx.delete::<HashedStorages>(scope, Some(*row)).unwrap();
+                }
+            }
+            if abort {
+                tx.abort();
+            } else {
+                tx.commit().unwrap();
+            }
+            assert_eq!(blob_count(&old), 3);
+            assert_eq!(old.entries::<HashedStorages>().unwrap(), 1025);
+            let latest = db.tx().unwrap();
+            assert_eq!(blob_count(&latest), if abort { 3 } else { 2 });
+            let actual = latest
+                .cursor_dup_read::<HashedStorages>()
+                .unwrap()
+                .walk_dup(Some(scope), None)
+                .unwrap()
+                .map(|r| r.unwrap().1)
+                .collect::<Vec<_>>();
+            assert_eq!(actual, if abort { rows.clone() } else { retained.clone() });
+        }
+        old.abort();
+        // Inserting into the merged range stays one blob, rather than immediately splitting.
+        let tx = db.tx_mut().unwrap();
+        tx.put::<HashedStorages>(scope, rows[0]).unwrap();
+        tx.commit().unwrap();
+        assert_eq!(blob_count(&db.tx().unwrap()), 2);
+        drop(db);
+        let db = init_db(dir.path(), args).unwrap();
+        assert_eq!(blob_count(&db.tx().unwrap()), 2);
+        assert_eq!(db.tx().unwrap().entries::<HashedStorages>().unwrap(), 258);
+    }
+}
+
+fn blob_count<K: reth_libmdbx::TransactionKind>(tx: &crate::mdbx::tx::Tx<K>) -> usize {
+    let dbi = tx.inner().open_db(Some(TABLE)).unwrap().dbi();
+    tx.inner().db_stat_with_dbi(dbi).unwrap().entries()
+}
+
+#[test]
+fn small_blob_merges_successor_when_predecessor_is_full() {
+    for mode in [PackingMode::Dense, PackingMode::Integer32] {
+        let dir = tempdir().unwrap();
+        let db =
+            init_db(dir.path(), DatabaseArguments::test().with_experimental_packing(Some(mode), 3))
+                .unwrap();
+        let scope = B256::repeat_byte(16);
+        let rows = fixture(1536);
+        let tx = db.tx_mut().unwrap();
+        for row in &rows {
+            tx.put::<HashedStorages>(scope, *row).unwrap();
+        }
+        tx.commit().unwrap();
+        for (round, start) in [1024, 512].into_iter().enumerate() {
+            let tx = db.tx_mut().unwrap();
+            for row in &rows[start..start + 384] {
+                tx.delete::<HashedStorages>(scope, Some(*row)).unwrap();
+            }
+            tx.commit().unwrap();
+            let tx = db.tx().unwrap();
+            assert_eq!(blob_count(&tx), if round == 0 { 3 } else { 2 });
+            assert_eq!(tx.entries::<HashedStorages>().unwrap(), 1536 - 384 * (round + 1));
+        }
+    }
+}
+
+/// DB-backed tuning experiment. Test-only targets never become runtime flags or format settings.
+#[test]
+#[ignore = "explicit blob-size/performance experiment"]
+fn benchmark_blob_targets() {
+    let scope = B256::repeat_byte(15);
+    let rows = fixture(65536);
+    println!("mode,target,round,live_bytes,random_read_ns,update_commit_ms,delete_commit_ms,post_delete_blobs");
+    for mode in [PackingMode::Dense, PackingMode::Integer32] {
+        for target in [128, 256, 512] {
+            for round in 0..3 {
+                let dir = tempdir().unwrap();
+                let db = init_db(
+                    dir.path(),
+                    DatabaseArguments::test().with_experimental_packing(Some(mode), 3),
+                )
+                .unwrap();
+                let tx = db.tx_mut().unwrap();
+                tx.packing
+                    .as_ref()
+                    .unwrap()
+                    .row_target
+                    .store(target, std::sync::atomic::Ordering::Relaxed);
+                for row in &rows {
+                    tx.put::<HashedStorages>(scope, *row).unwrap();
+                }
+                tx.commit().unwrap();
+                let tx = db.tx().unwrap();
+                let mut live = 0;
+                for name in [TABLE, PackedStoragesTrie::NAME] {
+                    let dbi = tx.inner().open_db(Some(name)).unwrap().dbi();
+                    let stat = tx.inner().db_stat_with_dbi(dbi).unwrap();
+                    live += (stat.branch_pages() + stat.leaf_pages() + stat.overflow_pages()) *
+                        stat.page_size() as usize;
+                }
+                let mut cursor = tx.cursor_dup_read::<HashedStorages>().unwrap();
+                let start = Instant::now();
+                for i in 0..4096 {
+                    let at = (i * 7919) % rows.len();
+                    assert_eq!(
+                        cursor.seek_by_key_subkey(scope, rows[at].key).unwrap(),
+                        Some(rows[at])
+                    );
+                }
+                let random = start.elapsed().as_nanos() as f64 / 4096.;
+                drop(cursor);
+                tx.abort();
+                let start = Instant::now();
+                let tx = db.tx_mut().unwrap();
+                tx.packing
+                    .as_ref()
+                    .unwrap()
+                    .row_target
+                    .store(target, std::sync::atomic::Ordering::Relaxed);
+                for i in (0..rows.len()).step_by(1024) {
+                    tx.put::<HashedStorages>(
+                        scope,
+                        StorageEntry::new(rows[i].key, U256::from(777)),
+                    )
+                    .unwrap();
+                }
+                tx.commit().unwrap();
+                let update = start.elapsed().as_secs_f64() * 1000.;
+                let start = Instant::now();
+                let tx = db.tx_mut().unwrap();
+                tx.packing
+                    .as_ref()
+                    .unwrap()
+                    .row_target
+                    .store(target, std::sync::atomic::Ordering::Relaxed);
+                let mut cursor = tx.cursor_dup_write::<HashedStorages>().unwrap();
+                for chunk in rows.chunks(target) {
+                    for row in chunk.iter().take(target * 7 / 8) {
+                        // Updated values may differ, so position/delete by key.
+                        cursor.seek_by_key_subkey(scope, row.key).unwrap();
+                        cursor.delete_current().unwrap();
+                    }
+                }
+                drop(cursor);
+                tx.commit().unwrap();
+                let deletion = start.elapsed().as_secs_f64() * 1000.;
+                let tx = db.tx().unwrap();
+                assert_eq!(tx.entries::<HashedStorages>().unwrap(), 8192);
+                println!(
+                    "{mode:?},{target},{round},{live},{random:.1},{update:.3},{deletion:.3},{}",
+                    blob_count(&tx)
+                );
+            }
+        }
+    }
 }
