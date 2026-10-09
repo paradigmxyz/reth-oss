@@ -65,7 +65,7 @@ async fn eth73_announcements_and_metadata_violations() {
         .protocols(vec![EthVersion::Eth73.into()])
         .build();
     let (p2p, _) = UnauthedP2PStream::new(ecies).handshake(hello).await.unwrap();
-    assert_eq!(p2p.shared_capabilities().eth_version(), Some(EthVersion::Eth73));
+    assert_eq!(p2p.shared_capabilities().eth_version().unwrap(), EthVersion::Eth73);
     let status = StatusBuilder::default().version(EthVersion::Eth73).build();
     let fork_filter = MAINNET.hardfork_fork_filter(EthereumHardfork::Frontier).unwrap();
     let (mut stream, _) = UnauthedEthStream::new(p2p)
