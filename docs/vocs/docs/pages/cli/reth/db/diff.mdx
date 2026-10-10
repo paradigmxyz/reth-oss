@@ -73,6 +73,19 @@ Database:
       --db.disable-metrics
           Disable built-in database metrics
 
+      --db.experimental-state-packing <EXPERIMENTAL_STATE_PACKING>
+          Use an experimental packed-state database with reconstructed storage trie records. Requires a fresh dedicated directory with storage V2 on node startup. Supports archive, full, and minimal retention modes
+
+          Possible values:
+          - dense:     Dense offsets with native Compact values
+          - integer32: Adaptive groups of 32 integer values
+
+      --db.experimental-trie-depth <EXPERIMENTAL_TRIE_DEPTH>
+          Retain storage trie records above this nibble depth (default: 3). This is part of the persisted experimental format and cannot change on reopening
+
+      --db.experimental-retain-full-trie
+          Pack storage values while retaining the full native storage trie. Requires a fresh directory and cannot change on reopening
+
       --table <TABLE>
           The table name to diff. If not specified, all tables are diffed.
 

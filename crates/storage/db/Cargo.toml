@@ -21,6 +21,9 @@ reth-tracing.workspace = true
 tracing.workspace = true
 reth-static-file-types.workspace = true
 reth-primitives-traits = { workspace = true, optional = true, features = ["quanta"] }
+reth-codecs = { workspace = true, optional = true }
+alloy-trie = { workspace = true, optional = true, features = ["std", "ethereum"] }
+alloy-rlp = { workspace = true, optional = true }
 
 # ethereum
 alloy-primitives.workspace = true
@@ -78,6 +81,9 @@ mdbx = [
     "dep:metrics",
     "dep:strum",
     "dep:rustc-hash",
+    "dep:reth-codecs",
+    "dep:alloy-trie",
+    "dep:alloy-rlp",
 ]
 test-utils = [
     "dep:tempfile",
@@ -88,8 +94,11 @@ test-utils = [
     "reth-nippy-jar/test-utils",
     "reth-primitives-traits/test-utils",
     "reth-prune-types/test-utils",
+    "reth-codecs?/test-utils",
 ]
 arbitrary = [
+    "alloy-trie?/arbitrary",
+    "reth-codecs?/arbitrary",
     "reth-db-api/arbitrary",
     "alloy-primitives/arbitrary",
     "alloy-consensus/arbitrary",

@@ -3,6 +3,7 @@ use crate::{
     table::{DupSort, Encode, Table},
     DatabaseError,
 };
+use alloy_primitives::B256;
 use std::fmt::Debug;
 
 /// Helper adapter type for accessing [`DbTx`] cursor.
@@ -76,4 +77,10 @@ pub trait DbTxMut: Send {
     fn cursor_write<T: Table>(&self) -> Result<Self::CursorMut<T>, DatabaseError>;
     /// `DupCursor` mut.
     fn cursor_dup_write<T: DupSort>(&self) -> Result<Self::DupCursorMut<T>, DatabaseError>;
+
+    /// Records completion of canonical trie updates for the current storage generation.
+    /// Backends that repair state-only commits can avoid repeating a completed trie write.
+    fn finish_storage_trie_updates(&self, _hashed_address: B256) -> Result<(), DatabaseError> {
+        Ok(())
+    }
 }

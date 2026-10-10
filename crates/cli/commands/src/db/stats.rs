@@ -89,6 +89,9 @@ impl Command {
 
         tool.provider_factory.db_ref().view(|tx| {
             let mut db_tables = Tables::ALL.iter().map(|table| table.name()).collect::<Vec<_>>();
+            if tool.provider_factory.db_ref().experimental_packing().is_some() {
+                db_tables.push(mdbx::packing::TABLE_NAME);
+            }
             db_tables.sort_unstable();
             let mut total_size = 0;
             for db_table in db_tables {

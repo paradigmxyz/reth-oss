@@ -36,6 +36,10 @@ pub mod tx;
 
 mod utils;
 
+pub mod native_cursor;
+pub mod packing;
+mod routing_cursor;
+
 /// 1 KB in bytes
 pub const KILOBYTE: usize = 1024;
 /// 1 MB in bytes
@@ -119,6 +123,8 @@ pub struct DatabaseArguments {
     /// environments). Choose `SafeNoSync` if performance is more important and occasional data
     /// loss is acceptable (e.g., testing or ephemeral data).
     sync_mode: SyncMode,
+    experimental_packing: Option<packing::PackingMode>,
+    experimental_trie_depth: usize,
 }
 
 impl Default for DatabaseArguments {
@@ -143,6 +149,8 @@ impl DatabaseArguments {
             exclusive: None,
             max_readers: None,
             sync_mode: SyncMode::Durable,
+            experimental_packing: None,
+            experimental_trie_depth: 3,
         }
     }
 
@@ -237,6 +245,36 @@ impl DatabaseArguments {
     pub const fn client_version(&self) -> &ClientVersion {
         &self.client_version
     }
+
+    /// Selects an experimental layout for a fresh, dedicated database directory.
+    pub const fn with_experimental_packing(
+        mut self,
+        mode: Option<packing::PackingMode>,
+        depth: usize,
+    ) -> Self {
+        self.experimental_packing = mode;
+        self.experimental_trie_depth = depth;
+        self
+    }
+
+    /// Returns the explicitly requested experimental layout.
+    pub const fn experimental_packing(&self) -> Option<packing::PackingMode> {
+        self.experimental_packing
+    }
+
+    /// Returns the retained trie depth for the experimental layout.
+    pub const fn experimental_trie_depth(&self) -> usize {
+        self.experimental_trie_depth
+    }
+
+    /// Retain native storage trie records while packing only storage values.
+    /// The persisted marker prevents reopening a reconstructed layout with this option.
+    pub const fn with_experimental_full_trie(mut self, retain: bool) -> Self {
+        if retain {
+            self.experimental_trie_depth = packing::FULL_TRIE_DEPTH;
+        }
+        self
+    }
 }
 
 /// Wrapper for the libmdbx environment: [Environment]
@@ -256,6 +294,8 @@ pub struct DatabaseEnv {
     metrics: Option<Arc<DatabaseEnvMetrics>>,
     /// Write lock for when dealing with a read-write environment.
     _lock_file: Option<StorageLock>,
+    experimental_packing: Option<packing::PackingMode>,
+    experimental_trie_depth: usize,
 }
 
 impl Database for DatabaseEnv {
@@ -263,21 +303,45 @@ impl Database for DatabaseEnv {
     type TXMut = tx::Tx<RW>;
 
     fn tx(&self) -> Result<Self::TX, DatabaseError> {
-        Tx::new(
-            self.inner.begin_ro_txn().map_err(|e| DatabaseError::InitTx(e.into()))?,
-            self.dbis.clone(),
-            self.metrics.clone(),
-        )
-        .map_err(|e| DatabaseError::InitTx(e.into()))
+        let inner = self.inner.begin_ro_txn().map_err(|e| DatabaseError::InitTx(e.into()))?;
+        let shared = self
+            .experimental_packing
+            .map(|mode| {
+                let dbi = inner
+                    .open_db(Some(packing::TABLE))
+                    .map_err(|e| DatabaseError::Open(e.into()))?
+                    .dbi();
+                Ok::<_, DatabaseError>(Arc::new(packing::Shared::new(
+                    mode,
+                    self.experimental_trie_depth,
+                    dbi,
+                    None,
+                )))
+            })
+            .transpose()?;
+        Tx::new(inner, self.dbis.clone(), self.metrics.clone(), shared)
+            .map_err(|e| DatabaseError::InitTx(e.into()))
     }
 
     fn tx_mut(&self) -> Result<Self::TXMut, DatabaseError> {
-        Tx::new(
-            self.inner.begin_rw_txn().map_err(|e| DatabaseError::InitTx(e.into()))?,
-            self.dbis.clone(),
-            self.metrics.clone(),
-        )
-        .map_err(|e| DatabaseError::InitTx(e.into()))
+        let inner = self.inner.begin_rw_txn().map_err(|e| DatabaseError::InitTx(e.into()))?;
+        let shared = self
+            .experimental_packing
+            .map(|mode| {
+                let dbi = inner
+                    .open_db(Some(packing::TABLE))
+                    .map_err(|e| DatabaseError::Open(e.into()))?
+                    .dbi();
+                Ok::<_, DatabaseError>(Arc::new(packing::Shared::new(
+                    mode,
+                    self.experimental_trie_depth,
+                    dbi,
+                    Some(inner.clone()),
+                )))
+            })
+            .transpose()?;
+        Tx::new(inner, self.dbis.clone(), self.metrics.clone(), shared)
+            .map_err(|e| DatabaseError::InitTx(e.into()))
     }
 
     fn path(&self) -> PathBuf {
@@ -386,6 +450,16 @@ impl DatabaseMetrics for DatabaseEnv {
 }
 
 impl DatabaseEnv {
+    /// Experimental layout selected when this database was opened.
+    pub const fn experimental_packing(&self) -> Option<packing::PackingMode> {
+        self.experimental_packing
+    }
+
+    /// Persisted reconstruction cutoff for the experimental layout.
+    pub const fn experimental_trie_depth(&self) -> usize {
+        self.experimental_trie_depth
+    }
+
     /// Opens the database at the specified path with the given `EnvKind`.
     ///
     /// It does not create the tables, for that call [`DatabaseEnv::create_tables`].
@@ -394,6 +468,7 @@ impl DatabaseEnv {
         kind: DatabaseEnvKind,
         args: DatabaseArguments,
     ) -> Result<Self, DatabaseError> {
+        packing::check_directory(path, args.experimental_packing, args.experimental_trie_depth)?;
         let _lock_file = if kind.is_rw() {
             StorageLock::try_acquire(path)
                 .map_err(|err| DatabaseError::Other(err.to_string()))?
@@ -524,7 +599,7 @@ impl DatabaseEnv {
                     LogLevel::Extra => 7,
                 });
             } else {
-                return Err(DatabaseError::LogLevelUnavailable(log_level))
+                return Err(DatabaseError::LogLevelUnavailable(log_level));
             }
         }
 
@@ -538,6 +613,8 @@ impl DatabaseEnv {
             dbis: Arc::default(),
             metrics: None,
             _lock_file,
+            experimental_packing: args.experimental_packing,
+            experimental_trie_depth: args.experimental_trie_depth,
         };
 
         Ok(env)
@@ -574,6 +651,15 @@ impl DatabaseEnv {
         // before it can be shared.
         let dbis = Arc::make_mut(&mut self.dbis);
         dbis.extend(handles);
+
+        if self.experimental_packing.is_some() {
+            let tx = self.inner.begin_rw_txn().map_err(|e| DatabaseError::InitTx(e.into()))?;
+            let table = tx
+                .create_db(Some(packing::TABLE), DatabaseFlags::default())
+                .map_err(|e| DatabaseError::CreateTable(e.into()))?;
+            dbis.insert(packing::TABLE, table.dbi());
+            tx.commit().map_err(|e| DatabaseError::Commit(e.into()))?;
+        }
 
         Ok(())
     }
@@ -647,7 +733,7 @@ impl DatabaseEnv {
     /// Records version that accesses the database with write privileges.
     pub fn record_client_version(&self, version: ClientVersion) -> Result<(), DatabaseError> {
         if version.is_empty() {
-            return Ok(())
+            return Ok(());
         }
 
         let tx = self.tx_mut()?;
