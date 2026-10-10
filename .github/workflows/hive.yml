@@ -26,7 +26,8 @@ jobs:
     with:
       hive_target: hive
       artifact_name: "reth"
-    secrets: inherit
+    secrets:
+      DEPOT_TOKEN: ${{ secrets.DEPOT_TOKEN }}
 
   prepare-hive:
     if: github.repository == 'paradigmxyz/reth-oss'
@@ -69,7 +70,7 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ./hive_assets
-          key: hive-assets-${{ matrix.variant }}-${{ steps.hive-commit.outputs.hash }}-${{ hashFiles('.github/scripts/hive/build_simulators.sh') }}
+          key: hive-assets-${{ matrix.variant }}-${{ steps.hive-commit.outputs.hash }}-${{ hashFiles('.github/scripts/hive/build_simulators.sh', '.github/scripts/hive/reth_exceptions.diff') }}
 
       - name: Build hive assets
         if: steps.cache-hive.outputs.cache-hit != 'true'
@@ -849,7 +850,9 @@ jobs:
           path: /tmp
 
       - name: Load Docker images
-        run: .github/scripts/hive/load_images.sh
+        env:
+          SCENARIO_SIM: ${{ matrix.scenario.sim }}
+        run: .github/scripts/hive/load_images.sh "$SCENARIO_SIM"
 
       - name: Move hive binary
         run: |

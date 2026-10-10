@@ -218,7 +218,7 @@ mod tests {
     use super::*;
     use crate::{message::RequestPair, GetReceipts, Receipts};
     use alloy_consensus::TxType;
-    use alloy_primitives::{b256, hex, Address, Bloom, Log};
+    use alloy_primitives::{b256, hex, Address, Log};
     use alloy_rlp::{Decodable, Encodable};
 
     #[test]

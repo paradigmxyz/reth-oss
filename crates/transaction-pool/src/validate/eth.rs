@@ -724,11 +724,11 @@ where
             None
         };
         let account = if let Some(metadata) = frame_metadata {
-            let account = Account {
-                nonce: metadata.state_nonce,
-                balance: metadata.sender_balance,
-                bytecode_hash: metadata.sender_code_hash,
-            };
+            let account = Account::new(
+                metadata.state_nonce,
+                metadata.sender_balance,
+                metadata.sender_code_hash,
+            );
             if let Err(reason) = transaction.set_frame_validation(metadata) {
                 return TransactionValidationOutcome::Invalid(
                     transaction,

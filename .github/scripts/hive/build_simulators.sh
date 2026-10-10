@@ -2,7 +2,6 @@
 set -eo pipefail
 
 fixture_variant="${1:-amsterdam}"
-# Cache-bump for the EELS frame-mapping update (a1945ddfd).
 
 case "${fixture_variant}" in
     amsterdam)
@@ -35,6 +34,20 @@ esac
 mkdir hive_assets/
 
 cd hivetests
+
+if [[ "${fixture_variant}" == "bogota" ]]; then
+    for simulator in consume-engine consume-rlp; do
+        simulator_dir="simulators/ethereum/eels/${simulator}"
+        cp ../.github/scripts/hive/reth_exceptions.diff "${simulator_dir}/"
+        cat >> "${simulator_dir}/Dockerfile" <<'DOCKERFILE'
+
+# Recognize Reth's frame-format errors when checking rejected transactions.
+COPY reth_exceptions.diff /tmp/reth_exceptions.diff
+RUN git -C /execution-specs apply /tmp/reth_exceptions.diff
+DOCKERFILE
+    done
+fi
+
 go build .
 
 ./hive -client reth # first builds and caches the client

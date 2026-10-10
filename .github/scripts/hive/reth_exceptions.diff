@@ -1,0 +1,14 @@
+diff --git a/packages/testing/src/execution_testing/client_clis/clis/reth.py b/packages/testing/src/execution_testing/client_clis/clis/reth.py
+--- a/packages/testing/src/execution_testing/client_clis/clis/reth.py
++++ b/packages/testing/src/execution_testing/client_clis/clis/reth.py
+@@ -119,6 +119,10 @@ class RethExceptionMapper(ExceptionMapper):
+             r"EIP-8141 explicit signature message cannot be zero"
+             r"|invalid EIP-8141 frame mode|"
+             r"invalid EIP-8141 signature scheme|"
++            r"invalid EIP-8141 address length|"
++            r"invalid EIP-8141 signature message length|"
++            r"EIP-8141 signature message must be nonzero|"
++            r"POST_TX frames require EIP-7906|"
+             r"transaction gas limit \d+ is more than blocks available gas \d+"
+         ),
+         TransactionException.TYPE_6_INVALID_SIGNATURE: (

@@ -393,8 +393,8 @@ fn add_receipts(provider: &MockEthProvider, number: BlockNumber) -> B256 {
     provider.add_receipts(
         number,
         vec![
-            Receipt { cumulative_gas_used: 21000, success: true, ..Default::default() },
-            Receipt { cumulative_gas_used: 42000, success: false, ..Default::default() },
+            Receipt::standard(Default::default(), true, 21_000, Vec::new()),
+            Receipt::standard(Default::default(), false, 42_000, Vec::new()),
         ],
     );
     hash

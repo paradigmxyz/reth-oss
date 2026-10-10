@@ -241,6 +241,7 @@ mod tests {
     use super::*;
     use alloy_eips::eip4895::Withdrawal;
     use alloy_primitives::{address, b256, b64, Address};
+    use core::str::FromStr;
 
     #[test]
     fn attributes_serde() {
