@@ -61,13 +61,14 @@ impl<T: TransactionOrdering> Iterator for BestTransactionsWithFees<T> {
         // find the next transaction that satisfies the base fee
         loop {
             let best = Iterator::next(&mut self.best)?;
-            // If both the base fee and blob fee (if applicable for EIP-4844) are satisfied, return
-            // the transaction
-            if best.transaction.max_fee_per_gas() >= self.base_fee as u128 &&
+            // If both the base fee and blob fee (for actual blob transactions) are satisfied,
+            // return the transaction. Some non-blob transaction types carry a blob-fee field for
+            // encoding compatibility, but that field must not subject them to the blob fee gate.
+            let blob_fee_satisfied = !best.transaction.is_blob_transaction() ||
                 best.transaction
                     .max_fee_per_blob_gas()
-                    .is_none_or(|fee| fee >= self.base_fee_per_blob_gas as u128)
-            {
+                    .is_none_or(|fee| fee >= self.base_fee_per_blob_gas as u128);
+            if best.transaction.max_fee_per_gas() >= self.base_fee as u128 && blob_fee_satisfied {
                 return Some(best);
             }
             crate::traits::BestTransactions::mark_invalid(
@@ -229,7 +230,7 @@ impl<T: TransactionOrdering> BestTransactions<T> {
                 self.independent.insert(unlocked.clone());
             }
 
-            if self.skip_blobs && best.transaction.is_eip4844() {
+            if self.skip_blobs && best.transaction.is_blob_transaction() {
                 // blobs should be skipped, marking them as invalid will ensure that no dependent
                 // transactions are returned
                 self.mark_invalid(
@@ -475,7 +476,7 @@ where
 
     fn set_skip_blobs(&mut self, skip_blobs: bool) {
         if skip_blobs {
-            self.buffer.retain(|tx| !tx.transaction.is_eip4844())
+            self.buffer.retain(|tx| !tx.transaction.is_blob_transaction())
         }
         self.inner.set_skip_blobs(skip_blobs)
     }

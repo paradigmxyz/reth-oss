@@ -7,16 +7,18 @@ use crate::{
 use alloy_chains::Chain;
 use alloy_consensus::{transaction::TxHashRef, BlockHeader, Transaction as _};
 use alloy_eips::eip2718::WithEncoded;
-use alloy_evm::{block::TxResult, precompiles::PrecompilesMap};
+use alloy_evm::{
+    block::TxResult, eth::transaction_gas_reservation, precompiles::PrecompilesMap, TransactionTr,
+};
 use alloy_network::{NetworkTransactionBuilder, TransactionBuilder};
 use alloy_rpc_types_eth::{
-    simulate::{SimBlock, SimCallResult, SimulateError, SimulatedBlock},
+    simulate::{FrameCallResult, SimBlock, SimCallResult, SimulateError, SimulatedBlock},
     state::StateOverride,
     BlockId, BlockOverrides, BlockTransactionsKind,
 };
 use jsonrpsee_types::{error::INTERNAL_ERROR_CODE, ErrorObject};
 use reth_evm::{
-    execute::{BlockBuilder, BlockBuilderOutcome, BlockExecutor},
+    execute::{BlockBuilder, BlockBuilderOutcome, BlockExecutor, ExecutorTx},
     Evm, HaltReasonFor,
 };
 use reth_primitives_traits::{
@@ -30,6 +32,10 @@ use revm::{
     context_interface::result::ExecutionResult,
     primitives::{hardfork::SpecId, Address, Bytes, TxKind, U256},
     Database,
+};
+
+pub use alloy_rpc_types_eth::simulate::{
+    FrameSimulationFrameResult, FrameSimulationPrefixShape, FrameSimulationResult,
 };
 
 /// Fallback seconds added between simulated block timestamps when neither the user nor the chain
@@ -328,7 +334,7 @@ pub fn execute_transactions<S, T>(
 where
     S: BlockBuilder<
         Executor: BlockExecutor<
-            Evm: Evm<DB: Database<Error: Into<EthApiError>>, Spec: Into<SpecId>>,
+            Evm: Evm<DB: Database<Error: Into<EthApiError>>, Spec: Into<SpecId>, Tx: TransactionTr>,
         >,
     >,
     T: RpcConvert<Primitives = S::Primitives>,
@@ -343,6 +349,7 @@ where
     let is_amsterdam = builder.evm().cfg_env().enable_amsterdam_eip8037;
     let tx_gas_limit_cap = builder.evm().cfg_env().tx_gas_limit_cap();
     for mut call in calls {
+        let is_frame = Into::<u8>::into(call.as_ref().output_tx_type()) == 0x06;
         let block_gas_remaining = if is_amsterdam {
             block_gas_limit
                 .saturating_sub(block_regular_gas_used)
@@ -352,7 +359,7 @@ where
         };
         let mut default_gas_limit = block_gas_remaining;
 
-        if let Some(gas_limit) = call.as_ref().gas_limit() {
+        if !is_frame && let Some(gas_limit) = call.as_ref().gas_limit() {
             let exceeds_gas_limit = if is_amsterdam {
                 let regular_available_gas = block_gas_limit.saturating_sub(block_regular_gas_used);
                 let state_available_gas = block_gas_limit.saturating_sub(block_state_gas_used);
@@ -368,7 +375,7 @@ where
             }
         }
 
-        if let Some(remaining_call_gas_limit) = *remaining_call_gas_limit {
+        if !is_frame && let Some(remaining_call_gas_limit) = *remaining_call_gas_limit {
             if let Some(gas_limit) = call.as_ref().gas_limit() {
                 if gas_limit > remaining_call_gas_limit {
                     call.as_mut().set_gas_limit(remaining_call_gas_limit);
@@ -392,12 +399,33 @@ where
         // Create transaction with an empty envelope.
         // The effect for a layer-2 execution client is that it does not charge L1 cost.
         let tx = WithEncoded::new(Default::default(), tx);
+        let (tx_env, tx) = <_ as ExecutorTx<S::Executor>>::into_parts_with_gas_params(
+            tx,
+            &builder.evm().cfg_env().gas_params,
+        );
+        if is_frame {
+            // Resolve the signed envelope before checking limits: its outer gas may be omitted,
+            // and its execution and state reservations must not be combined for block admission.
+            ensure_frame_simulation_gas(
+                &tx_env,
+                *remaining_call_gas_limit,
+                if is_amsterdam {
+                    (
+                        block_gas_limit.saturating_sub(block_regular_gas_used),
+                        block_gas_limit.saturating_sub(block_state_gas_used),
+                    )
+                } else {
+                    (block_gas_remaining, block_gas_remaining)
+                },
+            )?;
+        }
 
         let mut tx_regular_gas_used = 0;
-        let gas_output = builder.execute_transaction_with_result_closure(tx, |result| {
-            tx_regular_gas_used = result.result().result.gas().block_regular_gas_used();
-            results.push(result.result().result.clone())
-        })?;
+        let gas_output =
+            builder.execute_transaction_with_result_closure((tx_env, tx), |result| {
+                tx_regular_gas_used = result.result().result.block_regular_gas_used();
+                results.push(result.result().result.clone())
+            })?;
 
         let gas_used = gas_output.tx_gas_used();
         if let Some(remaining_call_gas_limit) = remaining_call_gas_limit.as_mut() {
@@ -419,6 +447,22 @@ where
     };
 
     Ok((result, results))
+}
+
+/// Checks the canonical frame budget before executing any simulated bytecode.
+fn ensure_frame_simulation_gas(
+    tx: &impl TransactionTr,
+    remaining_call_gas_limit: Option<u64>,
+    available: (u64, u64),
+) -> Result<(), EthApiError> {
+    if remaining_call_gas_limit.is_some_and(|remaining| tx.gas_limit() > remaining) {
+        return Err(EthApiError::other(EthSimulateError::GasLimitReached));
+    }
+    let (execution, state) = transaction_gas_reservation(tx, u64::MAX);
+    if execution > available.0 || state > available.1 {
+        return Err(EthApiError::other(EthSimulateError::BlockGasLimitExceeded));
+    }
+    Ok(())
 }
 
 /// Goes over the list of [`TransactionRequest`]s and populates missing fields trying to resolve
@@ -443,6 +487,7 @@ where
     // If we're missing any fields we try to fill nonce, gas and
     // gas price.
     let tx_type = tx.as_ref().output_tx_type();
+    let is_frame = Into::<u8>::into(tx_type) == 0x06;
 
     let from = if let Some(from) = tx.as_ref().from() {
         from
@@ -457,11 +502,11 @@ where
         );
     }
     // eth_simulateV1 validation-off mode behaves like eth_call; avoid revm's max-nonce guard.
-    if disable_nonce_check && tx.as_ref().nonce() == Some(u64::MAX) {
+    if !is_frame && disable_nonce_check && tx.as_ref().nonce() == Some(u64::MAX) {
         tx.as_mut().set_nonce(0);
     }
 
-    if tx.as_ref().gas_limit().is_none() {
+    if !is_frame && tx.as_ref().gas_limit().is_none() {
         tx.as_mut().set_gas_limit(default_gas_limit);
     }
 
@@ -469,7 +514,7 @@ where
         tx.as_mut().set_chain_id(chain_id);
     }
 
-    if tx.as_ref().kind().is_none() {
+    if !is_frame && tx.as_ref().kind().is_none() {
         tx.as_mut().set_kind(TxKind::Create);
     }
 
@@ -534,6 +579,7 @@ where
                     max_used_gas: Some(gas.total_gas_spent().max(gas.floor_gas())),
                     logs: Vec::new(),
                     status: false,
+                    ..Default::default()
                 }
             }
             ExecutionResult::Revert { output, gas, .. } => {
@@ -549,6 +595,7 @@ where
                     max_used_gas: Some(gas.total_gas_spent().max(gas.floor_gas())),
                     status: false,
                     logs: Vec::new(),
+                    ..Default::default()
                 }
             }
             ExecutionResult::Success { output, gas, logs, .. } => SimCallResult {
@@ -573,7 +620,24 @@ where
                     })
                     .collect(),
                 status: true,
+                ..Default::default()
             },
+            ExecutionResult::FrameTransaction {
+                gas, payer, frame_receipts, frame_outputs, ..
+            } => frame_call_result(gas, payer, frame_receipts, frame_outputs, |log| {
+                let current_index = log_index;
+                log_index += 1;
+                alloy_rpc_types_eth::Log {
+                    inner: log,
+                    log_index: Some(current_index),
+                    transaction_index: Some(index as u64),
+                    transaction_hash: Some(*tx.tx_hash()),
+                    block_hash: Some(block.hash()),
+                    block_number: Some(block.header().number()),
+                    block_timestamp: Some(block.header().timestamp()),
+                    ..Default::default()
+                }
+            }),
         };
 
         calls.push(call);
@@ -587,14 +651,65 @@ where
     Ok(SimulatedBlock { inner: block, calls })
 }
 
+fn frame_call_result(
+    gas: revm::context_interface::result::ResultGas,
+    payer: Address,
+    frame_receipts: Vec<alloy_eips::eip8141::FrameReceipt>,
+    frame_outputs: Vec<Bytes>,
+    mut map_log: impl FnMut(alloy_primitives::Log) -> alloy_rpc_types_eth::Log,
+) -> SimCallResult {
+    assert_eq!(frame_receipts.len(), frame_outputs.len());
+    let frame_results: Vec<_> = frame_receipts
+        .into_iter()
+        .zip(frame_outputs)
+        .map(|(receipt, output)| {
+            let logs = receipt.logs.into_iter().map(&mut map_log).collect();
+            FrameCallResult {
+                status: receipt.status,
+                gas_used: receipt.gas_used.execution.saturating_add(receipt.gas_used.state),
+                execution_gas_used: receipt.gas_used.execution,
+                state_gas_used: receipt.gas_used.state,
+                logs,
+                return_data: output,
+                error: None,
+            }
+        })
+        .collect();
+    let failed = frame_results
+        .iter()
+        .find(|frame| frame.status != alloy_eips::eip8141::FrameStatus::Success);
+    let status = failed.is_none();
+    let return_data = failed
+        .or_else(|| frame_results.last())
+        .map(|frame| frame.return_data.clone())
+        .unwrap_or_default();
+    SimCallResult {
+        payer: Some(payer),
+        logs: frame_results.iter().flat_map(|frame| frame.logs.iter().cloned()).collect(),
+        frame_results: Some(frame_results),
+        return_data,
+        status,
+        error: (!status).then(|| SimulateError {
+            code: SIMULATE_VM_ERROR_CODE,
+            message: "vm execution error: frame failed".into(),
+            data: None,
+        }),
+        gas_used: gas.frame_tx_gas_used(),
+        max_used_gas: Some(gas.total_gas_spent().max(gas.floor_gas())),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_precompile_overrides, sanitize_chain, EthSimulateError, INTERNAL_ERROR_CODE,
+        apply_precompile_overrides, ensure_frame_simulation_gas, sanitize_chain, EthSimulateError,
+        FrameSimulationFrameResult, FrameSimulationPrefixShape, FrameSimulationResult,
+        INTERNAL_ERROR_CODE,
     };
     use crate::{error::ToRpcError, EthApiError};
     use alloy_chains::Chain;
     use alloy_consensus::Header;
+    use alloy_eips::eip8141::FrameStatus;
     use alloy_evm::precompiles::PrecompilesMap;
     use alloy_primitives::{address, Address, U256};
     use alloy_rpc_types_eth::{
@@ -604,6 +719,125 @@ mod tests {
     };
     use reth_primitives_traits::SealedHeader;
     use revm::precompile::Precompiles;
+    use serde_json::json;
+
+    #[test]
+    fn simulated_frame_outputs_include_payer_gas_and_return_data() {
+        use alloy_eips::eip8141::{FrameGasUsed, FrameReceipt};
+        use alloy_primitives::{Bytes, Log};
+        use revm::context_interface::result::ResultGas;
+
+        for status in [FrameStatus::Success, FrameStatus::Failure, FrameStatus::SkippedAtomicBatch]
+        {
+            let receipts = vec![
+                FrameReceipt {
+                    status,
+                    gas_used: FrameGasUsed { execution: 21, state: 3 },
+                    logs: if status == FrameStatus::Success {
+                        vec![Log::default()]
+                    } else {
+                        vec![]
+                    },
+                },
+                FrameReceipt {
+                    status: FrameStatus::Success,
+                    gas_used: FrameGasUsed { execution: 5, state: 7 },
+                    logs: vec![],
+                },
+            ];
+            let first = Bytes::from_static(&[0xab]);
+            let last = Bytes::from_static(&[0xcd]);
+            let result = super::frame_call_result(
+                ResultGas::new_with_state_gas(40, 0, 0, 10),
+                Address::repeat_byte(0x11),
+                receipts,
+                vec![first.clone(), last.clone()],
+                |inner| alloy_rpc_types_eth::Log { inner, ..Default::default() },
+            );
+            let success = status == FrameStatus::Success;
+            assert_eq!(result.status, success);
+            assert_eq!(result.error.is_none(), success);
+            assert_eq!(result.return_data, if success { last } else { first });
+            assert_eq!(result.logs.len(), usize::from(success));
+            let json = serde_json::to_value(&result).unwrap();
+            assert_eq!(json["payer"], "0x1111111111111111111111111111111111111111");
+            assert_eq!(json["gasUsed"], "0x28");
+            assert_eq!(json["frameResults"][0]["gasUsed"], "0x18");
+            assert_eq!(json["frameResults"][0]["executionGasUsed"], "0x15");
+            assert_eq!(json["frameResults"][0]["stateGasUsed"], "0x3");
+            assert_eq!(json["frameResults"][1]["returnData"], "0xcd");
+        }
+    }
+
+    #[test]
+    fn frame_simulation_result_serializes_rpc_fields() {
+        let result = FrameSimulationResult {
+            valid: true,
+            max_cost: U256::from(123),
+            prefix_shape: Some(FrameSimulationPrefixShape::OnlyVerifyPay),
+            payer: Some(Address::repeat_byte(0x11)),
+            violation: None,
+            gas_used: Some(456),
+            frames: Some(vec![FrameSimulationFrameResult {
+                execution_gas: 5,
+                state_gas: 7,
+                status: FrameStatus::Failure,
+            }]),
+        };
+
+        assert_eq!(
+            serde_json::to_value(result).unwrap(),
+            json!({
+                "valid": true,
+                "maxCost": "0x7b",
+                "prefixShape": "onlyVerifyPay",
+                "payer": "0x1111111111111111111111111111111111111111",
+                "gasUsed": "0x1c8",
+                "frames": [{
+                    "executionGas": "0x5",
+                    "stateGas": "0x7",
+                    "status": "0x0",
+                }],
+            })
+        );
+    }
+
+    #[test]
+    fn frame_simulation_checks_resolved_budget_and_separate_dimensions() {
+        use alloy_eips::eip8141::{Frame, FrameLimits};
+        use revm::context::{transaction::FrameTransaction, TxEnv};
+
+        let frame = FrameTransaction {
+            frames: vec![Frame {
+                limits: FrameLimits { execution: 50_000, state: 7_000 },
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let gas_limit = frame.gas_limit(Default::default()).unwrap();
+        let tx =
+            TxEnv { gas_limit, frame_transaction: Some(Box::new(frame)), ..Default::default() };
+        let available = (gas_limit - 7_000, 7_000);
+        assert!(ensure_frame_simulation_gas(&tx, Some(gas_limit), available).is_ok());
+        assert!(ensure_frame_simulation_gas(&tx, None, available).is_ok());
+        assert_eq!(
+            ensure_frame_simulation_gas(&tx, Some(gas_limit - 1), available)
+                .unwrap_err()
+                .into_rpc_err()
+                .code(),
+            EthSimulateError::GasLimitReached.error_code()
+        );
+        for available in [(available.0 - 1, available.1), (available.0, available.1 - 1)] {
+            assert_eq!(
+                ensure_frame_simulation_gas(&tx, None, available)
+                    .unwrap_err()
+                    .into_rpc_err()
+                    .code(),
+                EthSimulateError::BlockGasLimitExceeded.error_code()
+            );
+        }
+        assert_eq!(tx.gas_limit, gas_limit);
+    }
 
     #[test]
     fn nonce_max_value_error_uses_internal_error_code() {

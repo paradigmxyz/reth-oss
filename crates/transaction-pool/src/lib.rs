@@ -307,7 +307,7 @@ use alloy_eips::{
     eip4844::{BlobAndProofV1, BlobAndProofV2, BlobCellsAndProofsV1},
     eip7594::{BlobCellMask, BlobTransactionSidecarVariant},
 };
-use alloy_primitives::{map::AddressSet, Address, TxHash, B256, U256};
+use alloy_primitives::{map::AddressSet, Address, Bytes, TxHash, B256, U256};
 use aquamarine as _;
 use reth_chainspec::{ChainSpecProvider, EthereumHardforks};
 use reth_eth_wire_types::HandleMempoolData;
@@ -316,7 +316,7 @@ use reth_evm_ethereum::EthEvmConfig;
 use reth_execution_types::ChangedAccount;
 use reth_primitives_traits::{HeaderTy, Recovered};
 use reth_storage_api::{BlockReaderIdExt, StateProviderFactory};
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 use tokio::sync::mpsc::Receiver;
 use tracing::{instrument, trace};
 
@@ -607,6 +607,33 @@ where
         self.pool.best_transactions_with_attributes(best_transactions_attributes)
     }
 
+    fn build_inclusion_list(&self, max_size: usize) -> Vec<Bytes> {
+        let mut total_size = 0;
+        let mut inclusion_list = Vec::new();
+        let mut per_sender: HashMap<Address, usize> = HashMap::new();
+
+        for pool_tx in self.best_transactions().without_blobs().without_updates() {
+            let taken = per_sender.entry(pool_tx.sender()).or_default();
+            if *taken >= MAX_INCLUSION_LIST_TXS_PER_SENDER {
+                continue
+            }
+
+            let encoded = pool_tx.encoded_2718_consensus();
+            // EIP-7805 bounds the sum of the EIP-2718 transaction bytes, without wrapping
+            // those already encoded transactions in another RLP list.
+            let new_size = total_size + encoded.len();
+            if new_size > max_size {
+                break
+            }
+
+            *taken += 1;
+            total_size = new_size;
+            inclusion_list.push(encoded);
+        }
+
+        inclusion_list
+    }
+
     fn pending_transactions(&self) -> Vec<Arc<ValidPoolTransaction<Self::Transaction>>> {
         self.pool.pending_transactions()
     }
@@ -858,6 +885,18 @@ where
 
     fn on_canonical_state_change(&self, update: CanonicalStateUpdate<'_, Self::Block>) {
         self.pool.on_canonical_state_change(update);
+    }
+
+    fn on_canonical_state_change_with_touched_accounts(
+        &self,
+        update: CanonicalStateUpdate<'_, Self::Block>,
+        touched: &[Address],
+    ) {
+        self.pool.on_canonical_state_change_with_touched_accounts(update, touched);
+    }
+
+    async fn revalidate_frame_transactions(&self) {
+        self.pool.revalidate_frame_transactions().await;
     }
 
     fn update_accounts(&self, accounts: Vec<ChangedAccount>) {

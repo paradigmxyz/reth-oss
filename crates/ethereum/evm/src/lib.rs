@@ -18,7 +18,7 @@
 extern crate alloc;
 
 use alloc::{borrow::Cow, sync::Arc};
-use alloy_consensus::Header;
+use alloy_consensus::{Header, TxEip8141};
 use alloy_evm::{
     eth::{EthBlockExecutionCtx, EthBlockExecutorFactory},
     EthEvmFactory, FromRecoveredTx, FromTxWithEncoded,
@@ -142,6 +142,7 @@ where
     EvmF: EvmFactory<
             Tx: TransactionEnvMut
                     + FromRecoveredTx<TransactionSigned>
+                    + FromRecoveredTx<TxEip8141>
                     + FromTxWithEncoded<TransactionSigned>,
             Spec = SpecId,
             BlockEnv = BlockEnv,
@@ -275,6 +276,7 @@ where
     EvmF: EvmFactory<
             Tx: TransactionEnvMut
                     + FromRecoveredTx<TransactionSigned>
+                    + FromRecoveredTx<TxEip8141>
                     + FromTxWithEncoded<TransactionSigned>,
             Spec = SpecId,
             BlockEnv = BlockEnv,
@@ -356,8 +358,18 @@ where
         let txs = payload.payload.transactions().clone();
         let sender_recovery_cache = self.sender_recovery_cache.clone();
         let convert = move |tx: Bytes| {
-            let tx =
-                TxTy::<Self::Primitives>::decode_2718_exact(tx.as_ref()).map_err(AnyError::new)?;
+            let encoded_len = tx.len();
+            let tx_type = tx.first().copied();
+            let tx = TxTy::<Self::Primitives>::decode_2718_exact(tx.as_ref()).map_err(|err| {
+                tracing::info!(
+                    target: "reth_ethereum_evm",
+                    ?err,
+                    ?tx_type,
+                    encoded_len,
+                    "Failed to decode execution payload transaction"
+                );
+                AnyError::new(err)
+            })?;
             let signer = if let Some(cache) = &sender_recovery_cache {
                 cache.recover(&tx)
             } else {

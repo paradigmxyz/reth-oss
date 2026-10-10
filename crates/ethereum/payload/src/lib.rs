@@ -8,7 +8,8 @@
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
-use alloy_consensus::{BlockHeader, Transaction};
+use alloy_consensus::{BlockHeader, Transaction, Typed2718};
+use alloy_eips::eip2718::Decodable2718;
 use alloy_primitives::U256;
 use alloy_rlp::Encodable;
 use alloy_rpc_types_engine::PayloadAttributes as EthPayloadAttributes;
@@ -30,7 +31,7 @@ use reth_execution_cache::{CachedStateMetrics, CachedStateMetricsSource, CachedS
 use reth_payload_builder::{BlobSidecars, EthBuiltPayload};
 use reth_payload_builder_primitives::PayloadBuilderError;
 use reth_payload_primitives::PayloadAttributes;
-use reth_primitives_traits::transaction::error::InvalidTransactionError;
+use reth_primitives_traits::{transaction::error::InvalidTransactionError, SignedTransaction};
 use reth_revm::{database::StateProviderDatabase, db::State};
 use reth_storage_api::{EvmStateProvider, StateProvider, StateProviderFactory};
 use reth_transaction_pool::{
@@ -38,9 +39,9 @@ use reth_transaction_pool::{
     BestTransactions, BestTransactionsAttributes, PoolTransaction, TransactionPool,
     ValidPoolTransaction,
 };
-use revm::context_interface::{Block as _, Cfg as _};
-use std::sync::Arc;
-use tracing::{debug, trace, warn};
+use revm::context_interface::{result::InvalidTransaction, Block as _, Cfg as _};
+use std::{collections::HashSet, sync::Arc};
+use tracing::{debug, info, trace, warn};
 
 mod config;
 pub use config::*;
@@ -257,12 +258,41 @@ where
 
     let is_osaka = chain_spec.is_osaka_active_at_timestamp(attributes.timestamp);
 
+    // FOCIL transactions are retried after ordinary pool transactions. This lets a transaction
+    // become executable when an earlier transaction establishes its nonce or funds its sender.
+    let mut inclusion_list = Vec::new();
+    // EIP-7805 is only in force from Bogota, so an inclusion list attached to an earlier
+    // timestamp is ignored rather than built against.
+    let inclusion_list_transactions = attributes
+        .inclusion_list_transactions
+        .as_deref()
+        .filter(|_| chain_spec.is_bogota_active_at_timestamp(attributes.timestamp))
+        .unwrap_or_default();
+
+    for raw_transaction in inclusion_list_transactions {
+        let Ok(transaction) = TransactionSigned::decode_2718_exact(raw_transaction) else {
+            continue
+        };
+        let Ok(transaction) = transaction.try_into_recovered() else { continue };
+        // The V1 FOCIL endpoint deliberately does not produce blob transactions, and payload
+        // building cannot source a sidecar from an inclusion-list byte string.
+        if transaction.is_eip4844() {
+            continue
+        }
+        inclusion_list.push(Some(transaction));
+    }
+    let mut executed_tx_hashes = HashSet::new();
+
     let withdrawals_rlp_length =
         attributes.withdrawals.as_ref().map(|withdrawals| withdrawals.length()).unwrap_or(0);
 
     while let Some(pool_tx) = best_txs.next() {
         // ensure we still have capacity for this transaction
-        let exceeds_gas_limit = if is_amsterdam {
+        // The executor derives frame reservations from the active gas schedule. A combined
+        // frame limit is not a reservation for either individual gas dimension.
+        let exceeds_gas_limit = if pool_tx.transaction.is_eip8141() {
+            None
+        } else if is_amsterdam {
             let regular_available_gas = block_gas_limit.saturating_sub(block_regular_gas_used);
             let state_available_gas = block_gas_limit.saturating_sub(block_state_gas_used);
             let regular_tx_gas_limit = pool_tx.gas_limit().min(tx_gas_limit_cap);
@@ -323,7 +353,7 @@ where
         let mut blob_tx_sidecar = None;
         let tx_blob_count = tx.blob_count();
 
-        if let Some(tx_blob_count) = tx_blob_count {
+        if let Some(tx_blob_count) = tx_blob_count.filter(|count| *count != 0 || tx.is_eip4844()) {
             if block_blob_count + tx_blob_count > max_blob_count {
                 // we can't fit this _blob_ transaction into the block, so we mark it as
                 // invalid, which removes its dependent transactions from
@@ -371,12 +401,24 @@ where
             };
         }
 
-        let miner_fee = tx.effective_tip_per_gas(base_fee);
+        let miner_fee = if tx.is_eip8141() {
+            tx.effective_tip_per_gas_u256(base_fee)
+        } else {
+            tx.effective_tip_per_gas(base_fee).map(U256::from)
+        };
         let tx_hash = *tx.tx_hash();
+        let is_eip8141 = tx.is_eip8141();
+        if is_eip8141 {
+            info!(
+                target: "reth::eip8141::payload",
+                ?tx_hash,
+                "executing EIP-8141 transaction for payload"
+            );
+        }
 
         let mut tx_regular_gas_used = 0;
         let gas_output = match builder.execute_transaction_with_result_closure(tx, |result| {
-            tx_regular_gas_used = result.result().result.gas().block_regular_gas_used();
+            tx_regular_gas_used = result.result().result.block_regular_gas_used();
         }) {
             Ok(gas_output) => gas_output,
             Err(BlockExecutionError::Validation(BlockValidationError::InvalidTx {
@@ -419,6 +461,16 @@ where
             // this is an error that we should treat as fatal for this attempt
             Err(err) => return Err(PayloadBuilderError::evm(err)),
         };
+        if is_eip8141 {
+            info!(
+                target: "reth::eip8141::payload",
+                ?tx_hash,
+                tx_gas_used = gas_output.tx_gas_used(),
+                regular_gas_used = tx_regular_gas_used,
+                state_gas_used = gas_output.state_gas_used(),
+                "executed EIP-8141 transaction for payload"
+            );
+        }
 
         // add to the total blob gas used if the transaction successfully executed
         if let Some(blob_count) = tx_blob_count {
@@ -435,14 +487,96 @@ where
         // update and add to total fees
         let gas_used = gas_output.tx_gas_used();
         let miner_fee = miner_fee.expect("fee is always valid; execution succeeded");
-        total_fees += U256::from(miner_fee) * U256::from(gas_used);
+        total_fees = total_fees.saturating_add(miner_fee.saturating_mul(U256::from(gas_used)));
         cumulative_tx_gas_used += gas_used;
         block_regular_gas_used += tx_regular_gas_used;
         block_state_gas_used += gas_output.state_gas_used();
+        executed_tx_hashes.insert(tx_hash);
 
         // Add blob tx sidecar to the payload.
         if let Some(sidecar) = blob_tx_sidecar {
             blob_sidecars.push_sidecar_variant(sidecar.as_ref().clone());
+        }
+    }
+
+    let mut made_progress = true;
+    while made_progress {
+        made_progress = false;
+
+        for transaction in &mut inclusion_list {
+            let Some(tx) = transaction.as_ref() else { continue };
+            let tx_hash = tx.recalculate_hash();
+            if executed_tx_hashes.contains(&tx_hash) {
+                *transaction = None;
+                continue
+            }
+
+            let exceeds_gas_limit = if is_amsterdam {
+                let regular_available_gas = block_gas_limit.saturating_sub(block_regular_gas_used);
+                let state_available_gas = block_gas_limit.saturating_sub(block_state_gas_used);
+                let regular_tx_gas_limit = tx.gas_limit().min(tx_gas_limit_cap);
+                regular_tx_gas_limit > regular_available_gas || tx.gas_limit() > state_available_gas
+            } else {
+                tx.gas_limit() > block_gas_limit.saturating_sub(cumulative_tx_gas_used)
+            };
+            if exceeds_gas_limit {
+                *transaction = None;
+                continue
+            }
+            if cancel.is_cancelled() {
+                return Ok(BuildOutcome::Cancelled)
+            }
+
+            let tx_rlp_len = tx.inner().length();
+            let estimated_block_size_with_tx =
+                block_transactions_rlp_length + tx_rlp_len + withdrawals_rlp_length + 1024;
+            if is_osaka && estimated_block_size_with_tx > MAX_RLP_BLOCK_SIZE {
+                *transaction = None;
+                continue
+            }
+
+            let miner_fee = tx.effective_tip_per_gas(base_fee);
+            let mut tx_regular_gas_used = 0;
+            let gas_output =
+                match builder.execute_transaction_with_result_closure(tx.clone(), |result| {
+                    tx_regular_gas_used = result.result().result.gas().block_regular_gas_used();
+                }) {
+                    Ok(gas_output) => gas_output,
+                    Err(BlockExecutionError::Validation(BlockValidationError::InvalidTx {
+                        error,
+                        ..
+                    })) if matches!(
+                        error.as_invalid_tx_err(),
+                        Some(
+                            InvalidTransaction::NonceTooHigh { .. } |
+                                InvalidTransaction::LackOfFundForMaxFee { .. }
+                        )
+                    ) =>
+                    {
+                        continue
+                    }
+                    Err(BlockExecutionError::Validation(
+                        BlockValidationError::InvalidTx { .. } |
+                        BlockValidationError::TransactionGasLimitMoreThanAvailableBlockGas {
+                            ..
+                        },
+                    )) => {
+                        *transaction = None;
+                        continue
+                    }
+                    Err(error) => return Err(PayloadBuilderError::evm(error)),
+                };
+
+            let gas_used = gas_output.tx_gas_used();
+            let miner_fee = miner_fee.expect("fee is always valid; execution succeeded");
+            total_fees += U256::from(miner_fee) * U256::from(gas_used);
+            cumulative_tx_gas_used += gas_used;
+            block_regular_gas_used += tx_regular_gas_used;
+            block_state_gas_used += gas_output.state_gas_used();
+            block_transactions_rlp_length += tx_rlp_len;
+            executed_tx_hashes.insert(tx_hash);
+            *transaction = None;
+            made_progress = true;
         }
     }
 

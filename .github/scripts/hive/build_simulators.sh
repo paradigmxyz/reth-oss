@@ -14,6 +14,16 @@ case "${fixture_variant}" in
         eels_branch="mainnet"
         eels_fork="Osaka"
         ;;
+    bogota)
+        eels_fixtures="https://github.com/ethereum/execution-specs/releases/download/tests-frames-devnet@v0.3.0/fixtures_frames-devnet.tar.gz"
+        eels_branch="devnets/frames/0"
+        eels_fork="Bogota"
+        ;;
+    focil)
+        eels_fixtures="https://github.com/ethereum/execution-specs/releases/download/tests-focil-devnet@v0.2.0/fixtures_focil-devnet.tar.gz"
+        eels_branch="devnets/focil/0"
+        eels_fork="Bogota"
+        ;;
     *)
         echo "unknown hive fixture variant: ${fixture_variant}"
         exit 1
@@ -24,20 +34,35 @@ esac
 mkdir hive_assets/
 
 cd hivetests
+
+if [[ "${fixture_variant}" == "bogota" ]]; then
+    for simulator in consume-engine consume-rlp; do
+        simulator_dir="simulators/ethereum/eels/${simulator}"
+        cp ../.github/scripts/hive/reth_exceptions.diff "${simulator_dir}/"
+        cat >> "${simulator_dir}/Dockerfile" <<'DOCKERFILE'
+
+# Recognize Reth's frame-format errors when checking rejected transactions.
+COPY reth_exceptions.diff /tmp/reth_exceptions.diff
+RUN git -C /execution-specs apply /tmp/reth_exceptions.diff
+DOCKERFILE
+    done
+fi
+
 go build .
 
 ./hive -client reth # first builds and caches the client
 
-# Run each hive command in the background for each simulator and wait
+# Build the fixture-heavy EELS images serially to avoid exhausting the runner
+# while both builds download and unpack the same large fixture archive.
 echo "Building images"
 ./hive -client reth --sim "ethereum/eels/consume-engine" \
     --sim.buildarg fixtures="${eels_fixtures}" \
     --sim.buildarg branch="${eels_branch}" \
-    --sim.timelimit 1s || true &
+    --sim.timelimit 1s || true
 ./hive -client reth --sim "ethereum/eels/consume-rlp" \
     --sim.buildarg fixtures="${eels_fixtures}" \
     --sim.buildarg branch="${eels_branch}" \
-    --sim.timelimit 1s || true &
+    --sim.timelimit 1s || true
 ./hive -client reth --sim "ethereum/eels/execute-blobs" \
     --sim.buildarg branch="${eels_branch}" \
     --sim.buildarg fork="${eels_fork}" \
@@ -49,6 +74,12 @@ echo "Building images"
 ./hive -client reth --sim "smoke/network" -sim.timelimit 1s || true &
 ./hive -client reth --sim "ethereum/sync" -sim.timelimit 1s || true &
 wait
+
+for image in \
+    hive/simulators/ethereum/eels/consume-engine:latest \
+    hive/simulators/ethereum/eels/consume-rlp:latest; do
+    docker image inspect "${image}" >/dev/null
+done
 
 # Run docker save in parallel, wait and exit on error
 echo "Saving images"
