@@ -45,72 +45,77 @@ fn roots_and_proofs_match_native_before_after_update_and_reopen() {
     let native_dir = tempdir().unwrap();
     let native = init_db(native_dir.path(), DatabaseArguments::test()).unwrap();
     let scope = B256::repeat_byte(7);
-    let mut rows = fixture(4096);
-    for mode in [PackingMode::Dense, PackingMode::Integer32] {
-        let dir = tempdir().unwrap();
-        let args = DatabaseArguments::test().with_experimental_packing(Some(mode), 3);
-        let packed = init_db(dir.path(), args.clone()).unwrap();
-        for round in 0..3 {
-            if round == 1 {
-                rows[2048].value = U256::from(98765);
-                rows.remove(111);
-            }
-            for (db, write_trie) in [(&native, true), (&packed, round == 0)] {
-                let tx = db.tx_mut().unwrap();
-                tx.delete::<HashedStorages>(scope, None).unwrap();
-                for row in &rows {
-                    tx.put::<HashedStorages>(scope, *row).unwrap();
+    for count in [1, 4, 4096] {
+        for mode in [PackingMode::Dense, PackingMode::Integer32] {
+            let mut rows = fixture(count);
+            let dir = tempdir().unwrap();
+            let args = DatabaseArguments::test().with_experimental_packing(Some(mode), 3);
+            let packed = init_db(dir.path(), args.clone()).unwrap();
+            for round in 0..3 {
+                if round == 1 {
+                    let at = rows.len() / 2;
+                    rows[at].value = U256::from(98765);
+                    if rows.len() > 1 {
+                        rows.remove((rows.len() / 3).min(111));
+                    }
                 }
-                if write_trie {
-                    tx.delete::<PackedStoragesTrie>(scope, None).unwrap();
-                    let mut hb = HashBuilder::default().with_updates(true);
+                for (db, write_trie) in [(&native, true), (&packed, round == 0)] {
+                    let tx = db.tx_mut().unwrap();
+                    tx.delete::<HashedStorages>(scope, None).unwrap();
                     for row in &rows {
-                        hb.add_leaf(
-                            Nibbles::unpack(row.key),
-                            alloy_rlp::encode_fixed_size(&row.value).as_ref(),
-                        );
+                        tx.put::<HashedStorages>(scope, *row).unwrap();
                     }
-                    hb.root();
-                    for (path, node) in hb.split().1 {
-                        tx.put::<PackedStoragesTrie>(
-                            scope,
-                            TrieEntry { nibbles: path.into(), node },
-                        )
-                        .unwrap();
+                    if write_trie {
+                        tx.delete::<PackedStoragesTrie>(scope, None).unwrap();
+                        let mut hb = HashBuilder::default().with_updates(true);
+                        for row in &rows {
+                            hb.add_leaf(
+                                Nibbles::unpack(row.key),
+                                alloy_rlp::encode_fixed_size(&row.value).as_ref(),
+                            );
+                        }
+                        hb.root();
+                        for (path, node) in hb.split().1 {
+                            tx.put::<PackedStoragesTrie>(
+                                scope,
+                                TrieEntry { nibbles: path.into(), node },
+                            )
+                            .unwrap();
+                        }
                     }
+                    tx.commit().unwrap();
                 }
-                tx.commit().unwrap();
+                let nt = native.tx().unwrap();
+                let pt = packed.tx().unwrap();
+                let nr = storage_root(&nt, scope);
+                let pr = storage_root(&pt, scope);
+                assert_eq!(pr, nr);
+                let targets = rows
+                    .iter()
+                    .step_by((rows.len() / 32).max(1))
+                    .map(|r| r.key)
+                    .chain([B256::ZERO, B256::repeat_byte(255)])
+                    .collect::<alloy_primitives::map::B256Set>();
+                let np = StorageProof::new_hashed(
+                    DatabaseTrieCursorFactory::<_, PackedKeyAdapter>::new(&nt),
+                    DatabaseHashedCursorFactory::new(&nt),
+                    scope,
+                )
+                .storage_multiproof(targets.clone())
+                .unwrap();
+                let pp = StorageProof::new_hashed(
+                    DatabaseTrieCursorFactory::<_, PackedKeyAdapter>::new(&pt),
+                    DatabaseHashedCursorFactory::new(&pt),
+                    scope,
+                )
+                .storage_multiproof(targets)
+                .unwrap();
+                assert_eq!(pp, np);
             }
-            let nt = native.tx().unwrap();
-            let pt = packed.tx().unwrap();
-            let nr = storage_root(&nt, scope);
-            let pr = storage_root(&pt, scope);
-            assert_eq!(pr, nr);
-            let targets = rows
-                .iter()
-                .step_by(127)
-                .map(|r| r.key)
-                .chain([B256::ZERO, B256::repeat_byte(255)])
-                .collect::<alloy_primitives::map::B256Set>();
-            let np = StorageProof::new_hashed(
-                DatabaseTrieCursorFactory::<_, PackedKeyAdapter>::new(&nt),
-                DatabaseHashedCursorFactory::new(&nt),
-                scope,
-            )
-            .storage_multiproof(targets.clone())
-            .unwrap();
-            let pp = StorageProof::new_hashed(
-                DatabaseTrieCursorFactory::<_, PackedKeyAdapter>::new(&pt),
-                DatabaseHashedCursorFactory::new(&pt),
-                scope,
-            )
-            .storage_multiproof(targets)
-            .unwrap();
-            assert_eq!(pp, np);
+            drop(packed);
+            let reopened = init_db(dir.path(), args).unwrap();
+            assert_eq!(reopened.tx().unwrap().entries::<HashedStorages>().unwrap(), rows.len());
         }
-        drop(packed);
-        let reopened = init_db(dir.path(), args).unwrap();
-        assert_eq!(reopened.tx().unwrap().entries::<HashedStorages>().unwrap(), rows.len());
     }
 }
 

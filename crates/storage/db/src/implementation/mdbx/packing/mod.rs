@@ -25,8 +25,8 @@ impl PackingMode {
     /// Dedicated database version, rejected by stock Reth and by the native backend.
     pub const fn database_version(self) -> u64 {
         match self {
-            Self::Dense => 10001,
-            Self::Integer32 => 10002,
+            Self::Dense => 10003,
+            Self::Integer32 => 10004,
         }
     }
 }
@@ -55,7 +55,8 @@ pub(crate) fn check_directory(
         }
     } else if path.join(CONFIG_FILE).exists() ||
         version.is_ok_and(|v| {
-            v == PackingMode::Dense.database_version() ||
+            matches!(v, 10001 | 10002) ||
+                v == PackingMode::Dense.database_version() ||
                 v == PackingMode::Integer32.database_version()
         })
     {

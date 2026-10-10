@@ -304,7 +304,7 @@ impl Shared {
             if let Some((k, blob)) = candidate &&
                 k[..32] == scope[..]
             {
-                let parsed = Blob::parse(&blob)?;
+                let parsed = Blob::parse_record(&blob, &k, self.mode)?;
                 if parsed.mode() != self.mode {
                     return Err(DatabaseError::Decode);
                 }
@@ -339,7 +339,7 @@ impl Shared {
                     .set::<Vec<u8>>(&first)
                     .map_err(|e| DatabaseError::Read(e.into()))?
                     .ok_or(DatabaseError::Decode)?;
-                let parsed = Blob::parse(&bytes)?;
+                let parsed = Blob::parse_record(&bytes, &first, self.mode)?;
                 if parsed.mode() != self.mode {
                     return Err(DatabaseError::Decode);
                 }
@@ -432,7 +432,7 @@ impl Shared {
             // Balance splits so a 513-row block does not leave a one-row tail.
             let chunk_size = rows.len().div_ceil(rows.len().div_ceil(row_target).max(1)).max(1);
             for block in rows.chunks(chunk_size) {
-                let blob = codec::encode(block, self.mode)?;
+                let blob = codec::encode_record(block, scope, self.mode)?;
                 tx.put(self.dbi, key(scope, block[0].key), blob, WriteFlags::UPSERT)
                     .map_err(|e| DatabaseError::Read(e.into()))?;
             }
@@ -608,7 +608,7 @@ impl<K: TransactionKind> Store<K> {
         if row.0.len() != 64 {
             return Err(DatabaseError::Decode);
         }
-        let rows = OwnedBlob::parse(row.1, self.mode)?;
+        let rows = OwnedBlob::parse(row.1, &row.0, self.mode)?;
         if rows.len() == 0 || rows.key(0)[..] != row.0[32..] {
             return Err(DatabaseError::Decode);
         }
@@ -826,7 +826,7 @@ fn merge_blob(
     bytes: &[u8],
     max: usize,
 ) -> Result<bool, DatabaseError> {
-    let neighbor = Blob::parse(bytes)?;
+    let neighbor = Blob::parse_record(bytes, &anchor, mode)?;
     if neighbor.mode() != mode {
         return Err(DatabaseError::Decode);
     }

@@ -8,6 +8,8 @@ use reth_primitives_traits::StorageEntry;
 
 const HEADER: usize = 26;
 const MAGIC: &[u8; 8] = b"RSTPACK1";
+const INLINE_HEADER: usize = 9;
+const INLINE_LIMIT: usize = 256;
 
 /// Validated borrowed view of a storage blob.
 #[derive(Debug)]
@@ -18,6 +20,7 @@ pub(crate) struct Blob<'a> {
     index: usize,
     payload: usize,
     mode: PackingMode,
+    anchor: Option<B256>,
 }
 
 impl<'a> Blob<'a> {
@@ -54,7 +57,7 @@ impl<'a> Blob<'a> {
         if payload.checked_add(len) != Some(bytes.len()) {
             return Err(DatabaseError::Decode);
         }
-        let blob = Self { bytes, count, width, index, payload, mode };
+        let blob = Self { bytes, count, width, index, payload, mode, anchor: None };
         let mut previous = 0;
         for i in 0..=entries {
             let current = blob.offset(i)?;
@@ -86,6 +89,13 @@ impl<'a> Blob<'a> {
     }
 
     pub(crate) fn key(&self, row: usize) -> B256 {
+        if let Some(anchor) = self.anchor {
+            if row == 0 {
+                return anchor;
+            }
+            let start = if self.count == 1 { INLINE_HEADER } else { INLINE_HEADER + 1 };
+            return B256::from_slice(&self.bytes[start + (row - 1) * 32..start + row * 32]);
+        }
         B256::from_slice(&self.bytes[HEADER + row * 32..HEADER + (row + 1) * 32])
     }
 
@@ -93,7 +103,7 @@ impl<'a> Blob<'a> {
         if row >= self.count {
             return Err(DatabaseError::Decode);
         }
-        let value = if self.mode == PackingMode::Dense {
+        let value = if self.mode == PackingMode::Dense || self.anchor.is_some() {
             compact(self.part(row)?)?
         } else {
             decode_group(self.part(row / 32)?, (self.count - row / 32 * 32).min(32))?[row % 32]
@@ -102,7 +112,7 @@ impl<'a> Blob<'a> {
     }
 
     pub(crate) fn rows(&self) -> Result<Vec<StorageEntry>, DatabaseError> {
-        if self.mode == PackingMode::Dense {
+        if self.mode == PackingMode::Dense || self.anchor.is_some() {
             return (0..self.count).map(|i| self.row(i)).collect()
         }
         let mut rows = Vec::with_capacity(self.count);
@@ -120,6 +130,18 @@ impl<'a> Blob<'a> {
     }
 
     fn part(&self, index: usize) -> Result<&[u8], DatabaseError> {
+        if self.anchor.is_some() {
+            if self.count == 1 {
+                return self.bytes.get(self.payload..).ok_or(DatabaseError::Decode);
+            }
+            let start: usize =
+                self.bytes[self.index..self.index + index].iter().map(|v| *v as usize).sum();
+            let len = *self.bytes.get(self.index + index).ok_or(DatabaseError::Decode)? as usize;
+            return self
+                .bytes
+                .get(self.payload + start..self.payload + start + len)
+                .ok_or(DatabaseError::Decode);
+        }
         let start = self.offset(index)?;
         let end = self.offset(index + 1)?;
         self.bytes.get(self.payload + start..self.payload + end).ok_or(DatabaseError::Decode)
@@ -134,6 +156,74 @@ impl<'a> Blob<'a> {
             u32::from_le_bytes(bytes.try_into().map_err(|_| DatabaseError::Decode)?) as usize
         })
     }
+
+    /// Parse an anchored physical record, including the compact small-record tier.
+    pub(crate) fn parse_record(
+        bytes: &'a [u8],
+        anchor: &[u8],
+        mode: PackingMode,
+    ) -> Result<Self, DatabaseError> {
+        if anchor.len() != 64 {
+            return Err(DatabaseError::Decode);
+        }
+        if bytes.first().is_some_and(|tag| (0x80..=0x83).contains(tag)) {
+            if bytes.len() < INLINE_HEADER || bytes.len() > INLINE_LIMIT {
+                return Err(DatabaseError::Decode);
+            }
+            let tag = bytes[0];
+            let encoded_mode =
+                if tag & 1 == 0 { PackingMode::Dense } else { PackingMode::Integer32 };
+            let expected =
+                u64::from_le_bytes(bytes[1..9].try_into().map_err(|_| DatabaseError::Decode)?);
+            if encoded_mode != mode || inline_checksum(bytes, anchor) != expected {
+                return Err(DatabaseError::Decode);
+            }
+            let singleton = tag & 2 == 0;
+            let count = if singleton {
+                1
+            } else {
+                *bytes.get(INLINE_HEADER).ok_or(DatabaseError::Decode)? as usize
+            };
+            if count == 0 || (!singleton && count < 2) {
+                return Err(DatabaseError::Decode);
+            }
+            let index =
+                if singleton { INLINE_HEADER } else { INLINE_HEADER + 1 + (count - 1) * 32 };
+            let payload = index + if singleton { 0 } else { count };
+            if payload > bytes.len() {
+                return Err(DatabaseError::Decode);
+            }
+            let blob = Self {
+                bytes,
+                count,
+                width: 0,
+                index,
+                payload,
+                mode,
+                anchor: Some(B256::from_slice(&anchor[32..])),
+            };
+            let len: usize = if singleton {
+                bytes.len() - payload
+            } else {
+                bytes[index..payload].iter().map(|n| *n as usize).sum()
+            };
+            if payload + len != bytes.len() {
+                return Err(DatabaseError::Decode);
+            }
+            for row in 0..count {
+                compact(blob.part(row)?)?;
+                if row > 0 && blob.key(row - 1) >= blob.key(row) {
+                    return Err(DatabaseError::Decode);
+                }
+            }
+            return Ok(blob);
+        }
+        let blob = Self::parse(bytes)?;
+        if blob.mode != mode || blob.count == 0 || blob.key(0)[..] != anchor[32..] {
+            return Err(DatabaseError::Decode);
+        }
+        Ok(blob)
+    }
 }
 
 /// Owned validated blob. Its borrowed views need no repeated checksum or index scan.
@@ -145,17 +235,20 @@ pub(crate) struct OwnedBlob {
     index: usize,
     payload: usize,
     mode: PackingMode,
+    anchor: Option<B256>,
     group: Option<(usize, Vec<U256>)>,
 }
 
 impl OwnedBlob {
-    pub(crate) fn parse(bytes: Vec<u8>, mode: PackingMode) -> Result<Self, DatabaseError> {
-        let blob = Blob::parse(&bytes)?;
-        if blob.mode() != mode {
-            return Err(DatabaseError::Decode)
-        }
+    pub(crate) fn parse(
+        bytes: Vec<u8>,
+        anchor: &[u8],
+        mode: PackingMode,
+    ) -> Result<Self, DatabaseError> {
+        let blob = Blob::parse_record(&bytes, anchor, mode)?;
         let (count, width, index, payload) = (blob.count, blob.width, blob.index, blob.payload);
-        Ok(Self { bytes, count, width, index, payload, mode, group: None })
+        let anchor = blob.anchor;
+        Ok(Self { bytes, count, width, index, payload, mode, anchor, group: None })
     }
 
     fn view(&self) -> Blob<'_> {
@@ -166,6 +259,7 @@ impl OwnedBlob {
             index: self.index,
             payload: self.payload,
             mode: self.mode,
+            anchor: self.anchor,
         }
     }
 
@@ -181,7 +275,7 @@ impl OwnedBlob {
         if row >= self.count {
             return Err(DatabaseError::Decode)
         }
-        if self.mode == PackingMode::Dense {
+        if self.mode == PackingMode::Dense || self.anchor.is_some() {
             return self.view().row(row)
         }
         let group = row / 32;
@@ -269,6 +363,64 @@ pub(crate) fn encode(rows: &[StorageEntry], mode: PackingMode) -> Result<Vec<u8>
     let sum = checksum(&out);
     out[18..26].copy_from_slice(&sum.to_le_bytes());
     Ok(out)
+}
+
+/// Inline small records omit the first slot already stored in the physical key. Singleton
+/// records also omit the count and lengths; larger inline records are bounded by encoded bytes.
+pub(crate) fn encode_record(
+    rows: &[StorageEntry],
+    scope: B256,
+    mode: PackingMode,
+) -> Result<Vec<u8>, DatabaseError> {
+    if rows.is_empty() || rows.windows(2).any(|p| p[0].key >= p[1].key) {
+        return Err(DatabaseError::Decode);
+    }
+    // Even zero-width values cannot fit nine rows below the inline byte limit.
+    if rows.len() > 8 {
+        return encode(rows, mode);
+    }
+    let singleton = rows.len() == 1;
+    let inline_size = INLINE_HEADER +
+        if singleton { 0 } else { 1 + (rows.len() - 1) * 32 + rows.len() } +
+        rows.iter().map(|r| r.value.byte_len()).sum::<usize>();
+    if inline_size > INLINE_LIMIT {
+        return encode(rows, mode);
+    }
+    let mut out = vec![0; INLINE_HEADER];
+    out[0] = 0x80 | u8::from(mode == PackingMode::Integer32) | if singleton { 0 } else { 2 };
+    if !singleton {
+        out.push(rows.len() as u8);
+        for row in &rows[1..] {
+            out.extend_from_slice(row.key.as_slice());
+        }
+        for row in rows {
+            out.push(row.value.byte_len() as u8);
+        }
+    }
+    for row in rows {
+        row.value.to_compact(&mut out);
+    }
+    let mut anchor = scope.to_vec();
+    anchor.extend_from_slice(rows[0].key.as_slice());
+    let sum = inline_checksum(&out, &anchor);
+    out[1..9].copy_from_slice(&sum.to_le_bytes());
+    // Integer groups can outperform Compact values, even for small records. Keep the
+    // complete full-record candidate when it is smaller than the inline representation.
+    if !singleton && mode == PackingMode::Integer32 {
+        let full = encode(rows, mode)?;
+        if full.len() < out.len() {
+            return Ok(full);
+        }
+    }
+    Ok(out)
+}
+
+fn inline_checksum(bytes: &[u8], anchor: &[u8]) -> u64 {
+    anchor
+        .iter()
+        .chain(bytes[..1].iter())
+        .chain(bytes[INLINE_HEADER..].iter())
+        .fold(0xcbf29ce484222325, |h, b| (h ^ u64::from(*b)).wrapping_mul(0x100000001b3))
 }
 
 // Each 32-value group selects raw Compact values or base plus bit-packed U256 deltas.
@@ -410,6 +562,71 @@ mod tests {
         #[test]
         fn arbitrary_bytes_never_panic(bytes in prop::collection::vec(any::<u8>(),0..4096)) {
             if let Ok(blob)=Blob::parse(&bytes) {let _=blob.rows();}
+            for mode in [PackingMode::Dense, PackingMode::Integer32] {
+                if let Ok(blob)=Blob::parse_record(&bytes, &[0;64], mode) {let _=blob.rows();}
+            }
+        }
+
+        #[test]
+        fn anchored_records_roundtrip(values in prop::collection::vec(any::<[u8;32]>(),1..20), scope in any::<[u8;32]>()) {
+            let scope=B256::from(scope);
+            let rows:Vec<_>=values.iter().enumerate().map(|(i,v)|StorageEntry::new(B256::from(U256::from(i).to_be_bytes::<32>()),U256::from_le_bytes(*v))).collect();
+            let mut anchor=scope.to_vec();anchor.extend_from_slice(rows[0].key.as_slice());
+            for mode in [PackingMode::Dense,PackingMode::Integer32] {
+                for bytes in [encode_record(&rows,scope,mode).unwrap(),encode(&rows,mode).unwrap()] {
+                    prop_assert_eq!(Blob::parse_record(&bytes,&anchor,mode).unwrap().rows().unwrap(),rows.clone());
+                    let mut owned=OwnedBlob::parse(bytes,&anchor,mode).unwrap();
+                    for (i,row) in rows.iter().enumerate() {prop_assert_eq!(owned.row(i).unwrap(),*row);}
+                }
+            }
+        }
+
+        #[test]
+        fn malformed_inline_with_valid_checksum_never_panics(at in any::<usize>(), replacement in any::<u8>()) {
+            let rows:Vec<_>=(0..5).map(|i|StorageEntry::new(B256::from(U256::from(i).to_be_bytes::<32>()),U256::from(i))).collect();
+            let anchor=[0;64];
+            let mut bytes=encode_record(&rows,B256::ZERO,PackingMode::Dense).unwrap();
+            let index=at%bytes.len();bytes[index]=replacement;
+            let sum=inline_checksum(&bytes,&anchor);bytes[1..9].copy_from_slice(&sum.to_le_bytes());
+            if let Ok(blob)=Blob::parse_record(&bytes,&anchor,PackingMode::Dense) {let _=blob.rows();}
+        }
+    }
+
+    #[test]
+    fn inline_records_bind_anchor_and_reject_corruption() {
+        let scope = B256::repeat_byte(1);
+        let slot = B256::repeat_byte(2);
+        let mut anchor = scope.to_vec();
+        anchor.extend_from_slice(slot.as_slice());
+        for mode in [PackingMode::Dense, PackingMode::Integer32] {
+            for value in [U256::ZERO, U256::ONE, U256::MAX] {
+                let rows = [StorageEntry::new(slot, value)];
+                let bytes = encode_record(&rows, scope, mode).unwrap();
+                assert_eq!(bytes.len(), 9 + value.byte_len());
+                assert_eq!(
+                    Blob::parse_record(&bytes, &anchor, mode).unwrap().rows().unwrap(),
+                    rows
+                );
+                for i in 0..bytes.len() {
+                    let mut corrupt = bytes.clone();
+                    corrupt[i] ^= 1;
+                    assert!(Blob::parse_record(&corrupt, &anchor, mode).is_err());
+                }
+                for i in 0..anchor.len() {
+                    let mut wrong = anchor.clone();
+                    wrong[i] ^= 1;
+                    assert!(Blob::parse_record(&bytes, &wrong, mode).is_err());
+                }
+                for len in 0..bytes.len() {
+                    assert!(Blob::parse_record(&bytes[..len], &anchor, mode).is_err());
+                }
+                let wrong_mode = if mode == PackingMode::Dense {
+                    PackingMode::Integer32
+                } else {
+                    PackingMode::Dense
+                };
+                assert!(Blob::parse_record(&bytes, &anchor, wrong_mode).is_err());
+            }
         }
     }
 

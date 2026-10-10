@@ -20,13 +20,15 @@ reth node --chain sepolia --minimal --storage.v2=true \
 
 The persisted `--db.experimental-trie-depth` defaults to 3 and accepts 1 through 8. Nodes with paths shorter than the depth remain on disk. Other storage-trie branch records are reconstructed. Greater depth retains more records and makes reconstruction regions smaller. Reopening requires the same mode and depth. The node command rejects this flag without `--minimal` or with storage V2 disabled.
 
-Existing native databases and snapshots cannot be converted in place. Neither mode is a decoder for the snapshots at snapshots.reth.rs. Native databases cannot be opened using this flag; experimental databases cannot be opened without it. Dense and integer formats use dedicated database versions 10001 and 10002 and an `experimental-packing.config` marker. These numbers are local experimental formats, not upstream Reth schema versions. Preserve the marker with backups.
+Existing native databases and snapshots cannot be converted in place. Neither mode is a decoder for the snapshots at snapshots.reth.rs. Native databases cannot be opened using this flag; experimental databases cannot be opened without it. Dense and integer formats now use dedicated database versions 10003 and 10004 and an `experimental-packing.config` marker. The previous 10001/10002 directories are rejected without modification; use a fresh directory for the new inline tier. Changing a version file or marker is not a migration. These numbers are local experimental formats, not upstream Reth schema versions. Preserve the marker with backups.
 
 ## Layout and provider
 
 `ExperimentalPackedStoragesV1` is an ordinary MDBX table. Its key consists of the 32-byte contract hash and the first 32-byte slot hash in its blob. Blobs contain up to 512 ordered storage rows. Splits distribute rows evenly. Hashed slot keys remain full width: cryptographic hashes offer little useful delta compression.
 
-Every blob has a magic value, encoding tag, count, payload length, offset width, and 64-bit corruption checksum. Keys form a contiguous array. Dense mode uses an offset per value and Reth's canonical Compact U256 bytes. Integer mode uses an offset per group of at most 32 values. Each group independently chooses raw Compact values or a minimum base and bit-packed deltas, whichever is smaller. It supports all 256-bit values, constant groups, and partial final groups. Sixteen-bit offsets are used when possible, otherwise 32-bit offsets. The checksum detects ordinary corruption; Ethereum state roots provide canonical state integrity.
+Full blobs have a magic value, encoding tag, count, payload length, offset width, and 64-bit corruption checksum. Keys form a contiguous array. Dense mode uses an offset per value and Reth's canonical Compact U256 bytes. Integer mode uses an offset per group of at most 32 values. Each group independently chooses raw Compact values or a minimum base and bit-packed deltas, whichever is smaller. It supports all 256-bit values, constant groups, and partial final groups. Sixteen-bit offsets are used when possible, otherwise 32-bit offsets. The checksum detects ordinary corruption; Ethereum state roots provide canonical state integrity.
+
+Singleton records use a one-byte mode/tag, an eight-byte checksum and a canonical Compact value. Their slot is recovered from the physical anchor; no count, repeated slot, or offsets are stored. Small records of up to 256 complete encoded record-value bytes (at most eight rows) use a separate tag, count, subsequent full-width keys, one-byte Compact lengths and values. The first slot is again omitted. Integer mode keeps the full-record candidate when it is smaller. Inline checksums include the complete 64-byte contract/slot anchor. The decoder retains support for full blobs, so both representations coexist and transitions occur atomically at commit. A one-byte singleton occupies 74 serialized key/value bytes, still nine more than native; this tier does not guarantee native-sized allocation for every small-contract workload.
 
 The MDBX transaction/cursor adapter presents the existing typed `HashedStorages` and `PackedStoragesTrie` interfaces. Reth's database hashed cursor factory, trie cursor factory, root calculator, and proof generator therefore consume logical rows without a separate RPC implementation. The physical native `HashedStorages` table is empty in experimental databases. The default cursor forwards to the preserved native MDBX implementation.
 
@@ -40,7 +42,7 @@ Before the first storage mutation of a contract, the writer captures its retaine
 
 Deletion batches merge a blob with an adjacent same-contract blob when the affected blob has at most 128 rows and the combined result has at most 384 rows. The 512-row split limit leaves hysteresis against immediate re-splitting. Pending changes are applied before merging; a successor with remaining pending mutations is not consumed. Both old anchors and the new blob are changed inside the existing MDBX transaction. Inserts preceding a contract's first anchor extend its first blob instead of creating a one-row prefix blob. Merging frees live pages for reuse; it does not automatically shrink the MDBX file.
 
-Failed cursor seeks retain a boundary or explicit missing state, so iteration cannot wrap to the beginning. See the [audit response](experimental-state-packing-audit-response.md) for the cursor fixes, differential regressions, and follow-up designs.
+Failed cursor seeks retain a boundary or explicit missing state, so iteration cannot wrap to the beginning. Ordinary forward/backward exhaustion retains its last scope and subkey separately: repeated movement stays exhausted and reversing follows native outer-key positioning. Current-value behavior distinguishes a singleton from an exhausted duplicate cursor. See the [audit response](experimental-state-packing-audit-response.md) and [reaudit response](experimental-state-packing-reaudit-response.md) for differential regressions and follow-up designs.
 
 ## Current limits
 
@@ -57,6 +59,7 @@ The pinned baseline also has a short-chain minimal V2 restart issue before its f
 ```sh
 cargo test -p reth-db
 cargo test -p reth-db benchmark_blob_targets -- --ignored --nocapture --test-threads=1
+cargo test -p reth-db benchmark_singleton_allocation -- --ignored --nocapture --test-threads=1
 cargo test -p reth-trie-db --test experimental_packing
 cargo test -p reth-node-core args::database
 cargo test -p reth-node-ethereum --test e2e experimental_packing

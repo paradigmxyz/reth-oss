@@ -110,6 +110,259 @@ fn seek_trace<T: DupSort<Key = B256>>(
 }
 
 #[test]
+fn cursor_multicontract_reversal_matches_native() {
+    for count in [1, 3, 64] {
+        let mut reference = None;
+        for mode in [None, Some(PackingMode::Dense), Some(PackingMode::Integer32)] {
+            let dir = tempdir().unwrap();
+            let db =
+                init_db(dir.path(), DatabaseArguments::test().with_experimental_packing(mode, 3))
+                    .unwrap();
+            let tx = db.tx_mut().unwrap();
+            for contract in 1..=3 {
+                let scope = B256::repeat_byte(contract);
+                let mut builder = HashBuilder::default().with_updates(true);
+                for row in fixture(count) {
+                    tx.put::<HashedStorages>(scope, row).unwrap();
+                    builder.add_leaf(
+                        Nibbles::unpack(row.key),
+                        alloy_rlp::encode_fixed_size(&row.value).as_ref(),
+                    );
+                }
+                builder.root();
+                for (path, node) in builder.split().1 {
+                    tx.put::<PackedStoragesTrie>(scope, TrieEntry { nibbles: path.into(), node })
+                        .unwrap();
+                }
+            }
+            tx.commit().unwrap();
+            let tx = db.tx().unwrap();
+            let result = (
+                reversal_trace(&mut tx.cursor_dup_read::<HashedStorages>().unwrap()),
+                reversal_trace(&mut tx.cursor_dup_read::<PackedStoragesTrie>().unwrap()),
+                walker_reversal_trace(&mut tx.cursor_dup_read::<HashedStorages>().unwrap()),
+                walker_reversal_trace(&mut tx.cursor_dup_read::<PackedStoragesTrie>().unwrap()),
+            );
+            if let Some(expected) = &reference {
+                assert_eq!(&result, expected, "reversal differs for {mode:?}, {count} slots");
+            } else {
+                reference = Some(result);
+            }
+        }
+    }
+}
+
+fn walker_reversal_trace<T: DupSort<Key = B256>>(
+    cursor: &mut (impl DbDupCursorRO<T> + DbCursorRO<T>),
+) -> Vec<(B256, T::Value)> {
+    let mut walk = cursor.walk(None).unwrap();
+    for row in walk.by_ref() {
+        row.unwrap();
+    }
+    let mut rows = walk.rev().collect::<Result<Vec<_>, _>>().unwrap();
+    let mut walk = cursor.walk_back(None).unwrap();
+    for row in walk.by_ref() {
+        row.unwrap();
+    }
+    rows.extend(walk.forward().collect::<Result<Vec<_>, _>>().unwrap());
+    rows
+}
+
+fn reversal_trace<T: DupSort<Key = B256>>(
+    cursor: &mut (impl DbDupCursorRO<T> + DbCursorRO<T>),
+) -> Vec<Option<(B256, T::Value)>> {
+    vec![
+        cursor.last().unwrap(),
+        cursor.next().unwrap(),
+        cursor.current().unwrap(),
+        cursor.next().unwrap(),
+        cursor.prev().unwrap(),
+        cursor.current().unwrap(),
+        cursor.next().unwrap(),
+        cursor.first().unwrap(),
+        cursor.prev().unwrap(),
+        cursor.current().unwrap(),
+        cursor.prev().unwrap(),
+        cursor.next().unwrap(),
+        cursor.current().unwrap(),
+        cursor.prev().unwrap(),
+        cursor.last().unwrap(),
+        cursor.next_no_dup().unwrap(),
+        cursor.current().unwrap(),
+        cursor.prev().unwrap(),
+        cursor.last().unwrap(),
+        cursor.next_dup().unwrap(),
+        cursor.prev().unwrap(),
+        cursor.first().unwrap(),
+        cursor.prev_dup().unwrap(),
+        cursor.next().unwrap(),
+    ]
+}
+
+#[test]
+fn inline_tier_transitions_are_atomic() {
+    for mode in [PackingMode::Dense, PackingMode::Integer32] {
+        let dir = tempdir().unwrap();
+        let args = DatabaseArguments::test().with_experimental_packing(Some(mode), 3);
+        let db = init_db(dir.path(), args.clone()).unwrap();
+        let scope = B256::repeat_byte(3);
+        let rows = fixture(80);
+        let mut expected = Vec::new();
+        for count in [1, 4, 80, 4, 1, 0, 1] {
+            let old = db.tx().unwrap();
+            let tx = db.tx_mut().unwrap();
+            tx.delete::<HashedStorages>(scope, None).unwrap();
+            for row in &rows[..count] {
+                tx.put::<HashedStorages>(scope, *row).unwrap();
+            }
+            let pending = tx
+                .cursor_dup_read::<HashedStorages>()
+                .unwrap()
+                .walk(None)
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            assert_eq!(pending, rows[..count].iter().map(|row| (scope, *row)).collect::<Vec<_>>());
+            tx.abort();
+            assert_eq!(
+                db.tx()
+                    .unwrap()
+                    .cursor_dup_read::<HashedStorages>()
+                    .unwrap()
+                    .walk(None)
+                    .unwrap()
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap(),
+                expected
+            );
+            let tx = db.tx_mut().unwrap();
+            tx.delete::<HashedStorages>(scope, None).unwrap();
+            for row in &rows[..count] {
+                tx.put::<HashedStorages>(scope, *row).unwrap();
+            }
+            tx.commit().unwrap();
+            assert_eq!(
+                old.cursor_dup_read::<HashedStorages>()
+                    .unwrap()
+                    .walk(None)
+                    .unwrap()
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap(),
+                expected
+            );
+            old.abort();
+            expected = rows[..count].iter().map(|row| (scope, *row)).collect();
+            let tx = db.tx().unwrap();
+            let dbi = tx.inner().open_db(Some(TABLE)).unwrap().dbi();
+            let record =
+                tx.inner().cursor_with_dbi(dbi).unwrap().first::<Vec<u8>, Vec<u8>>().unwrap();
+            if count > 0 {
+                let (anchor, bytes) = record.unwrap();
+                assert_eq!(bytes[0] & 0x80 != 0, count < 80);
+                assert_eq!(
+                    codec::Blob::parse_record(&bytes, &anchor, mode).unwrap().rows().unwrap(),
+                    rows[..count]
+                );
+            } else {
+                assert!(record.is_none());
+            }
+            tx.abort();
+        }
+        drop(db);
+        let db = init_db(dir.path(), args).unwrap();
+        let tx = db.tx().unwrap();
+        assert_eq!(
+            tx.cursor_dup_read::<HashedStorages>()
+                .unwrap()
+                .walk(None)
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap(),
+            expected
+        );
+    }
+}
+
+#[test]
+fn old_experimental_versions_are_rejected() {
+    for (mode, version) in [(PackingMode::Dense, 10001), (PackingMode::Integer32, 10002)] {
+        let dir = tempdir().unwrap();
+        reth_fs_util::write(crate::version::db_version_file_path(dir.path()), version.to_string())
+            .unwrap();
+        reth_fs_util::write(dir.path().join(CONFIG_FILE), format!("{version}:3")).unwrap();
+        assert!(check_directory(dir.path(), Some(mode), 3).is_err());
+        assert!(check_directory(dir.path(), None, 3).is_err());
+        assert!(prepare_directory(dir.path(), mode, 3).is_err());
+        assert_eq!(crate::version::get_db_version(dir.path()).unwrap(), version);
+    }
+}
+
+/// Allocation census for the audit's many-small-contracts fixture, including a full-blob control.
+#[test]
+#[ignore = "explicit singleton allocation experiment"]
+fn benchmark_singleton_allocation() {
+    println!("mode,representation,live_storage_bytes");
+    let mut native = 0;
+    for mode in [None, Some(PackingMode::Dense), Some(PackingMode::Integer32)] {
+        let mut sizes = Vec::new();
+        for full in [false, true] {
+            if mode.is_none() && full {
+                continue;
+            }
+            let dir = tempdir().unwrap();
+            let db =
+                init_db(dir.path(), DatabaseArguments::test().with_experimental_packing(mode, 3))
+                    .unwrap();
+            let tx = db.tx_mut().unwrap();
+            let mut records: Vec<_> = (0..4096u64)
+                .map(|i| {
+                    (
+                        keccak256(i.to_be_bytes()),
+                        StorageEntry::new(keccak256((i + 4096).to_be_bytes()), U256::ONE),
+                    )
+                })
+                .collect();
+            records.sort_by_key(|(scope, _)| *scope);
+            for (scope, row) in records {
+                if full {
+                    let dbi = tx.inner().open_db(Some(TABLE)).unwrap().dbi();
+                    tx.inner()
+                        .put(
+                            dbi,
+                            store::key(scope, row.key),
+                            codec::encode(&[row], mode.unwrap()).unwrap(),
+                            reth_libmdbx::WriteFlags::UPSERT,
+                        )
+                        .unwrap();
+                } else {
+                    tx.put::<HashedStorages>(scope, row).unwrap();
+                }
+            }
+            tx.commit().unwrap();
+            let tx = db.tx().unwrap();
+            assert_eq!(tx.entries::<HashedStorages>().unwrap(), 4096);
+            let dbi = tx
+                .inner()
+                .open_db(Some(if mode.is_some() { TABLE } else { HashedStorages::NAME }))
+                .unwrap()
+                .dbi();
+            let stat = tx.inner().db_stat_with_dbi(dbi).unwrap();
+            let live = (stat.branch_pages() + stat.leaf_pages() + stat.overflow_pages()) *
+                stat.page_size() as usize;
+            println!("{mode:?},{},{live}", if full { "full" } else { "inline/native" });
+            sizes.push(live);
+            if mode.is_none() {
+                native = live;
+            }
+        }
+        if mode.is_some() {
+            assert!(sizes[0] < sizes[1]);
+            println!("{mode:?} inline/native={:.4}", sizes[0] as f64 / native as f64);
+        }
+    }
+}
+
+#[test]
 fn dense_cursor_persistence_snapshots_abort_and_reopen() {
     let dir = tempdir().unwrap();
     let args = DatabaseArguments::test().with_experimental_packing(Some(PackingMode::Dense), 3);

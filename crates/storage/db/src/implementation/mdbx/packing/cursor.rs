@@ -56,6 +56,12 @@ pub(crate) struct Logical<K: TransactionKind> {
 enum Position {
     Uninitialized,
     Row(RawRow),
+    /// Ordinary exhaustion retains the duplicate position for `current()` and reversal.
+    Exhausted {
+        row: RawRow,
+        reverse: bool,
+        current: bool,
+    },
     Boundary(B256, Vec<u8>),
     Missing,
 }
@@ -114,7 +120,14 @@ impl<K: TransactionKind> Logical<K> {
         self.tx.txn_execute(|_| ()).map_err(|e| DatabaseError::Read(e.into()))?;
         self.shared.check()?;
         if matches!(movement, Move::Current) {
-            let Position::Row((key, value)) = &self.position else { return Ok(None) };
+            if matches!(self.position, Position::Exhausted { current: false, .. }) {
+                return Ok(None);
+            }
+            let (Position::Row((key, value)) | Position::Exhausted { row: (key, value), .. }) =
+                &self.position
+            else {
+                return Ok(None)
+            };
             let (key, value) = (key.clone(), value.clone());
             let bound = (B256::from_slice(&key), value[..if self.trie { 33 } else { 32 }].to_vec());
             let current = self.find(Some(bound), true, false)?.filter(|(k, v)| {
@@ -122,7 +135,9 @@ impl<K: TransactionKind> Logical<K> {
                     v[..if self.trie { 33 } else { 32 }] ==
                         value[..if self.trie { 33 } else { 32 }]
             });
-            if let Some(row) = &current {
+            if let Some(row) = &current &&
+                !matches!(self.position, Position::Exhausted { .. })
+            {
                 self.position = Position::Row(row.clone());
             }
             return Ok(current);
@@ -133,13 +148,20 @@ impl<K: TransactionKind> Logical<K> {
             return Ok(None);
         }
         let bound = match &self.position {
-            Position::Row((k, v)) => {
+            Position::Row((k, v)) | Position::Exhausted { row: (k, v), .. } => {
                 Some((B256::from_slice(k), v[..if self.trie { 33 } else { 32 }].to_vec()))
             }
             Position::Boundary(scope, sub) => Some((*scope, sub.clone())),
             Position::Uninitialized | Position::Missing => None,
         };
         let old_scope = bound.as_ref().map(|(s, _)| *s);
+        if let Position::Exhausted { reverse, .. } = &self.position &&
+            (matches!(movement, Move::NextDup | Move::PrevDup) ||
+                matches!(movement, Move::Next | Move::NextScope) && !reverse ||
+                matches!(movement, Move::Prev) && *reverse)
+        {
+            return Ok(None);
+        }
         let (bound, inclusive, reverse) = match movement {
             Move::First => (None, true, false),
             Move::Last => (None, true, true),
@@ -154,7 +176,7 @@ impl<K: TransactionKind> Logical<K> {
                     false,
                 )?;
                 let Some((scope, _)) = next else {
-                    self.position = Position::Missing;
+                    self.exhaust(false)?;
                     return Ok(None);
                 };
                 (Some((scope, vec![0; if self.trie { 33 } else { 32 }])), true, false)
@@ -173,6 +195,30 @@ impl<K: TransactionKind> Logical<K> {
             }
             Move::Current => unreachable!(),
         };
+        // MDBX's outer DupSort cursor stays on the boundary scope. Reversing after
+        // outer exhaustion advances that cursor to the adjacent scope, rather than
+        // walking back into the boundary scope's duplicates.
+        let bound = if matches!(self.position, Position::Exhausted { .. }) &&
+            matches!(movement, Move::Next | Move::Prev)
+        {
+            bound.map(|(scope, _)| {
+                (
+                    scope,
+                    if reverse {
+                        vec![0; if self.trie { 33 } else { 32 }]
+                    } else if self.trie {
+                        TrieKey::from(Nibbles::unpack(B256::repeat_byte(0xff)))
+                            .encode()
+                            .as_ref()
+                            .to_vec()
+                    } else {
+                        B256::repeat_byte(0xff).to_vec()
+                    },
+                )
+            })
+        } else {
+            bound
+        };
         let next = self.find(bound, inclusive, reverse)?;
         if matches!(movement, Move::NextDup | Move::PrevDup | Move::LastDup) &&
             next.as_ref().is_none_or(|(k, _)| Some(B256::from_slice(k)) != old_scope)
@@ -182,12 +228,35 @@ impl<K: TransactionKind> Logical<K> {
         }
         if let Some(row) = &next {
             self.position = Position::Row(row.clone());
-        } else if matches!(movement, Move::First | Move::Last) ||
-            matches!(self.position, Position::Row(_))
-        {
+        } else if matches!(self.position, Position::Row(_)) {
+            self.exhaust(reverse)?;
+        } else if matches!(movement, Move::First | Move::Last) {
             self.position = Position::Missing;
         }
         Ok(next)
+    }
+
+    fn exhaust(&mut self, reverse: bool) -> Result<(), DatabaseError> {
+        if let Position::Row(row) = &self.position {
+            let row = row.clone();
+            let scope = B256::from_slice(&row.0);
+            let first =
+                self.find(Some((scope, vec![0; if self.trie { 33 } else { 32 }])), true, false)?;
+            let duplicate = if let Some((key, value)) = first.filter(|(k, _)| k[..] == scope[..]) {
+                self.find(
+                    Some((scope, value[..if self.trie { 33 } else { 32 }].to_vec())),
+                    false,
+                    false,
+                )?
+                .is_some_and(|(k, _)| k == key)
+            } else {
+                false
+            };
+            // Exhausting the outer DupSort cursor also exhausts its inner cursor. A
+            // singleton has no inner cursor, so MDBX still returns its current value.
+            self.position = Position::Exhausted { row, reverse, current: !duplicate };
+        }
+        Ok(())
     }
 
     fn find(

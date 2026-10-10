@@ -1,5 +1,7 @@
 # Packed-state reconstruction and blob optimizations
 
+Historical measurements for `38b70ff`. The subsequent [PR 127 reaudit response](experimental-state-packing-reaudit-response.md) adds an inline record tier and new experimental versions; this report's compatibility and timing statements describe the earlier revision.
+
 This patch follows audit-fix commit `0a66cde013ecb8935632aa12df7d15c05dc443c3` on `feat/experimental-state-packing`. It applies only when `--db.experimental-state-packing dense|integer32` is enabled. Native minimal storage, pruning settings, codec IDs, experimental database versions and the persisted fixed-depth marker remain unchanged. Existing experimental directories can reopen without conversion.
 
 ## Implementation
