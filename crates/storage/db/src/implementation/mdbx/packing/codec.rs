@@ -5,6 +5,7 @@ use crate::DatabaseError;
 use alloy_primitives::{B256, U256};
 use reth_codecs::Compact;
 use reth_primitives_traits::StorageEntry;
+use std::sync::Arc;
 
 const HEADER: usize = 26;
 const MAGIC: &[u8; 8] = b"RSTPACK1";
@@ -227,9 +228,9 @@ impl<'a> Blob<'a> {
 }
 
 /// Owned validated blob. Its borrowed views need no repeated checksum or index scan.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct OwnedBlob {
-    bytes: Vec<u8>,
+    bytes: Arc<[u8]>,
     count: usize,
     width: usize,
     index: usize,
@@ -248,7 +249,7 @@ impl OwnedBlob {
         let blob = Blob::parse_record(&bytes, anchor, mode)?;
         let (count, width, index, payload) = (blob.count, blob.width, blob.index, blob.payload);
         let anchor = blob.anchor;
-        Ok(Self { bytes, count, width, index, payload, mode, anchor, group: None })
+        Ok(Self { bytes: bytes.into(), count, width, index, payload, mode, anchor, group: None })
     }
 
     fn view(&self) -> Blob<'_> {
@@ -265,6 +266,10 @@ impl OwnedBlob {
 
     pub(crate) const fn len(&self) -> usize {
         self.count
+    }
+
+    pub(crate) fn byte_len(&self) -> usize {
+        self.bytes.len()
     }
 
     pub(crate) fn key(&self, row: usize) -> B256 {

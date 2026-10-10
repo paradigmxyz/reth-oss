@@ -12,6 +12,12 @@ mod tests;
 pub(crate) use cursor::{Logical, Move};
 pub(crate) use store::{Shared, Store, TABLE};
 
+/// Physical MDBX table containing experimental packed storage records.
+pub const TABLE_NAME: &str = TABLE;
+
+/// Sentinel retaining every storage trie path; ordinary reconstruction cutoffs remain 1..=8.
+pub const FULL_TRIE_DEPTH: usize = 65;
+
 /// Experimental on-disk storage encoding. A fresh, explicitly opted-in directory is required.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PackingMode {
@@ -38,8 +44,10 @@ pub(crate) fn check_directory(
     mode: Option<PackingMode>,
     depth: usize,
 ) -> Result<(), DatabaseError> {
-    if mode.is_some() && !(1..=8).contains(&depth) {
-        return Err(DatabaseError::Other("experimental trie depth must be 1..=8".into()));
+    if mode.is_some() && !(1..=8).contains(&depth) && depth != FULL_TRIE_DEPTH {
+        return Err(DatabaseError::Other(
+            "experimental trie depth must be 1..=8 or full retention".into(),
+        ));
     }
     let version = get_db_version(path);
     if let Some(mode) = mode {
@@ -69,7 +77,10 @@ pub(crate) fn check_directory(
 }
 
 pub(crate) fn prepare_directory(path: &Path, mode: PackingMode, depth: usize) -> eyre::Result<()> {
-    eyre::ensure!((1..=8).contains(&depth), "experimental trie depth must be 1..=8");
+    eyre::ensure!(
+        (1..=8).contains(&depth) || depth == FULL_TRIE_DEPTH,
+        "experimental trie depth must be 1..=8 or full retention"
+    );
     if crate::is_database_empty(path) {
         reth_fs_util::create_dir_all(path)?;
         reth_fs_util::write(

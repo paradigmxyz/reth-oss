@@ -1,5 +1,6 @@
 //! Bounded, snapshot-local sharing of canonical reconstructed trie records.
 
+use super::codec::OwnedBlob;
 use alloy_primitives::B256;
 use alloy_trie::{BranchNodeCompact, Nibbles};
 use std::{collections::BTreeMap, sync::Arc};
@@ -70,9 +71,95 @@ pub(crate) fn node_bytes(nodes: &TrieNodes) -> usize {
         .sum::<usize>()
 }
 
+/// Validated immutable bytes shared only within one MDBX transaction. Cursor-local integer
+/// group decoding remains independent. Admission bounds include estimated map overhead.
+#[derive(Debug, Default)]
+pub(crate) struct BlobCache {
+    entries: BTreeMap<(B256, B256), CachedBlob>,
+    bytes: usize,
+    clock: u64,
+    #[cfg(test)]
+    pub(crate) hits: usize,
+}
+
+#[derive(Debug)]
+struct CachedBlob {
+    blob: OwnedBlob,
+    bytes: usize,
+    used: u64,
+}
+
+impl BlobCache {
+    pub(crate) fn get(&mut self, scope: B256, slot: B256) -> Option<(Vec<u8>, OwnedBlob)> {
+        let (&key, entry) = self.entries.range_mut(..=(scope, slot)).next_back()?;
+        if key.0 != scope || slot > entry.blob.key(entry.blob.len() - 1) {
+            return None;
+        }
+        self.clock += 1;
+        entry.used = self.clock;
+        #[cfg(test)]
+        {
+            self.hits += 1;
+        }
+        let mut anchor = key.0.to_vec();
+        anchor.extend_from_slice(key.1.as_slice());
+        Some((anchor, entry.blob.clone()))
+    }
+
+    pub(crate) fn insert(&mut self, scope: B256, blob: OwnedBlob) {
+        let key = (scope, blob.key(0));
+        if let Some(old) = self.entries.remove(&key) {
+            self.bytes -= old.bytes;
+        }
+        let bytes = blob.byte_len() + std::mem::size_of::<CachedBlob>() + 192;
+        if bytes > CACHE_BYTES {
+            return;
+        }
+        while self.entries.len() >= 256 || self.bytes + bytes > CACHE_BYTES {
+            let Some(key) =
+                self.entries.iter().min_by_key(|(_, entry)| entry.used).map(|(key, _)| *key)
+            else {
+                break;
+            };
+            if let Some(old) = self.entries.remove(&key) {
+                self.bytes -= old.bytes;
+            }
+        }
+        self.clock += 1;
+        self.bytes += bytes;
+        self.entries.insert(key, CachedBlob { blob, bytes, used: self.clock });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::implementation::mdbx::packing::{codec::encode_record, PackingMode};
+    use alloy_primitives::U256;
+    use reth_primitives_traits::StorageEntry;
+
+    #[test]
+    fn shared_blob_cache_evicts_and_respects_contract_boundaries() {
+        let mut cache = BlobCache::default();
+        let rows: Vec<_> = (0..512u64)
+            .map(|i| StorageEntry::new(B256::from(U256::from(i).to_be_bytes::<32>()), U256::MAX))
+            .collect();
+        for i in 0..300u64 {
+            let scope = B256::from(U256::from(i).to_be_bytes::<32>());
+            let bytes = encode_record(&rows, scope, PackingMode::Dense).unwrap();
+            let mut anchor = scope.to_vec();
+            anchor.extend_from_slice(rows[0].key.as_slice());
+            cache.insert(scope, OwnedBlob::parse(bytes, &anchor, PackingMode::Dense).unwrap());
+            assert!(cache.bytes <= CACHE_BYTES);
+            assert!(cache.entries.len() <= 256);
+        }
+        assert!(cache.get(B256::ZERO, rows[50].key).is_none());
+        assert!(cache.get(B256::from(U256::from(299).to_be_bytes::<32>()), rows[50].key).is_some());
+        assert!(cache.get(B256::from(U256::from(300).to_be_bytes::<32>()), rows[50].key).is_none());
+        assert!(cache
+            .get(B256::from(U256::from(299).to_be_bytes::<32>()), B256::repeat_byte(255))
+            .is_none());
+    }
 
     #[test]
     fn cache_evicts_lru_and_rejects_stale_versions() {

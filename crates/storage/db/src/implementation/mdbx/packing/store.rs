@@ -1,7 +1,7 @@
 //! Snapshot-local storage deltas and ordinary MDBX blob persistence.
 
 use super::{
-    cache::{node_bytes, TrieCache, TrieNodes, CACHE_BYTES},
+    cache::{node_bytes, BlobCache, TrieCache, TrieNodes, CACHE_BYTES},
     codec::{self, Blob, OwnedBlob},
     PackingMode,
 };
@@ -41,6 +41,7 @@ pub(crate) struct Shared {
     writer: Option<Transaction<RW>>,
     pending: Mutex<Pending>,
     cache: Mutex<TrieCache>,
+    pub(crate) blobs: Arc<Mutex<BlobCache>>,
     #[cfg(test)]
     pub(crate) row_target: std::sync::atomic::AtomicUsize,
 }
@@ -78,6 +79,7 @@ impl Shared {
             writer,
             pending: Mutex::new(Pending::default()),
             cache: Mutex::new(TrieCache::default()),
+            blobs: Arc::new(Mutex::new(BlobCache::default())),
             #[cfg(test)]
             row_target: std::sync::atomic::AtomicUsize::new(ROW_TARGET),
         }
@@ -283,10 +285,15 @@ impl Shared {
             }
         }
         let mut changes = std::mem::take(&mut p.values).into_iter().peekable();
+        let mut rows = Vec::new();
+        let mut mutations = Vec::new();
+        let mut merged_rows = Vec::new();
         while let Some(((scope, slot), value)) = changes.next() {
+            rows.clear();
+            mutations.clear();
+            mutations.push((slot, value));
             let mut deleted = value.is_none();
             let mut store = Store::new(tx.clone(), self.dbi, self.mode)?;
-            let mut rows = BTreeMap::new();
             let mut old_key = None;
             let mut next_anchor = None;
             let probe = key(scope, slot);
@@ -308,9 +315,7 @@ impl Shared {
                 if parsed.mode() != self.mode {
                     return Err(DatabaseError::Decode);
                 }
-                for row in parsed.rows()? {
-                    rows.insert(row.key, row.value);
-                }
+                rows.extend(parsed.rows()?);
                 old_key = Some(k);
                 if let Some((k, _)) = store
                     .cursor
@@ -343,9 +348,7 @@ impl Shared {
                 if parsed.mode() != self.mode {
                     return Err(DatabaseError::Decode);
                 }
-                for row in parsed.rows()? {
-                    rows.insert(row.key, row.value);
-                }
+                rows.extend(parsed.rows()?);
                 old_key = Some(first);
                 next_anchor = store
                     .cursor
@@ -354,29 +357,16 @@ impl Shared {
                     .filter(|(k, _)| k[..32] == scope[..])
                     .map(|(k, _)| B256::from_slice(&k[32..]));
             }
-            match value {
-                Some(v) => {
-                    rows.insert(slot, v);
-                }
-                None => {
-                    rows.remove(&slot);
-                }
-            }
             while changes
                 .peek()
                 .is_some_and(|((s, k), _)| *s == scope && next_anchor.is_none_or(|a| *k < a))
             {
                 let ((_, k), v) = changes.next().ok_or(DatabaseError::Decode)?;
                 deleted |= v.is_none();
-                match v {
-                    Some(v) => {
-                        rows.insert(k, v);
-                    }
-                    None => {
-                        rows.remove(&k);
-                    }
-                }
+                mutations.push((k, v));
             }
+            merge_rows(&rows, &mutations, &mut merged_rows);
+            std::mem::swap(&mut rows, &mut merged_rows);
             // Merge only after deletions below a low-water mark. The merged maximum stays
             // well below the split limit, so small insert/delete cycles do not thrash.
             if deleted && !rows.is_empty() && rows.len() <= row_target / 4 {
@@ -428,7 +418,6 @@ impl Shared {
             if let Some(k) = old_key {
                 tx.del(self.dbi, k, None).map_err(|e| DatabaseError::Delete(e.into()))?;
             }
-            let rows: Vec<_> = rows.into_iter().map(|(k, v)| StorageEntry::new(k, v)).collect();
             // Balance splits so a 513-row block does not leave a one-row tail.
             let chunk_size = rows.len().div_ceil(rows.len().div_ceil(row_target).max(1)).max(1);
             for block in rows.chunks(chunk_size) {
@@ -456,6 +445,9 @@ impl Shared {
                 store.find(Some(bound), inclusive, false)
             })?;
             for (path, node) in nodes {
+                if self.depth == super::FULL_TRIE_DEPTH && path.is_empty() {
+                    continue;
+                }
                 let entry = TrieEntry { nibbles: path.into(), node };
                 tx.put(trie, scope, entry.compress(), WriteFlags::UPSERT)
                     .map_err(|e| DatabaseError::Read(e.into()))?;
@@ -468,7 +460,8 @@ impl Shared {
         let generation = self.generation.fetch_add(1, Ordering::Release) + 1;
         p.contracts.insert(scope, generation);
         if let Some(slot) = slot {
-            p.regions.insert((scope, Nibbles::unpack(slot).slice(..self.depth)), generation);
+            p.regions
+                .insert((scope, Nibbles::unpack(slot).slice(..self.depth.min(64))), generation);
         } else {
             p.contract_clears.insert(scope, generation);
         }
@@ -589,6 +582,7 @@ pub(crate) struct Store<K: TransactionKind> {
     pub(crate) cursor: reth_libmdbx::Cursor<K>,
     cached: Option<(Vec<u8>, OwnedBlob)>,
     mode: PackingMode,
+    shared_cache: Option<Arc<Mutex<BlobCache>>>,
 }
 
 impl<K: TransactionKind> Store<K> {
@@ -601,6 +595,7 @@ impl<K: TransactionKind> Store<K> {
             cursor: tx.cursor_with_dbi(dbi).map_err(|e| DatabaseError::InitCursor(e.into()))?,
             cached: None,
             mode,
+            shared_cache: None,
         })
     }
 
@@ -613,6 +608,13 @@ impl<K: TransactionKind> Store<K> {
             return Err(DatabaseError::Decode);
         }
         self.cached = Some((row.0, rows));
+        if let Some(cache) = &self.shared_cache {
+            let (anchor, rows) = self.cached.as_ref().ok_or(DatabaseError::Decode)?;
+            cache
+                .lock()
+                .map_err(|_| DatabaseError::Other("packing blob cache lock poisoned".into()))?
+                .insert(B256::from_slice(&anchor[..32]), rows.clone());
+        }
         Ok(())
     }
 
@@ -630,6 +632,21 @@ impl<K: TransactionKind> Store<K> {
             let Some(index) = rows.find(scope, bound, inclusive, reverse)
         {
             return Ok(Some((scope, rows.row(index)?)));
+        }
+        if let Some((scope, slot)) = bound &&
+            let Some(cache) = &self.shared_cache
+        {
+            let cached = cache
+                .lock()
+                .map_err(|_| DatabaseError::Other("packing blob cache lock poisoned".into()))?
+                .get(scope, slot);
+            if let Some((anchor, mut rows)) = cached &&
+                let Some(index) = rows.find(scope, bound, inclusive, reverse)
+            {
+                let entry = rows.row(index)?;
+                self.cached = Some((anchor, rows));
+                return Ok(Some((scope, entry)));
+            }
         }
         let mut candidate = if let Some((scope, slot)) = bound {
             let k = key(scope, slot);
@@ -667,6 +684,11 @@ impl<K: TransactionKind> Store<K> {
             };
         }
         Ok(None)
+    }
+
+    pub(crate) fn with_cache(mut self, cache: Arc<Mutex<BlobCache>>) -> Self {
+        self.shared_cache = Some(cache);
+        self
     }
 }
 
@@ -821,7 +843,7 @@ fn merge_blob(
     tx: &Transaction<RW>,
     dbi: MDBX_dbi,
     mode: PackingMode,
-    rows: &mut BTreeMap<B256, U256>,
+    rows: &mut Vec<StorageEntry>,
     anchor: Vec<u8>,
     bytes: &[u8],
     max: usize,
@@ -833,9 +855,31 @@ fn merge_blob(
     if rows.len() + neighbor.len() > max {
         return Ok(false);
     }
-    for row in neighbor.rows()? {
-        rows.insert(row.key, row.value);
-    }
+    rows.extend(neighbor.rows()?);
+    rows.sort_unstable_by_key(|row| row.key);
     tx.del(dbi, anchor, None).map_err(|e| DatabaseError::Delete(e.into()))?;
     Ok(true)
+}
+
+/// Both inputs are ordered; pending mutations replace or remove the matching physical row.
+fn merge_rows(
+    existing: &[StorageEntry],
+    mutations: &[(B256, Option<U256>)],
+    output: &mut Vec<StorageEntry>,
+) {
+    output.clear();
+    output.reserve(existing.len() + mutations.len());
+    let mut rows = existing.iter().peekable();
+    for &(key, value) in mutations {
+        while rows.peek().is_some_and(|row| row.key < key) {
+            output.push(*rows.next().expect("peeked row"));
+        }
+        if rows.peek().is_some_and(|row| row.key == key) {
+            rows.next();
+        }
+        if let Some(value) = value {
+            output.push(StorageEntry::new(key, value));
+        }
+    }
+    output.extend(rows.copied());
 }

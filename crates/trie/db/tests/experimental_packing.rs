@@ -13,7 +13,11 @@ use reth_db_api::{
     transaction::{DbTx, DbTxMut},
 };
 use reth_primitives_traits::StorageEntry;
-use reth_trie::{proof::StorageProof, HashBuilder, Nibbles, StorageRoot};
+use reth_trie::{
+    hashed_cursor::HashedPostStateCursorFactory, prefix_set::PrefixSetMut, proof::StorageProof,
+    trie_cursor::InMemoryTrieCursorFactory, updates::TrieUpdates, HashBuilder, HashedPostState,
+    HashedStorage, Nibbles, StorageRoot,
+};
 use reth_trie_db::{
     DatabaseHashedCursorFactory, DatabaseStorageRoot, DatabaseTrieCursorFactory, PackedKeyAdapter,
 };
@@ -298,6 +302,233 @@ fn sparse_incremental_updates_preserve_roots_and_multiproofs() {
             .storage_multiproof(targets)
             .unwrap();
             assert_eq!(pp, np);
+        }
+    }
+}
+
+#[test]
+fn system_contract_overlays_match_full_storage_roots() {
+    for mode in [None, Some(PackingMode::Dense), Some(PackingMode::Integer32)] {
+        for initial_leaf in [false, true] {
+            let dir = tempdir().unwrap();
+            let db =
+                init_db(dir.path(), DatabaseArguments::test().with_experimental_packing(mode, 3))
+                    .unwrap();
+            let scope = B256::repeat_byte(31);
+            let mut storage = std::collections::BTreeMap::new();
+            if initial_leaf {
+                let key = keccak256(U256::ZERO.to_be_bytes::<32>());
+                storage.insert(key, U256::MAX);
+                let tx = db.tx_mut().unwrap();
+                tx.put::<HashedStorages>(scope, StorageEntry::new(key, U256::MAX)).unwrap();
+                tx.commit().unwrap();
+            }
+            let mut nodes = TrieUpdates::default();
+            for block in 1..=128u64 {
+                let timestamp = 1_791_629_607 + block * 6;
+                let slots = [timestamp % 8191, timestamp % 8191 + 8191];
+                let mut prefix_set = PrefixSetMut::default();
+                for slot in slots {
+                    let key = keccak256(U256::from(slot).to_be_bytes::<32>());
+                    let value = U256::from(block * 8191 + slot);
+                    storage.insert(key, value);
+                    prefix_set.insert(Nibbles::unpack(key));
+                }
+                let state = HashedPostState::from_hashed_storage(
+                    scope,
+                    HashedStorage::from_iter(storage.iter().map(|(key, value)| (*key, *value))),
+                )
+                .into_sorted();
+                let sorted_nodes = nodes.clone().into_sorted();
+                let tx = db.tx().unwrap();
+                let (root, _, updates) = StorageRoot::new_hashed(
+                    InMemoryTrieCursorFactory::new(
+                        DatabaseTrieCursorFactory::<_, PackedKeyAdapter>::new(&tx),
+                        &sorted_nodes,
+                    ),
+                    HashedPostStateCursorFactory::new(
+                        DatabaseHashedCursorFactory::new(&tx),
+                        &state,
+                    ),
+                    scope,
+                    prefix_set.freeze(),
+                )
+                .root_with_updates()
+                .unwrap();
+                let mut builder = HashBuilder::default();
+                for (key, value) in &storage {
+                    builder.add_leaf(
+                        Nibbles::unpack(key),
+                        alloy_rlp::encode_fixed_size(value).as_ref(),
+                    );
+                }
+                assert_eq!(root, builder.root(), "{mode:?}, initial={initial_leaf}, block={block}");
+                nodes.storage_tries.entry(scope).or_default().extend(updates);
+            }
+        }
+    }
+}
+
+#[test]
+fn persisted_system_contract_incremental_roots_match_full_storage() {
+    for (mode, full) in [
+        (None, false),
+        (Some(PackingMode::Dense), false),
+        (Some(PackingMode::Integer32), false),
+        (Some(PackingMode::Dense), true),
+        (Some(PackingMode::Integer32), true),
+    ] {
+        let dir = tempdir().unwrap();
+        let db = init_db(
+            dir.path(),
+            DatabaseArguments::test()
+                .with_experimental_packing(mode, 3)
+                .with_experimental_full_trie(full),
+        )
+        .unwrap();
+        let scope = B256::repeat_byte(32);
+        let mut storage = std::collections::BTreeMap::new();
+        for block in 1..=128u64 {
+            let timestamp = 1_791_629_607 + block * 6;
+            let mut changed = Vec::new();
+            let mut prefixes = PrefixSetMut::default();
+            for slot in [timestamp % 8191, timestamp % 8191 + 8191] {
+                let key = keccak256(U256::from(slot).to_be_bytes::<32>());
+                let value = U256::from(block * 8191 + slot);
+                storage.insert(key, value);
+                changed.push((key, value));
+                prefixes.insert(Nibbles::unpack(key));
+            }
+            let tx = db.tx().unwrap();
+            let state = HashedPostState::from_hashed_storage(
+                scope,
+                HashedStorage::from_iter(changed.clone()),
+            )
+            .into_sorted();
+            let (root, _, _) = StorageRoot::new_hashed(
+                DatabaseTrieCursorFactory::<_, PackedKeyAdapter>::new(&tx),
+                HashedPostStateCursorFactory::new(DatabaseHashedCursorFactory::new(&tx), &state),
+                scope,
+                prefixes.freeze(),
+            )
+            .root_with_updates()
+            .unwrap();
+            let mut builder = HashBuilder::default().with_updates(true);
+            for (key, value) in &storage {
+                builder
+                    .add_leaf(Nibbles::unpack(key), alloy_rlp::encode_fixed_size(value).as_ref());
+            }
+            assert_eq!(root, builder.root(), "{mode:?}, persisted block={block}");
+            let nodes = builder.split().1;
+            drop(tx);
+            let tx = db.tx_mut().unwrap();
+            for (key, value) in changed {
+                tx.put::<HashedStorages>(scope, StorageEntry::new(key, value)).unwrap();
+            }
+            tx.delete::<PackedStoragesTrie>(scope, None).unwrap();
+            for (path, node) in nodes {
+                if !path.is_empty() {
+                    tx.put::<PackedStoragesTrie>(scope, TrieEntry { nibbles: path.into(), node })
+                        .unwrap();
+                }
+            }
+            tx.finish_storage_trie_updates(scope).unwrap();
+            tx.commit().unwrap();
+        }
+    }
+}
+
+#[test]
+fn pending_storage_trie_overlays_match_native_roots() {
+    for mode in [None, Some(PackingMode::Dense), Some(PackingMode::Integer32)] {
+        let dir = tempdir().unwrap();
+        let db = init_db(dir.path(), DatabaseArguments::test().with_experimental_packing(mode, 3))
+            .unwrap();
+        let scope = B256::repeat_byte(33);
+        let mut rows = fixture(31);
+        let tx = db.tx_mut().unwrap();
+        let mut builder = HashBuilder::default().with_updates(true);
+        for row in &rows {
+            tx.put::<HashedStorages>(scope, *row).unwrap();
+            builder.add_leaf(
+                Nibbles::unpack(row.key),
+                alloy_rlp::encode_fixed_size(&row.value).as_ref(),
+            );
+        }
+        builder.root();
+        for (path, node) in builder.split().1 {
+            if !path.is_empty() {
+                tx.put::<PackedStoragesTrie>(scope, TrieEntry { nibbles: path.into(), node })
+                    .unwrap();
+            }
+        }
+        tx.commit().unwrap();
+
+        rows[0].value = U256::from(98765);
+        let state = HashedPostState::from_hashed_storage(
+            scope,
+            HashedStorage::from_iter(rows.iter().map(|row| (row.key, row.value))),
+        )
+        .into_sorted();
+        let mut prefixes = PrefixSetMut::default();
+        prefixes.insert(Nibbles::unpack(rows[0].key));
+        let tx = db.tx().unwrap();
+        let (expected, _, updates) = StorageRoot::new_hashed(
+            DatabaseTrieCursorFactory::<_, PackedKeyAdapter>::new(&tx),
+            HashedPostStateCursorFactory::new(DatabaseHashedCursorFactory::new(&tx), &state),
+            scope,
+            prefixes.freeze(),
+        )
+        .root_with_updates()
+        .unwrap();
+        let mut nodes = TrieUpdates::default();
+        nodes.storage_tries.insert(scope, updates);
+        let nodes = nodes.into_sorted();
+        let mut builder = HashBuilder::default();
+        for row in &rows {
+            builder.add_leaf(
+                Nibbles::unpack(row.key),
+                alloy_rlp::encode_fixed_size(&row.value).as_ref(),
+            );
+        }
+        assert_eq!(expected, builder.root());
+        // A subsequent block can leave this storage unchanged, or change another
+        // subtree. Its prefix set does not include the preceding block's mutation.
+        for change_another_subtree in [false, true] {
+            let mut prefixes = PrefixSetMut::default();
+            if change_another_subtree {
+                let last = rows.last_mut().unwrap();
+                last.value = U256::from(54321);
+                prefixes.insert(Nibbles::unpack(last.key));
+            }
+            let state = HashedPostState::from_hashed_storage(
+                scope,
+                HashedStorage::from_iter(rows.iter().map(|row| (row.key, row.value))),
+            )
+            .into_sorted();
+            let actual = StorageRoot::new_hashed(
+                InMemoryTrieCursorFactory::new(
+                    DatabaseTrieCursorFactory::<_, PackedKeyAdapter>::new(&tx),
+                    &nodes,
+                ),
+                HashedPostStateCursorFactory::new(DatabaseHashedCursorFactory::new(&tx), &state),
+                scope,
+                prefixes.freeze(),
+            )
+            .root()
+            .unwrap();
+            let mut builder = HashBuilder::default();
+            for row in &rows {
+                builder.add_leaf(
+                    Nibbles::unpack(row.key),
+                    alloy_rlp::encode_fixed_size(&row.value).as_ref(),
+                );
+            }
+            assert_eq!(
+                actual,
+                builder.root(),
+                "{mode:?}: pending overlay, later mutation={change_another_subtree}"
+            );
         }
     }
 }

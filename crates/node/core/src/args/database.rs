@@ -74,13 +74,22 @@ pub struct DatabaseArgs {
     #[arg(long = "db.disable-metrics")]
     pub disable_metrics: bool,
     /// Use an experimental packed-state database with reconstructed storage trie records.
-    /// Requires a fresh dedicated directory and --minimal with storage V2 on node startup.
+    /// Requires a fresh dedicated directory with storage V2 on node startup.
+    /// Supports archive, full, and minimal retention modes.
     #[arg(long = "db.experimental-state-packing", value_enum)]
     pub experimental_state_packing: Option<ExperimentalPacking>,
     /// Retain storage trie records above this nibble depth (default: 3).
     /// This is part of the persisted experimental format and cannot change on reopening.
     #[arg(long="db.experimental-trie-depth",requires="experimental_state_packing",value_parser=clap::value_parser!(u8).range(1..=8))]
     pub experimental_trie_depth: Option<u8>,
+    /// Pack storage values while retaining the full native storage trie.
+    /// Requires a fresh directory and cannot change on reopening.
+    #[arg(
+        long = "db.experimental-retain-full-trie",
+        requires = "experimental_state_packing",
+        conflicts_with = "experimental_trie_depth"
+    )]
+    pub experimental_retain_full_trie: bool,
 }
 
 impl DatabaseArgs {
@@ -119,6 +128,7 @@ impl DatabaseArgs {
                 }),
                 usize::from(self.experimental_trie_depth.unwrap_or(3)),
             )
+            .with_experimental_full_trie(self.experimental_retain_full_trie)
     }
 
     /// Returns whether built-in database metrics are enabled.
@@ -503,6 +513,35 @@ mod tests {
         .unwrap();
         assert_eq!(cmd.args.balstore_cache_size, Some(1234));
     }
+    #[test]
+    fn full_trie_requires_packing_and_conflicts_with_cutoff() {
+        assert!(CommandParser::<DatabaseArgs>::try_parse_from([
+            "reth",
+            "--db.experimental-retain-full-trie"
+        ])
+        .is_err());
+        assert!(CommandParser::<DatabaseArgs>::try_parse_from([
+            "reth",
+            "--db.experimental-state-packing",
+            "dense",
+            "--db.experimental-retain-full-trie",
+            "--db.experimental-trie-depth",
+            "3"
+        ])
+        .is_err());
+        let parsed = CommandParser::<DatabaseArgs>::try_parse_from([
+            "reth",
+            "--db.experimental-state-packing",
+            "dense",
+            "--db.experimental-retain-full-trie",
+        ])
+        .unwrap();
+        assert_eq!(
+            parsed.args.database_args().experimental_trie_depth(),
+            reth_db::mdbx::packing::FULL_TRIE_DEPTH
+        );
+    }
+
     #[test]
     fn experimental_packing_is_opt_in_and_depth_requires_mode() {
         let default = CommandParser::<DatabaseArgs>::try_parse_from(["reth"]).unwrap();

@@ -11,7 +11,7 @@ use reth_db_api::{
 };
 use reth_libmdbx::{Transaction, TransactionKind, WriteFlags, RW};
 use reth_primitives_traits::StorageEntry;
-use std::{collections::BTreeMap, sync::Arc};
+use std::{collections::BTreeMap, ops::Bound, sync::Arc};
 
 type TrieEntry = <PackedStoragesTrie as Table>::Value;
 type TrieKey = <PackedStoragesTrie as DupSort>::SubKey;
@@ -74,7 +74,8 @@ impl<K: TransactionKind> Logical<K> {
         trie: bool,
     ) -> Result<Self, DatabaseError> {
         Ok(Self {
-            store: Store::new(tx.clone(), shared.dbi, shared.mode)?,
+            store: Store::new(tx.clone(), shared.dbi, shared.mode)?
+                .with_cache(shared.blobs.clone()),
             tx,
             shared,
             physical,
@@ -439,20 +440,12 @@ impl<K: TransactionKind> Logical<K> {
             self.shared.cache(scope, None, (generation, trie_epoch), Arc::clone(&nodes))?;
             self.upper = Some((scope, generation, trie_epoch, nodes));
         }
-        let accepts = |p: &Nibbles| {
-            if reverse {
-                p < query || (inclusive && p == query)
-            } else {
-                p > query || (inclusive && p == query)
-            }
-        };
         let nodes = &self.upper.as_ref().ok_or(DatabaseError::Decode)?.3;
-        let candidate = if reverse {
-            nodes.iter().rev().find(|(p, _)| accepts(p))
-        } else {
-            nodes.iter().find(|(p, _)| accepts(p))
-        }
-        .map(|(p, n)| (*p, n.clone()));
+        // Reth's trie updates and database writer omit the empty storage-root path.
+        // Keep it in the internal reconstruction cache, but never expose it through
+        // the logical cursor: an in-memory overlay cannot replace that cached root,
+        // and an unchanged prefix set would let the walker reuse its stale hash.
+        let candidate = seek_node(nodes, *query, inclusive, reverse, true);
         if candidate.as_ref().is_some_and(|(p, _)| p == query && inclusive) {
             return Ok(candidate);
         }
@@ -509,13 +502,8 @@ impl<K: TransactionKind> Logical<K> {
                 self.region = Some((scope, prefix, region_generation, rebuilt));
             }
             let nodes = &self.region.as_ref().ok_or(DatabaseError::Decode)?.3;
-            let hit = if reverse {
-                nodes.iter().rev().find(|(p, _)| accepts(p))
-            } else {
-                nodes.iter().find(|(p, _)| accepts(p))
-            };
-            if let Some((p, n)) = hit {
-                return Ok(Some((*p, n.clone())));
+            if let Some(hit) = seek_node(nodes, *query, inclusive, reverse, false) {
+                return Ok(Some(hit));
             }
             let mut digits = prefix.iter().collect::<Vec<_>>();
             let mut i = digits.len();
@@ -541,6 +529,24 @@ impl<K: TransactionKind> Logical<K> {
             prefix = Nibbles::from_nibbles_unchecked(digits);
         }
     }
+}
+
+fn seek_node(
+    nodes: &TrieNodes,
+    query: Nibbles,
+    inclusive: bool,
+    reverse: bool,
+    omit_root: bool,
+) -> Option<(Nibbles, BranchNodeCompact)> {
+    let edge = if inclusive { Bound::Included(query) } else { Bound::Excluded(query) };
+    let mut range =
+        nodes.range(if reverse { (Bound::Unbounded, edge) } else { (edge, Bound::Unbounded) });
+    let hit = if reverse {
+        range.rev().find(|(path, _)| !omit_root || !path.is_empty())
+    } else {
+        range.find(|(path, _)| !omit_root || !path.is_empty())
+    };
+    hit.map(|(path, node)| (*path, node.clone()))
 }
 
 impl Logical<RW> {
@@ -615,7 +621,15 @@ impl Logical<RW> {
     pub(crate) fn delete(&mut self, duplicates: bool) -> Result<(), DatabaseError> {
         self.tx.txn_execute(|_| ()).map_err(|e| DatabaseError::Read(e.into()))?;
         self.shared.check()?;
-        let Position::Row((scope, value)) = &self.position else { return Ok(()) };
+        if !duplicates && matches!(self.position, Position::Exhausted { current: false, .. }) {
+            // The outer key remains positioned, but an exhausted inner cursor has no value.
+            return Err(DatabaseError::Delete(reth_libmdbx::Error::NoData.into()));
+        }
+        let (Position::Row((scope, value)) | Position::Exhausted { row: (scope, value), .. }) =
+            &self.position
+        else {
+            return Ok(())
+        };
         if self.trie {
             if duplicates || value[..33].iter().all(|b| *b == 0) {
                 self.shared.invalidate_trie_root(Some(B256::from_slice(scope)))?;

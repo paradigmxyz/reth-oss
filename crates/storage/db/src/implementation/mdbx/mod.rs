@@ -266,6 +266,15 @@ impl DatabaseArguments {
     pub const fn experimental_trie_depth(&self) -> usize {
         self.experimental_trie_depth
     }
+
+    /// Retain native storage trie records while packing only storage values.
+    /// The persisted marker prevents reopening a reconstructed layout with this option.
+    pub const fn with_experimental_full_trie(mut self, retain: bool) -> Self {
+        if retain {
+            self.experimental_trie_depth = packing::FULL_TRIE_DEPTH;
+        }
+        self
+    }
 }
 
 /// Wrapper for the libmdbx environment: [Environment]

@@ -1,4 +1,4 @@
-# Experimental packed state for minimal nodes
+# Experimental packed state
 
 This branch adds an opt-in database layout. A normal `reth node --minimal` keeps the native MDBX schema and encodings. The experimental blob table is created only when the new flag is present. Account state, account trie, history, receipts, code, static files, and RocksDB retain their existing layouts.
 
@@ -18,7 +18,7 @@ reth node --chain sepolia --minimal --storage.v2=true \
   --db.experimental-state-packing integer32
 ```
 
-The persisted `--db.experimental-trie-depth` defaults to 3 and accepts 1 through 8. Nodes with paths shorter than the depth remain on disk. Other storage-trie branch records are reconstructed. Greater depth retains more records and makes reconstruction regions smaller. Reopening requires the same mode and depth. The node command rejects this flag without `--minimal` or with storage V2 disabled.
+The persisted `--db.experimental-trie-depth` defaults to 3 and accepts 1 through 8. Nodes with paths shorter than the depth remain on disk. Other storage-trie branch records are reconstructed. Greater depth retains more records and makes reconstruction regions smaller. Reopening requires the same mode and depth. Storage V2 is required; archive, full, and minimal history-retention modes are supported.
 
 Existing native databases and snapshots cannot be converted in place. Neither mode is a decoder for the snapshots at snapshots.reth.rs. Native databases cannot be opened using this flag; experimental databases cannot be opened without it. Dense and integer formats now use dedicated database versions 10003 and 10004 and an `experimental-packing.config` marker. The previous 10001/10002 directories are rejected without modification; use a fresh directory for the new inline tier. Changing a version file or marker is not a migration. These numbers are local experimental formats, not upstream Reth schema versions. Preserve the marker with backups.
 
@@ -74,3 +74,27 @@ The benchmark uses one 65,536-slot contract, hashed keys, and a mixture of one-b
 The database-only blob-target experiment compares 128/256/512-row targets over three rounds for each codec, including sparse updates, random reads, deletion-heavy commits and remaining blob counts. Targets are test-only controls; normal runs retain the 512-row target. See the [optimization report](experimental-state-packing-optimization-report.md) for measured results and their build/workload limits.
 
 Whole-node reduction must be computed from an actual minimal-mode table census: sum the saved bytes in affected tables and divide by total allocated node storage. Before production use, benchmark release builds against real Sepolia state, normal block execution, sync, reorgs, contract wipes, proofs, long-lived readers, database growth, and crash/restart workloads.
+
+## Cursor and blob performance options
+
+Trie-map positioning uses ordered range seeks instead of restarting a linear scan.
+Validated blob bytes are shared by cursors within the same MDBX transaction through a
+bounded cache (256 entries and an estimated 8 MiB). Independent snapshots never share
+this cache. Storage overlays remain authoritative over cached physical values. Active
+cursors may retain evicted byte buffers; those references are outside the admission
+budget. Blob update batches merge sorted physical rows and pending mutations using
+reusable vectors. These changes preserve existing dense and integer32 blob formats.
+
+`--db.experimental-retain-full-trie` packs only the storage-value table and retains all
+native V2 storage trie records. It requires an explicit packing mode and conflicts with
+`--db.experimental-trie-depth`. The existing format marker records the full-retention
+sentinel (65), so enabling or disabling it on an existing reconstructed database is
+rejected. Use a fresh directory. Full-trie cursors use native MDBX seeks; normal provider
+trie writes record completion against the storage generation to avoid redundant repair.
+State-only commits still rebuild canonical trie records. This option trades trie disk
+space for less reconstruction work; reconstruction remains the default.
+
+See the [trie retention strategy and implementation prompt](experimental-state-packing-trie-retention.md)
+for measured tradeoffs, full native trie retention, compatibility requirements and
+the proposed adaptive-retention design. Full-retention performance is not yet measured;
+the recommendation does not change the current default or convert existing snapshots.

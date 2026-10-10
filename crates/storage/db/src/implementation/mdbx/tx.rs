@@ -117,12 +117,14 @@ impl<K: TransactionKind> Tx<K> {
                     "experimental packing requires the V2 PackedStoragesTrie adapter".into(),
                 ));
             }
-            return Ok(Cursor::Packed(Box::new(Logical::new(
-                self.inner.clone(),
-                shared.clone(),
-                inner,
-                T::NAME == "StoragesTrie",
-            )?)));
+            if T::NAME != "StoragesTrie" || shared.depth != super::packing::FULL_TRIE_DEPTH {
+                return Ok(Cursor::Packed(Box::new(Logical::new(
+                    self.inner.clone(),
+                    shared.clone(),
+                    inner,
+                    T::NAME == "StoragesTrie",
+                )?)));
+            }
         }
 
         Ok(Cursor::new_with_metrics(
@@ -531,6 +533,18 @@ impl DbTxMut for Tx<RW> {
 
     fn cursor_dup_write<T: DupSort>(&self) -> Result<Self::DupCursorMut<T>, DatabaseError> {
         self.new_cursor()
+    }
+
+    fn finish_storage_trie_updates(
+        &self,
+        hashed_address: alloy_primitives::B256,
+    ) -> Result<(), DatabaseError> {
+        if let Some(shared) = &self.packing &&
+            shared.depth == super::packing::FULL_TRIE_DEPTH
+        {
+            shared.mark_trie_root_written(hashed_address)?;
+        }
+        Ok(())
     }
 }
 

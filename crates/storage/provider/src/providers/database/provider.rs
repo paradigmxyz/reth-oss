@@ -3262,6 +3262,7 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypes> DatabaseProvider<TX, N> {
                 DatabaseStorageTrieCursor::new(cursor, *hashed_address);
             *num_entries +=
                 db_storage_trie_cursor.write_storage_trie_updates_sorted(storage_trie_updates)?;
+            tx.finish_storage_trie_updates(*hashed_address)?;
             cursor = db_storage_trie_cursor.cursor;
         }
         Ok(())

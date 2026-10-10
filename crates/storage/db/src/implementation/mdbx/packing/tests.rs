@@ -19,6 +19,124 @@ use reth_primitives_traits::StorageEntry;
 use std::{collections::BTreeMap, time::Instant};
 use tempfile::tempdir;
 
+#[test]
+fn shared_blobs_preserve_pending_changes_and_old_snapshots() {
+    for mode in [PackingMode::Dense, PackingMode::Integer32] {
+        let dir = tempdir().unwrap();
+        let db =
+            init_db(dir.path(), DatabaseArguments::test().with_experimental_packing(Some(mode), 3))
+                .unwrap();
+        let scope = B256::repeat_byte(7);
+        let rows = fixture(1300);
+        let tx = db.tx_mut().unwrap();
+        for row in &rows {
+            tx.put::<HashedStorages>(scope, *row).unwrap();
+        }
+        tx.commit().unwrap();
+        let old = db.tx().unwrap();
+        for _ in 0..3 {
+            let mut cursor = old.cursor_dup_read::<HashedStorages>().unwrap();
+            assert_eq!(cursor.seek_by_key_subkey(scope, rows[300].key).unwrap(), Some(rows[300]));
+        }
+        assert!(old.packing.as_ref().unwrap().blobs.lock().unwrap().hits >= 2);
+        let tx = db.tx_mut().unwrap();
+        let mut cursor = tx.cursor_dup_read::<HashedStorages>().unwrap();
+        assert_eq!(cursor.seek_by_key_subkey(scope, rows[300].key).unwrap(), Some(rows[300]));
+        tx.put::<HashedStorages>(scope, StorageEntry::new(rows[300].key, U256::from(99))).unwrap();
+        tx.delete::<HashedStorages>(scope, Some(rows[301])).unwrap();
+        let mut another = tx.cursor_dup_read::<HashedStorages>().unwrap();
+        assert_eq!(
+            another.seek_by_key_subkey(scope, rows[300].key).unwrap().unwrap().value,
+            U256::from(99)
+        );
+        assert_eq!(another.seek_by_key_subkey(scope, rows[301].key).unwrap(), Some(rows[302]));
+        drop(cursor);
+        drop(another);
+        tx.commit().unwrap();
+        assert_eq!(
+            old.cursor_dup_read::<HashedStorages>()
+                .unwrap()
+                .seek_by_key_subkey(scope, rows[300].key)
+                .unwrap(),
+            Some(rows[300])
+        );
+        assert_eq!(
+            db.tx()
+                .unwrap()
+                .cursor_dup_read::<HashedStorages>()
+                .unwrap()
+                .seek_by_key_subkey(scope, rows[300].key)
+                .unwrap()
+                .unwrap()
+                .value,
+            U256::from(99)
+        );
+    }
+}
+
+#[test]
+fn full_trie_layout_is_persisted_and_matches_canonical_nodes() {
+    for mode in [PackingMode::Dense, PackingMode::Integer32] {
+        let dir = tempdir().unwrap();
+        let args = DatabaseArguments::test()
+            .with_experimental_packing(Some(mode), 3)
+            .with_experimental_full_trie(true);
+        let db = init_db(dir.path(), args.clone()).unwrap();
+        let scope = B256::repeat_byte(7);
+        let mut rows = fixture(2048);
+        for round in 0..3 {
+            let tx = db.tx_mut().unwrap();
+            if round == 0 {
+                for row in &rows {
+                    tx.put::<HashedStorages>(scope, *row).unwrap();
+                }
+            } else {
+                rows[30].value = U256::from(round + 50);
+                tx.put::<HashedStorages>(scope, rows[30]).unwrap();
+                let removed = rows.remove(80);
+                tx.delete::<HashedStorages>(scope, Some(removed)).unwrap();
+            }
+            tx.commit().unwrap();
+            let mut builder = HashBuilder::default().with_updates(true);
+            for row in &rows {
+                builder.add_leaf(
+                    Nibbles::unpack(row.key),
+                    alloy_rlp::encode_fixed_size(&row.value).as_ref(),
+                );
+            }
+            builder.root();
+            let expected: BTreeMap<_, _> =
+                builder.split().1.into_iter().filter(|(path, _)| !path.is_empty()).collect();
+            let tx = db.tx().unwrap();
+            assert!(matches!(
+                tx.cursor_dup_read::<PackedStoragesTrie>().unwrap(),
+                Cursor::Native(_)
+            ));
+            let actual: BTreeMap<_, _> = tx
+                .cursor_dup_read::<PackedStoragesTrie>()
+                .unwrap()
+                .walk_dup(Some(scope), None)
+                .unwrap()
+                .map(|row| {
+                    let (_, row) = row.unwrap();
+                    (row.nibbles.0, row.node)
+                })
+                .collect();
+            assert_eq!(actual, expected);
+        }
+        drop(db);
+        assert!(init_db(
+            dir.path(),
+            DatabaseArguments::test().with_experimental_packing(Some(mode), 3)
+        )
+        .is_err());
+        assert_eq!(
+            init_db(dir.path(), args).unwrap().tx().unwrap().entries::<HashedStorages>().unwrap(),
+            rows.len()
+        );
+    }
+}
+
 type TrieEntry = <PackedStoragesTrie as Table>::Value;
 
 fn fixture(n: usize) -> Vec<StorageEntry> {
@@ -58,7 +176,7 @@ fn cursor_seek_exhaustion_matches_native() {
             );
         }
         builder.root();
-        for (path, node) in builder.split().1 {
+        for (path, node) in builder.split().1.into_iter().filter(|(path, _)| !path.is_empty()) {
             tx.put::<PackedStoragesTrie>(scope, TrieEntry { nibbles: path.into(), node }).unwrap();
         }
         tx.commit().unwrap();
@@ -130,7 +248,9 @@ fn cursor_multicontract_reversal_matches_native() {
                     );
                 }
                 builder.root();
-                for (path, node) in builder.split().1 {
+                for (path, node) in
+                    builder.split().1.into_iter().filter(|(path, _)| !path.is_empty())
+                {
                     tx.put::<PackedStoragesTrie>(scope, TrieEntry { nibbles: path.into(), node })
                         .unwrap();
                 }
@@ -197,6 +317,110 @@ fn reversal_trace<T: DupSort<Key = B256>>(
         cursor.prev_dup().unwrap(),
         cursor.next().unwrap(),
     ]
+}
+
+#[test]
+fn exhausted_storage_deletions_match_native() {
+    for count in [1, 3, 64] {
+        for reverse in [false, true] {
+            for duplicates in [false, true] {
+                let mut reference = None;
+                for mode in [None, Some(PackingMode::Dense), Some(PackingMode::Integer32)] {
+                    if mode.is_none() && count == 64 && duplicates {
+                        // Native MDBX asserts while dropping an exhausted N_TREE whose inner
+                        // root was cleared. Packed rows are still checked against the model.
+                        continue;
+                    }
+                    let dir = tempdir().unwrap();
+                    let db = init_db(
+                        dir.path(),
+                        DatabaseArguments::test().with_experimental_packing(mode, 3),
+                    )
+                    .unwrap();
+                    let rows = fixture(count);
+                    let original: Vec<_> = (1..=3)
+                        .flat_map(|contract| {
+                            rows.iter().map(move |row| (B256::repeat_byte(contract), *row))
+                        })
+                        .collect();
+                    let tx = db.tx_mut().unwrap();
+                    for (scope, row) in &original {
+                        tx.put::<HashedStorages>(*scope, *row).unwrap();
+                    }
+                    tx.commit().unwrap();
+                    let old = db.tx().unwrap();
+                    let tx = db.tx_mut().unwrap();
+                    let mut cursor = tx.cursor_dup_write::<HashedStorages>().unwrap();
+                    let scope = if reverse {
+                        cursor.first().unwrap().unwrap().0
+                    } else {
+                        cursor.last().unwrap().unwrap().0
+                    };
+                    let exhausted = if reverse { cursor.prev() } else { cursor.next() };
+                    assert!(exhausted.unwrap().is_none());
+                    assert_eq!(cursor.current().unwrap().is_some(), count == 1);
+                    let result = if duplicates {
+                        cursor.delete_current_duplicates()
+                    } else {
+                        cursor.delete_current()
+                    };
+                    let deleted = duplicates || count == 1;
+                    if deleted {
+                        result.unwrap();
+                    } else {
+                        let error = result.unwrap_err();
+                        let crate::DatabaseError::Delete(info) = error else {
+                            panic!("expected a deletion error, got {error:?}")
+                        };
+                        assert_eq!(info, reth_libmdbx::Error::NoData.into());
+                    }
+                    drop(cursor);
+                    let expected: Vec<_> = original
+                        .iter()
+                        .filter(|(contract, _)| !deleted || *contract != scope)
+                        .copied()
+                        .collect();
+                    let pending = tx
+                        .cursor_read::<HashedStorages>()
+                        .unwrap()
+                        .walk(None)
+                        .unwrap()
+                        .collect::<Result<Vec<_>, _>>()
+                        .unwrap();
+                    assert_eq!(pending, expected);
+                    tx.commit().unwrap();
+                    let committed = db
+                        .tx()
+                        .unwrap()
+                        .cursor_read::<HashedStorages>()
+                        .unwrap()
+                        .walk(None)
+                        .unwrap()
+                        .collect::<Result<Vec<_>, _>>()
+                        .unwrap();
+                    assert_eq!(committed, expected);
+                    assert_eq!(old.entries::<HashedStorages>().unwrap(), original.len());
+                    assert_eq!(
+                        old.cursor_read::<HashedStorages>()
+                            .unwrap()
+                            .walk(None)
+                            .unwrap()
+                            .collect::<Result<Vec<_>, _>>()
+                            .unwrap(),
+                        original
+                    );
+                    if let Some(expected) = &reference {
+                        assert_eq!(
+                            &committed, expected,
+                            "deletion differs for {mode:?}, {count} slots, reverse={reverse}, duplicates={duplicates}"
+                        );
+                    } else {
+                        reference = Some(committed);
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[test]
@@ -445,8 +669,8 @@ fn reconstructed_trie_cursor_is_complete_and_ordered() {
     for row in &rows {
         hb.add_leaf(Nibbles::unpack(row.key), alloy_rlp::encode_fixed_size(&row.value).as_ref());
     }
-    let expected_root = hb.root();
-    let expected: BTreeMap<_, _> = hb.split().1.into_iter().collect();
+    hb.root();
+    let mut expected: BTreeMap<_, _> = hb.split().1.into_iter().collect();
     let tx = db.tx_mut().unwrap();
     for row in &rows {
         tx.put::<HashedStorages>(scope, *row).unwrap();
@@ -462,6 +686,7 @@ fn reconstructed_trie_cursor_is_complete_and_ordered() {
         tx.inner().db_stat_with_dbi(tx.get_dbi::<PackedStoragesTrie>().unwrap()).unwrap().entries();
     assert_eq!(physical, expected.keys().filter(|p| p.len() < 2).count());
     assert!(physical < expected.len());
+    expected.remove(&Nibbles::default());
     let mut c = tx.cursor_dup_read::<PackedStoragesTrie>().unwrap();
     let actual: BTreeMap<_, _> = c
         .walk_dup(Some(scope), None)
@@ -470,7 +695,7 @@ fn reconstructed_trie_cursor_is_complete_and_ordered() {
         .collect::<Result<_, _>>()
         .unwrap();
     assert_eq!(actual, expected);
-    assert_eq!(actual[&Nibbles::default()].root_hash, Some(expected_root));
+    assert!(actual.keys().all(|path| !path.is_empty()));
     let reverse = c
         .walk_back(None)
         .unwrap()
@@ -600,7 +825,7 @@ fn dirty_trie_writer_hashes_upper_once_per_storage_generation() {
         let expected = trie_nodes(&rows);
         let mut writer = tx.cursor_dup_write::<PackedStoragesTrie>().unwrap();
         let start = Instant::now();
-        for (path, node) in expected.iter().take(100) {
+        for (path, node) in expected.iter().filter(|(path, _)| !path.is_empty()).take(100) {
             let found = writer.seek_by_key_subkey(scope, (*path).into()).unwrap().unwrap();
             assert_eq!(found.nibbles.0, *path);
             writer.delete_current().unwrap();
@@ -617,14 +842,17 @@ fn dirty_trie_writer_hashes_upper_once_per_storage_generation() {
             upper_stats(&writer).1
         );
         writer.delete_current_duplicates().unwrap();
-        let root = writer.seek_by_key_subkey(scope, Nibbles::default().into()).unwrap().unwrap();
-        assert_eq!(root.node, expected[&Nibbles::default()]);
+        let first_node =
+            writer.seek_by_key_subkey(scope, Nibbles::default().into()).unwrap().unwrap();
+        assert!(!first_node.nibbles.0.is_empty());
+        assert_eq!(first_node.node, expected[&first_node.nibbles.0]);
         let first = upper_stats(&writer);
         assert_eq!(first.0, 1);
         rows[0].value = U256::from(100_001);
         tx.put::<HashedStorages>(scope, rows[0]).unwrap();
-        let root = writer.seek_by_key_subkey(scope, Nibbles::default().into()).unwrap().unwrap();
-        assert_eq!(root.node, trie_nodes(&rows)[&Nibbles::default()]);
+        let first_node =
+            writer.seek_by_key_subkey(scope, Nibbles::default().into()).unwrap().unwrap();
+        assert_eq!(first_node.node, trie_nodes(&rows)[&first_node.nibbles.0]);
         assert_eq!(upper_stats(&writer).0, 2);
         assert!(upper_stats(&writer).1 < 512);
     }
@@ -654,7 +882,7 @@ fn retained_trie_changes_invalidate_other_clean_cursors() {
         assert_eq!(reader.current().unwrap().unwrap().1, root);
         writer.seek_by_key_subkey(scope, Nibbles::default().into()).unwrap();
         writer.delete_current().unwrap();
-        assert!(!reader.seek_exact(scope).unwrap().unwrap().1.nibbles.0.is_empty());
+        assert_ne!(reader.seek_exact(scope).unwrap().unwrap().1.nibbles, canonical.nibbles);
         writer.upsert(scope, &canonical).unwrap();
         assert_eq!(reader.seek_exact(scope).unwrap().unwrap().1, canonical);
         tx.clear::<PackedStoragesTrie>().unwrap();
@@ -676,7 +904,7 @@ fn trie_nodes(rows: &[StorageEntry]) -> BTreeMap<Nibbles, alloy_trie::BranchNode
             .add_leaf(Nibbles::unpack(row.key), alloy_rlp::encode_fixed_size(&row.value).as_ref());
     }
     builder.root();
-    builder.split().1.into_iter().collect()
+    builder.split().1.into_iter().filter(|(path, _)| !path.is_empty()).collect()
 }
 
 #[test]
