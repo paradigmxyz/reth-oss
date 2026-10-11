@@ -1,0 +1,22 @@
+*
+!Cargo.toml
+!Cargo.lock
+!bin
+!crates
+!pkg
+!testing
+!examples
+!LICENSE-APACHE
+!LICENSE-MIT
+!LICENSES
+**/target
+**/artifacts
+**/work
+**/__pycache__
+**/*.pyc
+testing/embedded-beacon/devnet/work
+testing/embedded-beacon/devnet/package/vendor
+
+# Published corpora are authenticated/downloaded by their separate fixture jobs.
+testing/embedded-beacon/spec-tests/fixtures
+testing/embedded-beacon/spec-tests/downloads

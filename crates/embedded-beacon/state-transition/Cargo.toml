@@ -1,0 +1,21 @@
+[package]
+name = "reth-embedded-beacon-state-transition"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[features]
+# Explicit artificial-fixture APIs; runtime callers always require BLS verification.
+spec-tests = []
+
+[lints]
+workspace = true
+
+[dependencies]
+reth-embedded-beacon-crypto = { path = "../crypto" }
+reth-embedded-beacon-primitives = { path = "../primitives" }
+thiserror.workspace = true
+
+[dev-dependencies]
+blst = "0.3.16"

@@ -1,0 +1,86 @@
+--- a/src/peer_score/tests.rs
++++ b/src/peer_score/tests.rs
+@@ -975,3 +975,83 @@
+         "Score should be the application specific score"
+     );
+ }
++
++// Regression controls for the isolated empty-IP-key cleanup.
++
++#[test]
++fn empty_ip_key_cleanup_preserves_a_shared_ip_until_the_final_peer_leaves() {
++    let mut score = PeerScore::new(PeerScoreParams::default(), PeerScoreThresholds::default());
++    let first = PeerId::random();
++    let second = PeerId::random();
++    let ip = "192.0.2.1".parse::<IpAddr>().unwrap();
++    score.add_peer(first);
++    score.add_peer(second);
++    score.add_ip(&first, ip);
++    score.add_ip(&second, ip);
++
++    score.remove_ip(&first, &ip);
++    assert_eq!(score.peer_ips.get(&ip), Some(&HashSet::from([second])));
++    assert!(score.peer_stats.get(&first).unwrap().known_ips.is_empty());
++    assert_eq!(score.peer_stats.get(&second).unwrap().known_ips, HashSet::from([ip]));
++
++    score.remove_ip(&second, &ip);
++    assert!(score.peer_ips.is_empty());
++}
++
++#[test]
++fn empty_ip_key_cleanup_removes_final_ips_when_positive_score_peers_are_forgotten() {
++    let mut score = PeerScore::new(PeerScoreParams::default(), PeerScoreThresholds::default());
++    let first = PeerId::random();
++    let second = PeerId::random();
++    let ip = "192.0.2.2".parse::<IpAddr>().unwrap();
++    score.add_peer(first);
++    score.add_peer(second);
++    score.add_ip(&first, ip);
++    score.add_ip(&second, ip);
++    assert!(score.set_application_score(&first, 1.0));
++    assert!(score.set_application_score(&second, 1.0));
++
++    score.remove_peer(&first);
++    assert!(!score.peer_stats.contains_key(&first));
++    assert_eq!(score.peer_ips.get(&ip), Some(&HashSet::from([second])));
++
++    score.remove_peer(&second);
++    assert!(score.peer_stats.is_empty());
++    assert!(score.peer_ips.is_empty());
++}
++
++#[test]
++fn empty_ip_key_cleanup_preserves_negative_score_retention_then_cleans_expired_peer() {
++    let mut score = PeerScore::new(PeerScoreParams::default(), PeerScoreThresholds::default());
++    let peer = PeerId::random();
++    let ip = "192.0.2.3".parse::<IpAddr>().unwrap();
++    score.add_peer(peer);
++    score.add_ip(&peer, ip);
++    assert!(score.set_application_score(&peer, -1.0));
++
++    score.remove_peer(&peer);
++    assert!(score.peer_stats.contains_key(&peer));
++    assert_eq!(score.peer_ips.get(&ip), Some(&HashSet::from([peer])));
++
++    score.peer_stats.get_mut(&peer).unwrap().status = ConnectionStatus::Disconnected {
++        expire: Instant::now().checked_sub(Duration::from_secs(1)).unwrap(),
++    };
++    score.refresh_scores();
++    assert!(!score.peer_stats.contains_key(&peer));
++    assert!(score.peer_ips.is_empty());
++}
++
++#[test]
++fn empty_ip_key_cleanup_does_not_accumulate_keys_across_distinct_ip_churn() {
++    let mut score = PeerScore::new(PeerScoreParams::default(), PeerScoreThresholds::default());
++    let peer = PeerId::random();
++    score.add_peer(peer);
++    for index in 0u32..4096 {
++        let ip = IpAddr::from([192, 0, (index >> 8) as u8, index as u8]);
++        score.add_ip(&peer, ip);
++        assert_eq!(score.peer_ips.len(), 1);
++        score.remove_ip(&peer, &ip);
++        assert!(score.peer_ips.is_empty());
++    }
++    assert!(score.peer_stats.get(&peer).unwrap().known_ips.is_empty());
++}

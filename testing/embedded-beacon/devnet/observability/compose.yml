@@ -1,0 +1,74 @@
+services:
+  prometheus:
+    image: "${BEACON_PROMETHEUS_IMAGE:-prom/prometheus:v3.13.4}"
+    container_name: "${BEACON_OBSERVABILITY_PROJECT}-prometheus"
+    network_mode: host
+    restart: unless-stopped
+    mem_limit: 512m
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    labels:
+      io.reth.embedded-beacon.observability: "${BEACON_OBSERVABILITY_PROJECT}"
+      io.reth.embedded-beacon.observability.port: "${BEACON_PROMETHEUS_PORT}"
+      io.reth.embedded-beacon.observability.metrics-target: "${BEACON_METRICS_ADDR}"
+    volumes:
+      - type: bind
+        source: "${BEACON_OBSERVABILITY_WORK}/prometheus.yml"
+        target: /etc/prometheus/prometheus.yml
+        read_only: true
+      - prometheus-data:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=2d
+      - --storage.tsdb.retention.size=512MB
+      - "--web.listen-address=127.0.0.1:${BEACON_PROMETHEUS_PORT}"
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: "2"}
+
+  grafana:
+    image: "${BEACON_GRAFANA_IMAGE:-grafana/grafana:13.2.3}"
+    container_name: "${BEACON_OBSERVABILITY_PROJECT}-grafana"
+    network_mode: host
+    restart: unless-stopped
+    mem_limit: 512m
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    labels:
+      io.reth.embedded-beacon.observability: "${BEACON_OBSERVABILITY_PROJECT}"
+      io.reth.embedded-beacon.observability.port: "${BEACON_GRAFANA_PORT}"
+    environment:
+      GF_SERVER_HTTP_ADDR: 127.0.0.1
+      GF_SERVER_HTTP_PORT: "${BEACON_GRAFANA_PORT}"
+      GF_SERVER_ROOT_URL: "http://127.0.0.1:${BEACON_GRAFANA_PORT}/"
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_AUTH_BASIC_ENABLED: "false"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_USERS_ALLOW_ORG_CREATE: "false"
+      GF_USERS_VIEWERS_CAN_EDIT: "false"
+      GF_SECURITY_ADMIN_PASSWORD: "${GF_SECURITY_ADMIN_PASSWORD:?use run.sh}"
+      GF_SECURITY_DISABLE_GRAVATAR: "true"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
+      GF_LOG_MODE: console
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/embedded-beacon.json
+      BEACON_PROMETHEUS_URL: "http://127.0.0.1:${BEACON_PROMETHEUS_PORT}"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: "2"}
+
+volumes:
+  prometheus-data:
+    external: true
+    name: "${BEACON_OBSERVABILITY_PROJECT}-prometheus-data"
+  grafana-data:
+    external: true
+    name: "${BEACON_OBSERVABILITY_PROJECT}-grafana-data"

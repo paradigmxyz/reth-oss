@@ -1,0 +1,7 @@
+{
+  "kind": "primary_execution_fixture_source_regression",
+  "sha256": "10156d87bb81662f2e33798d541b1f593861bc5ceffc8c63be92f1366243fc64",
+  "complete_execution_conformance": false,
+  "release": "tests@v21.0.0",
+  "url": "https://raw.githubusercontent.com/ethereum/execution-specs/tests%40v21.0.0/packages/testing/src/execution_testing/specs/tests/fixtures/chainid_cancun_blockchain_test_tx_type_0.json"
+}

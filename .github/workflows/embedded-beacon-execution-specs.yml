@@ -1,0 +1,165 @@
+name: Current execution fixture checks
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "bin/**"
+      - "crates/**"
+      - "testing/ef-tests/**"
+      - "testing/embedded-beacon/execution-tests/**"
+      - "testing/embedded-beacon/scripts/download-execution-fixtures.py"
+      - "testing/embedded-beacon/scripts/verify-execution-results.py"
+      - "testing/embedded-beacon/scripts/test_execution_*.py"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/embedded-beacon-execution-specs.yml"
+  merge_group:
+  push:
+    branches: [main]
+    paths:
+      - "bin/**"
+      - "crates/**"
+      - "testing/ef-tests/**"
+      - "testing/embedded-beacon/execution-tests/**"
+      - "testing/embedded-beacon/scripts/download-execution-fixtures.py"
+      - "testing/embedded-beacon/scripts/verify-execution-results.py"
+      - "testing/embedded-beacon/scripts/test_execution_*.py"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/embedded-beacon-execution-specs.yml"
+
+permissions: {}
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  execution:
+    name: Latest execution blockchain fixtures
+    runs-on: ubuntu-24.04
+    permissions:
+      id-token: write
+      contents: read
+    timeout-minutes: 240
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: clang
+      RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
+      RUST_BACKTRACE: 1
+      RETH_EF_TEST_THREADS: 2
+    steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@d5402286a7abdfb7232173b3228d56473feb8a66 # 2026-09-29T02-04-45Z-d5402286
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: tempoxyz/gh-actions/vendor/dtolnay/rust-toolchain@d5402286a7abdfb7232173b3228d56473feb8a66
+        with:
+          toolchain: "1.95"
+      - name: Install native build prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang lld libclang-dev cmake pkg-config
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          shared-key: execution-fixtures-rust195-hivetests
+      - name: Check fixture download integrity and result gate contracts
+        run: python3 -m unittest discover -s testing/embedded-beacon/scripts -p 'test_execution_*.py' -v
+      - name: Resolve and authenticate the newest published execution fixtures
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p testing/embedded-beacon/artifacts/execution-ci
+          python3 testing/embedded-beacon/scripts/download-execution-fixtures.py \
+            --release latest --fixtures testing/embedded-beacon/execution-tests/work/ci-latest \
+            --work testing/embedded-beacon/execution-tests/work/ci-archives \
+            --provenance testing/embedded-beacon/artifacts/execution-ci/provenance.json \
+            | tee testing/embedded-beacon/artifacts/execution-ci/selection.json
+      - name: Build the native execution runner and check its regressions
+        run: |
+          cargo test --locked --profile hivetests -p ef-tests --lib
+          cargo test --locked --profile hivetests -p ef-tests --features ef-tests \
+            --test tests --no-run --message-format=json \
+            > testing/embedded-beacon/artifacts/execution-ci/build.jsonl
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          artifacts = Path("testing/embedded-beacon/artifacts/execution-ci")
+          records = [json.loads(line) for line in (artifacts / "build.jsonl").read_text().splitlines()]
+          binaries = [r["executable"] for r in records
+                      if r.get("reason") == "compiler-artifact"
+                      and "/testing/ef-tests#" in r.get("package_id", "")
+                      and r.get("target", {}).get("name") == "tests"
+                      and r.get("executable")]
+          if len(binaries) != 1:
+              raise SystemExit("build did not produce exactly one execution test runner")
+          (artifacts / "runner-path.txt").write_text(binaries[0] + "\n")
+          PY
+      - name: Execute the entire authenticated blockchain fixture inventory
+        env:
+          RETH_EEST_FIXTURES: ${{ github.workspace }}/testing/embedded-beacon/execution-tests/work/ci-latest/blockchain_tests
+          RETH_EF_TEST_REPORT: ${{ github.workspace }}/testing/embedded-beacon/artifacts/execution-ci/results.json
+        run: |
+          python3 testing/embedded-beacon/scripts/download-execution-fixtures.py --verify \
+            --fixtures testing/embedded-beacon/execution-tests/work/ci-latest \
+            --provenance testing/embedded-beacon/artifacts/execution-ci/provenance.json
+          rm -f testing/embedded-beacon/artifacts/execution-ci/results.json
+          runner="$(cat testing/embedded-beacon/artifacts/execution-ci/runner-path.txt)"
+          ulimit -n 65536
+          # The following step gates captured test failures; build and infrastructure errors stay fatal.
+          set +e
+          "$runner" --exact eest_fixtures --nocapture --test-threads=1 \
+            2>&1 | tee testing/embedded-beacon/artifacts/execution-ci/run.log
+          statuses=("${PIPESTATUS[@]}")
+          set -e
+          printf '%s\n' "${statuses[0]}" > testing/embedded-beacon/artifacts/execution-ci/runner-status.txt
+          if (( statuses[1] != 0 )); then
+            exit "${statuses[1]}"
+          fi
+      - name: Reverify fixture bytes and fail unlisted or incomplete results
+        run: |
+          python3 testing/embedded-beacon/scripts/download-execution-fixtures.py --verify \
+            --fixtures testing/embedded-beacon/execution-tests/work/ci-latest \
+            --provenance testing/embedded-beacon/artifacts/execution-ci/provenance.json
+          python3 testing/embedded-beacon/scripts/verify-execution-results.py \
+            --fixtures testing/embedded-beacon/execution-tests/work/ci-latest \
+            --provenance testing/embedded-beacon/artifacts/execution-ci/provenance.json \
+            --selection testing/embedded-beacon/artifacts/execution-ci/selection.json \
+            --results testing/embedded-beacon/artifacts/execution-ci/results.json \
+            --runner-status testing/embedded-beacon/artifacts/execution-ci/runner-status.txt \
+            --expectations testing/embedded-beacon/execution-tests/known-failures.json \
+            --summary testing/embedded-beacon/artifacts/execution-ci/gate.json
+      - name: Summarize exact execution coverage
+        if: always()
+        run: |
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          from pathlib import Path
+          artifacts = Path("testing/embedded-beacon/artifacts/execution-ci")
+          gate = artifacts / "gate.json"
+          if gate.exists():
+              record = json.loads(gate.read_text())
+              print(f"Gate: {record['status']}; release: {record.get('release', 'unavailable')}.")
+              if "gate_error" in record:
+                  print(f"Gate error: {record['gate_error']}")
+              else:
+                  print(f"Fixture files: {record['fixture_files']}; passed: {record['passed_files']}; failed: {record['failed_files']}; skipped: {record['skipped_files']}.")
+                  print(f"Accepted exact known failures: {len(record['accepted_known_failures'])}; unlisted or changed failures: {len(record['unexpected_failures'])}; expectations now passing: {len(record['stale_expectations'])}; expectations outside this release: {len(record['inactive_expectations'])}.")
+          else:
+              print("Execution gate did not complete; inspect the failed preparation, build or run step.")
+          print("Coverage is the published blockchain_test format, reported per JSON file. Other execution fixture formats and public synchronization acceptance remain unverified.")
+          PY
+      - name: Preserve authenticated inventory, results and gate decision
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: execution-fixtures
+          path: testing/embedded-beacon/artifacts/execution-ci
+          if-no-files-found: error
+          retention-days: 7

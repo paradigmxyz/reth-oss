@@ -1,0 +1,53 @@
+{
+  "kind": "published_raw_ssz_fixture_subset",
+  "spec_release": "v1.7.0-beta.3",
+  "archive": {
+    "name": "minimal.tar.gz",
+    "bytes": 468862009,
+    "sha256": "b26832555fa5a67cc3964bf140ae99cb662f8045d6d205993e3fa27feb39ca6f"
+  },
+  "transformation": "Original raw Snappy blocks decompressed to canonical serialized SSZ; no field modifications. Phase0 trusted block constructed separately by the test from published genesis state.",
+  "published_compressed_file_sha256": {
+    "minimal/altair/fork_choice/get_head/pyspec_tests/chain_no_attestations/anchor_state.ssz_snappy": "0x0e6a1424a86c9b8976c65bed746dbf4f2d6670bdce604fffd8408c3c00ad79b3",
+    "minimal/altair/fork_choice/get_head/pyspec_tests/chain_no_attestations/anchor_block.ssz_snappy": "0x4ef85f6f459d2d7ef174f08fb1beaa844261865aa1d29f081ee38f43041bfd76",
+    "minimal/bellatrix/fork_choice/get_head/pyspec_tests/chain_no_attestations/anchor_state.ssz_snappy": "0x6bcde23b51c7371485856ebdc4bd892cfbc86d033627a342bf4c9eec6b3c9ac0",
+    "minimal/bellatrix/fork_choice/get_head/pyspec_tests/chain_no_attestations/anchor_block.ssz_snappy": "0xc78a43e1fed421221d4a55bdf768e3fc1135ff0526b9aefbc1de0398029bf876",
+    "minimal/capella/fork_choice/get_head/pyspec_tests/chain_no_attestations/anchor_state.ssz_snappy": "0xa24c89f29a5cf3de2e0e14e8b80a69a5da4c19b977de4d4ecac7d0e018d9ae1f",
+    "minimal/capella/fork_choice/get_head/pyspec_tests/chain_no_attestations/anchor_block.ssz_snappy": "0xdc4142bdf6db3958d9b041b4e461eea93cefe07d58c0fb25f9ddee6925c33662",
+    "minimal/deneb/fork_choice/get_head/pyspec_tests/chain_no_attestations/anchor_state.ssz_snappy": "0x9c6df595db5b8efcd7409e59af8d0e84393dbf9cc07464e2473123a57097b177",
+    "minimal/deneb/fork_choice/get_head/pyspec_tests/chain_no_attestations/anchor_block.ssz_snappy": "0x1c8270d5cf1236853b55a55e59617d3ac03003fe02cf4ecd54ad9b6bb1f80af3",
+    "minimal/electra/fork_choice/get_head/pyspec_tests/chain_no_attestations/anchor_state.ssz_snappy": "0x11ff3af0cafda928754d9047708f7d109f5c142e2f18a088214dbb767fc35c1d",
+    "minimal/electra/fork_choice/get_head/pyspec_tests/chain_no_attestations/anchor_block.ssz_snappy": "0x5116cce92c9faf07e0f517af1a86f9bb4c94691ffa788d67e065fb08354b0870",
+    "minimal/fulu/fork_choice/get_head/pyspec_tests/chain_no_attestations/anchor_state.ssz_snappy": "0xb489242e7b9027819fdb1377c97e2df86ed1201ec80f839360208495ed6ba32e",
+    "minimal/fulu/fork_choice/get_head/pyspec_tests/chain_no_attestations/anchor_block.ssz_snappy": "0x5732829c92cbed7c9344ff3b823fa4126718f7125ffb31277786566e7e80f0e0",
+    "minimal/gloas/fork_choice/get_head/pyspec_tests/chain_no_attestations/anchor_state.ssz_snappy": "0xfb185ff77bfcaf4430b88f021c29804940cb889a36060d7dcf5ecb0cee9232a7",
+    "minimal/gloas/fork_choice/get_head/pyspec_tests/chain_no_attestations/anchor_block.ssz_snappy": "0x89436622bf26fbb8e2d5f875dc6d113668bba76a205ef7c3973f2504237b2ea3",
+    "embedded-beacon/spec-tests/work/published-phase0-operations-first/minimal/phase0/sanity/blocks/pyspec_tests/attestation/pre.ssz_snappy": "0x51a39b763eac90a6ae4c6eebae6af6e77c6be2172ca8dc9cf0b07cfff2f33e5a",
+    "embedded-beacon/spec-tests/work/published-phase0-operations-first/minimal/phase0/sanity/blocks/pyspec_tests/attestation/blocks_0.ssz_snappy": "0x7b01bad0f3fa93baace5ac2384e26404119c28aa862a5429835785badf44d733",
+    "embedded-beacon/spec-tests/work/published-phase0-operations-first/minimal/phase0/sanity/blocks/pyspec_tests/attestation/blocks_1.ssz_snappy": "0x95a0f03efef1f6ed65d5ed0323a0555258d8d7addfaee178a22afd54204a5621",
+    "embedded-beacon/spec-tests/work/published-phase0-operations-first/minimal/phase0/sanity/blocks/pyspec_tests/attestation/post.ssz_snappy": "0x09f23f7ed509c1cdedc83c410c845f5715a38c05d91e49bf42ebdaebd3adad93",
+    "minimal/phase0/sanity/blocks/pyspec_tests/empty_block_transition/pre.ssz_snappy": "0x6365ca352c968eeba49d92113880102f55728aba0730ddd8b8be15dbe1d94bc8"
+  },
+  "decompressed_file_sha256": {
+    "official-anchors/altair/anchor_state.ssz": "0x5053e66192d7f85dcdfcf46c51fb558c7167a1bd7dcb1e4daf9a26314f3424d5",
+    "official-anchors/altair/anchor_block.ssz": "0xce4bb787b48ec51b591af4a3d3428fbdf626de2429b80dc9fa0dd8d0fd3df39f",
+    "official-anchors/bellatrix/anchor_state.ssz": "0xf9180126f2484b633852494cc11d8e4d39b6e89f6ca5b19b4d145cea27e91d4c",
+    "official-anchors/bellatrix/anchor_block.ssz": "0x00d62069d0a995aa5fa7db9ccbed419d2f61ef98db9a0f9be6a49504d79271ee",
+    "official-anchors/capella/anchor_state.ssz": "0xfc9b0aeacc88e3089de8e98c13ca9d6b37e79d8bd4b43bd1b784dfef07aac861",
+    "official-anchors/capella/anchor_block.ssz": "0x140f25c6caa895c1cbb5c353cab2681d6fe8e8bb0658792b10b037bc2763be23",
+    "official-anchors/deneb/anchor_state.ssz": "0xc22f127353bdf1e97034fb6e6a21bff18638628d72c0f9e8df6fa61f92099749",
+    "official-anchors/deneb/anchor_block.ssz": "0x80f8b096704dded3124f68aa414cbb7bd9eb10f7c75aca32935d8c09f7e5a05d",
+    "official-anchors/electra/anchor_state.ssz": "0xcda1dce57d29538376ed6792039d78b179512cddc723ca60eb2ce32abba56edf",
+    "official-anchors/electra/anchor_block.ssz": "0x4c69c30c5835cdc5882d506352de66237d6fa6bff7408ae05575431f977f660e",
+    "official-anchors/fulu/anchor_state.ssz": "0x63aaf8da8ff56474643e3453be1aae16a28b1778af631e19a9a6c5372d132c50",
+    "official-anchors/fulu/anchor_block.ssz": "0x9af30afdc2d982ae7301ba24ce69cff0a7ae6bfe29b3e3891d7e2338f32c52f1",
+    "official-anchors/gloas/anchor_state.ssz": "0x1371def9c9451cbbb073145c5e7bc8d8d4a59a98d0d9e469de5886c9bfeb5600",
+    "official-anchors/gloas/anchor_block.ssz": "0x055c0d3e747c33df1fc47086228bc06791d10d53043101bb34f4eb4e57784e94",
+    "official-phase0-import/pre.ssz": "0xf782aa412987ef655f97ed1413953a3ccb25b72ac5b7eace2f02eb1ac255b6a6",
+    "official-phase0-import/blocks_0.ssz": "0xf6eba96102f44d1fad4ffefcb55d29b9fa50f7309392ba99523570e718f18914",
+    "official-phase0-import/blocks_1.ssz": "0x0e3a7e0f9803aadce34e157da033f14c73b01672321b217f39faf5e55a54d85f",
+    "official-phase0-import/post.ssz": "0x36f4d8efc673d617f3a202588632746575d95c300c6b98b675273cee35d8258b",
+    "official-phase0-import/genesis.ssz": "0x60fd1f8be14a7e664a82ced64e3d553a7e0615ca14741fdc599e384f86ef8c7b"
+  },
+  "complete_conformance": false
+}

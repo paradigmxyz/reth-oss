@@ -1,0 +1,36 @@
+{
+  "kind": "published_ssz_static_subset",
+  "spec_release": "v1.7.0-beta.3",
+  "release_metadata_url": "https://api.github.com/repos/ethereum/consensus-specs/releases/tags/v1.7.0-beta.3",
+  "archives": [
+    {
+      "name": "mainnet.tar.gz",
+      "bytes": 966766929,
+      "sha256": "a50c3eae743fcf69e17e3510b84e94dcabf96977655788c66bdc43a96590fdf5",
+      "url": "https://github.com/ethereum/consensus-specs/releases/download/v1.7.0-beta.3/mainnet.tar.gz"
+    },
+    {
+      "name": "minimal.tar.gz",
+      "bytes": 468862009,
+      "sha256": "b26832555fa5a67cc3964bf140ae99cb662f8045d6d205993e3fa27feb39ca6f",
+      "url": "https://github.com/ethereum/consensus-specs/releases/download/v1.7.0-beta.3/minimal.tar.gz"
+    }
+  ],
+  "selected_cases": [
+    "mainnet/phase0/ssz_static/BeaconBlock/ssz_random/case_0",
+    "mainnet/phase0/ssz_static/BeaconState/ssz_random/case_0",
+    "mainnet/phase0/ssz_static/SignedBeaconBlock/ssz_random/case_0",
+    "minimal/phase0/ssz_static/BeaconBlock/ssz_lengthy/case_0",
+    "minimal/phase0/ssz_static/BeaconState/ssz_lengthy/case_0",
+    "minimal/phase0/ssz_static/SignedBeaconBlock/ssz_lengthy/case_0"
+  ],
+  "selection": "first published Phase0 static case per complete schema and preset; permitted byte-roundtrip mode; value.yaml intentionally omitted",
+  "schemas": [
+    "BeaconState",
+    "BeaconBlock",
+    "SignedBeaconBlock"
+  ],
+  "case_count": 6,
+  "manifest_sha256": "50b8dcdbcd96f6f9d5c54193fcce973e0af6bca4f745dc1e30f56213212146eb",
+  "complete_conformance": false
+}

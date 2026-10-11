@@ -1,0 +1,87 @@
+[package]
+name = "reth-embedded-beacon-launcher"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter", "fmt", "std"] }
+reth-embedded-beacon-node.workspace = true
+reth-embedded-beacon-config.workspace = true
+reth-embedded-beacon-primitives.workspace = true
+reth-embedded-beacon-execution-proxy.workspace = true
+clap = { workspace = true, features = ["derive"] }
+eyre.workspace = true
+serde_json.workspace = true
+reth-fs-util.workspace = true
+
+# embedded-beacon
+reth-ethereum-cli = { workspace = true, optional = true }
+reth-cli-commands = { workspace = true, optional = true }
+reth-node-ethereum = { workspace = true, optional = true }
+reth-node-builder = { workspace = true, optional = true }
+reth-primitives-traits = { workspace = true, optional = true }
+reth-chainspec = { workspace = true, optional = true }
+reth-embedded-beacon-shared-data = { workspace = true, optional = true }
+reth-node-api = { workspace = true, optional = true }
+reth-ethereum-primitives = { workspace = true, optional = true }
+reth-transaction-pool = { workspace = true, optional = true }
+reth-evm = { workspace = true, optional = true }
+reth-provider = { workspace = true, optional = true }
+reth-metrics = { workspace = true, optional = true }
+reth-tracing = { workspace = true, optional = true }
+libc = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true, features = ["sync", "rt", "time", "macros"] }
+reth-embedded-beacon-network = { workspace = true, optional = true }
+reth-embedded-beacon-storage = { workspace = true, optional = true }
+alloy-rpc-types-engine = { workspace = true, optional = true }
+alloy-consensus = { workspace = true, optional = true }
+alloy-primitives = { workspace = true, optional = true }
+reth-db = { workspace = true, optional = true }
+reth-static-file-types = { workspace = true, optional = true }
+[features]
+default = []
+embedded-beacon = [
+    "dep:reth-ethereum-cli",
+    "dep:reth-cli-commands",
+    "dep:reth-node-ethereum",
+    "dep:reth-node-builder",
+    "dep:reth-primitives-traits",
+    "dep:reth-chainspec",
+    "dep:reth-embedded-beacon-shared-data",
+    "reth-embedded-beacon-shared-data/reth",
+    "reth-embedded-beacon-execution-proxy/reth",
+    "dep:reth-node-api",
+    "dep:reth-ethereum-primitives",
+    "dep:reth-transaction-pool",
+    "dep:reth-evm",
+    "dep:reth-provider",
+    "dep:reth-metrics",
+    "dep:reth-tracing",
+    "dep:libc",
+    "dep:tokio",
+    "dep:reth-embedded-beacon-network",
+    "dep:reth-embedded-beacon-storage",
+    "dep:alloy-rpc-types-engine",
+    "reth-embedded-beacon-node/gossip-validation",
+    "reth-embedded-beacon-node/peer-runtime",
+    "reth-embedded-beacon-node/execution-verification",
+    "reth-embedded-beacon-node/checkpoint-http",
+    "reth-embedded-beacon-node/beacon-api",
+    "dep:alloy-consensus",
+    "dep:alloy-primitives",
+    "dep:reth-db",
+    "dep:reth-static-file-types",
+]
+
+[[bin]]
+name = "reth-embedded-beacon"
+path = "src/main.rs"
+
+[dev-dependencies]
+tempfile.workspace = true

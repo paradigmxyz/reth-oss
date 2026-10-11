@@ -1,0 +1,14 @@
+{
+  "kind": "published_processing_fixture_subset",
+  "spec_release": "v1.7.0-beta.3",
+  "archive": {
+    "name": "minimal.tar.gz",
+    "sha256": "b26832555fa5a67cc3964bf140ae99cb662f8045d6d205993e3fa27feb39ca6f",
+    "bytes": 468862009,
+    "url": "https://github.com/ethereum/consensus-specs/releases/download/v1.7.0-beta.3/minimal.tar.gz"
+  },
+  "selection": "All published Minimal Phase0 epoch-processing and sanity/slots cases, plus one published case for each supported operation and sanity/blocks handler. Original bytes, YAML and identity manifests are unchanged.",
+  "cases": 70,
+  "manifest_sha256": "e1525386e7c93c050823345a849ef72f07ee7eea8f1e20c2498be506d299d287",
+  "complete_conformance": false
+}

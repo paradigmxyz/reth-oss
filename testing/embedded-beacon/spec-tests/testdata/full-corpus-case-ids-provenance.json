@@ -1,0 +1,14 @@
+{
+  "kind": "canonical case identity policy input, not fixture execution results",
+  "spec_release": "v1.7.0-beta.3",
+  "primary_manifest_sha256": "513216f9ca4c07092e35dff6a6ce6eab383823c36dd232949d7a839192f7bc0f",
+  "compliance_manifest_sha256": "e7fd977bcec49da3533634bdbf7a4ad9295d7bcfdcaa0efcad63d452c32f17cc",
+  "canonical_case_ids_sha256": "a84ceee4fc3a97fe266dce31068e0f4d16706036d9d12284590f7d31c1b6762c",
+  "case_encoding": "SHA256 of ASCII embedded-beacon-full-case-ids-v1 then NUL; each sorted unique UTF8 canonical relative case path prefixed by its u64 little-endian byte length",
+  "cases": 73992,
+  "decoded_bytes": 5570086,
+  "decoded_text_sha256": "a9346b27d0c013d17016950ddf60364f22d0d51ef7111b767d61e90e5f5ded14",
+  "raw_snappy_bytes": 564688,
+  "raw_snappy_sha256": "018201079f45cca65d592287322119e460fbaaa5a9c7b0d4b97fce101a34b25c",
+  "synthetic_policy_outcomes_establish_fixture_conformance": false
+}

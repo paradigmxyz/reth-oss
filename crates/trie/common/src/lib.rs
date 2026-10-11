@@ -21,6 +21,9 @@ pub use execution_witness::ExecutionWitnessMode;
 mod trie_data;
 pub use trie_data::{ComputedTrieData, LazyTrieData, SortedTrieData};
 
+#[cfg(feature = "std")]
+pub use trie_data::LazyTrieDataProducer;
+
 /// In-memory hashed state.
 mod hashed_state;
 pub use hashed_state::*;

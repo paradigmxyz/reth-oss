@@ -1,0 +1,113 @@
+[package]
+name = "reth-embedded-beacon-node"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+tracing.workspace = true
+reth-embedded-beacon-config.workspace = true
+reth-embedded-beacon-state-transition.workspace = true
+reth-embedded-beacon-primitives.workspace = true
+reth-embedded-beacon-sync.workspace = true
+reth-embedded-beacon-storage.workspace = true
+reth-embedded-beacon-shared-data.workspace = true
+reth-embedded-beacon-execution-proxy.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+thiserror.workspace = true
+
+# Dormant, persisted peer startup; live admission remains gated in code.
+reth-embedded-beacon-network = { workspace = true, optional = true, features = ["discovery"] }
+discv5 = { workspace = true, optional = true }
+libp2p = { workspace = true, optional = true }
+reth-fs-util = { workspace = true, optional = true }
+zeroize = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+alloy-primitives = { workspace = true, optional = true }
+alloy-rpc-types-engine = { workspace = true, optional = true }
+alloy-consensus = { workspace = true, optional = true }
+reth-chainspec = { workspace = true, optional = true }
+reth-ethereum-forks = { workspace = true, optional = true }
+reth-storage-api = { workspace = true, optional = true }
+
+# gossip-validation
+reth-embedded-beacon-crypto = { workspace = true, optional = true }
+reth-embedded-beacon-data-availability = { workspace = true, optional = true }
+reth-embedded-beacon-fork-choice = { workspace = true, optional = true }
+c-kzg = { version = "2.1.8", features = ["ethereum_kzg_settings"], optional = true }
+
+# checkpoint-http
+reqwest = { workspace = true, optional = true }
+
+# beacon-api
+bytes = { workspace = true, optional = true }
+hyper = { workspace = true, optional = true, features = ["server", "http1"] }
+hyper-util = { workspace = true, optional = true, features = ["tokio"] }
+http-body-util = { workspace = true, optional = true }
+
+[features]
+default = []
+spec-tests = [
+    "gossip-validation",
+    "reth-embedded-beacon-state-transition/spec-tests",
+    "reth-embedded-beacon-fork-choice/spec-tests",
+]
+gossip-validation = [
+    "dep:reth-embedded-beacon-crypto",
+    "dep:reth-embedded-beacon-data-availability",
+    "dep:reth-embedded-beacon-fork-choice",
+    "dep:c-kzg",
+]
+execution-verification = [
+    "reth-embedded-beacon-execution-proxy/beacon-types",
+    "dep:alloy-rpc-types-engine",
+    "dep:alloy-primitives",
+    "dep:alloy-consensus",
+    "dep:reth-chainspec",
+    "dep:reth-ethereum-forks",
+    "dep:reth-storage-api",
+]
+peer-runtime = [
+    "dep:reth-embedded-beacon-network",
+    "dep:discv5",
+    "dep:libp2p",
+    "dep:reth-fs-util",
+    "dep:zeroize",
+    "dep:tokio",
+]
+
+checkpoint-http = [
+    "gossip-validation",
+    "dep:reqwest",
+    "dep:tokio",
+    "tokio/rt",
+    "tokio/time",
+    "tokio/sync",
+]
+
+beacon-api = [
+    "gossip-validation",
+    "peer-runtime",
+    "execution-verification",
+    "dep:bytes",
+    "dep:hyper",
+    "dep:hyper-util",
+    "dep:http-body-util",
+    "tokio/net",
+    "tokio/rt",
+    "tokio/time",
+    "tokio/sync",
+    "tokio/macros",
+]
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+reth-embedded-beacon-shared-data = { workspace = true, features = ["test-utils"] }
+snap.workspace = true
+tempfile.workspace = true
+blst = "0.3.16"

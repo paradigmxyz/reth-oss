@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "known_failures": [
+    {
+      "release": "tests@v21.0.0",
+      "archive_sha256": "dd642a261ac63f910b85c47d2549d2bb3ae4ad044fb5e852657f783441483bb2",
+      "path": "blockchain_tests/for_amsterdam/amsterdam/eip7928_block_level_access_lists/block_access_lists_cross_index/bal_post_execution_calls_net_storage_at_last_index.json",
+      "fixture_sha256": "92995192eb556233354d4b724a227f90fbc774d20b11aeac963f981c5333dc79",
+      "outcome": "failed",
+      "error": "fixture tests/amsterdam/eip7928_block_level_access_lists/test_block_access_lists_cross_index.py::test_bal_post_execution_calls_net_storage_at_last_index[fork_Amsterdam-blockchain_test]: block 1 failed to process: block access list hash mismatch: got 0xe93e85d2e4de176bb4f4d689786bfd3f490a4ad08786c1f76dbe2477c5efcff8, expected 0x1a51f556bbddb9252f36300cbe8c5f2da2270cdf261dba75205655d63e4e4dec",
+      "reason": "Repeated block access list mismatch in both preserved execution run logs; complete runs were stopped before all files finished."
+    },
+    {
+      "release": "tests@v21.0.0",
+      "archive_sha256": "dd642a261ac63f910b85c47d2549d2bb3ae4ad044fb5e852657f783441483bb2",
+      "path": "blockchain_tests/for_amsterdam/amsterdam/eip7928_block_level_access_lists/block_access_lists_cross_index/bal_withdrawals_and_dequeues_net_balance_at_last_index.json",
+      "fixture_sha256": "875d2abc8e586cccdbebcaebf74686a79957afd8a83c373d0b7f3fbe9dd52d6b",
+      "outcome": "failed",
+      "error": "fixture tests/amsterdam/eip7928_block_level_access_lists/test_block_access_lists_cross_index.py::test_bal_withdrawals_and_dequeues_net_balance_at_last_index[fork_Amsterdam-blockchain_test-forward_all]: block 1 failed to process: block access list hash mismatch: got 0x6defd017ed3e31cdd84eb9a6a040adc0f7655de4760c57cc6ef8e86ef4313a09, expected 0x2c6102f38e8cf289ed058e25481e6cc8c1167b573c740e97134f61dfad8392b7",
+      "reason": "Repeated block access list mismatch in both preserved execution run logs; complete runs were stopped before all files finished."
+    }
+  ]
+}

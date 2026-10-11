@@ -33,7 +33,7 @@ use reth_node_core::{
     exit::NodeExitFuture,
     primitives::Head,
 };
-use reth_node_events::node;
+use reth_node_events::{cl::ConsensusLayerHealthEvent, node};
 use reth_provider::{
     providers::{BlockchainProvider, NodeTypesForProvider},
     BlockNumReader, StorageSettingsCache,
@@ -61,6 +61,9 @@ pub struct EngineNodeLauncher<B = PipelineBackfill> {
 
     // Builds the backfill the engine runs while far behind the chain.
     backfill: B,
+
+    /// Whether consensus runs in this process instead of an external client.
+    in_process_consensus: bool,
 }
 
 impl EngineNodeLauncher {
@@ -74,6 +77,7 @@ impl EngineNodeLauncher {
             ctx: LaunchContext::new(task_executor, data_dir),
             engine_tree_config,
             backfill: PipelineBackfill,
+            in_process_consensus: false,
         }
     }
 }
@@ -99,7 +103,7 @@ impl<B> EngineNodeLauncher<B> {
             <<CB::Components as NodeComponents<T>>::Network as BlockDownloaderProvider>::Client,
         >,
     {
-        let Self { ctx, engine_tree_config, mut backfill } = self;
+        let Self { ctx, engine_tree_config, mut backfill, in_process_consensus } = self;
         let NodeBuilderWithComponents {
             adapter: NodeTypesAdapter { database },
             rocksdb_provider,
@@ -299,7 +303,15 @@ impl<B> EngineNodeLauncher<B> {
         let events = stream_select!(
             event_sender.new_listener().map(Into::into),
             pipeline_events.map(Into::into),
-            ctx.consensus_layer_events(),
+            ctx.consensus_layer_events().filter_map(move |event| {
+                std::future::ready(match event {
+                    node::NodeEvent::ConsensusLayerHealth(event) => {
+                        consensus_layer_health_event(in_process_consensus, event)
+                            .map(node::NodeEvent::ConsensusLayerHealth)
+                    }
+                    event => Some(event),
+                })
+            }),
             pruner_events.map(Into::into),
             static_file_producer_events.map(Into::into),
         );
@@ -474,8 +486,17 @@ impl<B> EngineNodeLauncher<B> {
 
     /// Returns this launcher with the engine's backfill built by `backfill`.
     pub fn with_backfill<B2>(self, backfill: B2) -> EngineNodeLauncher<B2> {
-        let Self { ctx, engine_tree_config, .. } = self;
-        EngineNodeLauncher { ctx, engine_tree_config, backfill }
+        let Self { ctx, engine_tree_config, in_process_consensus, .. } = self;
+        EngineNodeLauncher { ctx, engine_tree_config, backfill, in_process_consensus }
+    }
+
+    /// Uses consensus running inside this process.
+    ///
+    /// Suppresses the initial external-client prompt and labels delayed updates as local
+    /// consensus health. Warnings about stalled forkchoice updates remain enabled.
+    pub const fn with_in_process_consensus(mut self) -> Self {
+        self.in_process_consensus = true;
+        self
     }
 }
 
@@ -502,5 +523,69 @@ where
 
     fn launch_node(self, target: NodeBuilderWithComponents<T, CB, AO>) -> Self::Future {
         Box::pin(self.launch_node(target))
+    }
+}
+
+/// Retains delayed local consensus health without an external-client prompt.
+const fn consensus_layer_health_event(
+    in_process_consensus: bool,
+    event: ConsensusLayerHealthEvent,
+) -> Option<ConsensusLayerHealthEvent> {
+    match (in_process_consensus, event) {
+        (true, ConsensusLayerHealthEvent::NeverSeen) => None,
+        (true, ConsensusLayerHealthEvent::HaveNotReceivedUpdatesForAWhile(period)) => {
+            Some(ConsensusLayerHealthEvent::InProcessUpdatesDelayed(period))
+        }
+        (_, event) => Some(event),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use reth_node_core::node_config::NodeConfig;
+    use std::time::Duration;
+
+    #[test]
+    fn external_consensus_retains_all_health_events() {
+        assert!(matches!(
+            consensus_layer_health_event(false, ConsensusLayerHealthEvent::NeverSeen),
+            Some(ConsensusLayerHealthEvent::NeverSeen),
+        ));
+        assert!(matches!(
+            consensus_layer_health_event(
+                false,
+                ConsensusLayerHealthEvent::HaveNotReceivedUpdatesForAWhile(Duration::from_secs(120)),
+            ),
+            Some(ConsensusLayerHealthEvent::HaveNotReceivedUpdatesForAWhile(period))
+                if period == Duration::from_secs(120),
+        ));
+    }
+
+    #[test]
+    fn in_process_consensus_retains_stalled_updates() {
+        assert!(consensus_layer_health_event(true, ConsensusLayerHealthEvent::NeverSeen).is_none());
+        assert!(matches!(
+            consensus_layer_health_event(
+                true,
+                ConsensusLayerHealthEvent::HaveNotReceivedUpdatesForAWhile(Duration::from_secs(120)),
+            ),
+            Some(ConsensusLayerHealthEvent::InProcessUpdatesDelayed(period))
+                if period == Duration::from_secs(120),
+        ));
+    }
+
+    #[test]
+    fn backfill_preserves_consensus_health_mode() {
+        let launcher = EngineNodeLauncher::new(
+            TaskExecutor::test(),
+            NodeConfig::default().datadir(),
+            TreeConfig::default(),
+        );
+        assert!(!launcher.in_process_consensus);
+        let launcher = launcher.with_backfill(1_u8);
+        assert!(!launcher.in_process_consensus);
+        let launcher = launcher.with_in_process_consensus().with_backfill(2_u8);
+        assert!(launcher.in_process_consensus);
     }
 }

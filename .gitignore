@@ -78,3 +78,9 @@ __pycache__/
 # direnv
 .envrc
 .direnv/
+
+# Private launch settings.
+/launch.local.sh
+
+# Downloaded consensus references and local test artifacts.
+/crates/embedded-beacon/*/work/

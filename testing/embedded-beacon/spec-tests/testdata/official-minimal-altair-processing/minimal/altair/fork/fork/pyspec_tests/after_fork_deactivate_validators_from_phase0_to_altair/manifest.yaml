@@ -1,0 +1,6 @@
+preset: minimal
+fork: altair
+runner: fork
+handler: fork
+suite: pyspec_tests
+case: after_fork_deactivate_validators_from_phase0_to_altair

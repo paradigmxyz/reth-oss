@@ -1,0 +1,20 @@
+{
+  "spec_release": "v1.7.0-beta.3",
+  "required_suites": [
+    "minimal/phase0/operations/attestation/pyspec_tests"
+  ],
+  "files": {
+    "minimal/phase0/operations/attestation/pyspec_tests/invalid_index/attestation.ssz_snappy": "0x36854c5f863b41516917186d06e2ab9ab9559b54fd96a27318750bfd9875d752",
+    "minimal/phase0/operations/attestation/pyspec_tests/invalid_index/manifest.yaml": "0x3b5132fa9983d1998358c2b77f4e51a32e6269d5c6c527f2b70497fa63f096da",
+    "minimal/phase0/operations/attestation/pyspec_tests/invalid_index/meta.yaml": "0xe9421f6ba935dfa0f1acf832c360946f5d566c9c21d997a8a1d4367ce9fcb193",
+    "minimal/phase0/operations/attestation/pyspec_tests/invalid_index/pre.ssz_snappy": "0x2f47890373c9502b58489e7475e45e4153754dff28ae3fff5a1472b3a35cf0c8",
+    "minimal/phase0/operations/attestation/pyspec_tests/invalid_wrong_index_for_slot_0/attestation.ssz_snappy": "0xdc45e963635a4ac42e6d66ae976efdbcee35b22512acfe1510f72241a3df793d",
+    "minimal/phase0/operations/attestation/pyspec_tests/invalid_wrong_index_for_slot_0/manifest.yaml": "0xa991fafb95c780393f162e3ebcfa72224f6958122cc5891a3e18f0309175b8d0",
+    "minimal/phase0/operations/attestation/pyspec_tests/invalid_wrong_index_for_slot_0/meta.yaml": "0xe9421f6ba935dfa0f1acf832c360946f5d566c9c21d997a8a1d4367ce9fcb193",
+    "minimal/phase0/operations/attestation/pyspec_tests/invalid_wrong_index_for_slot_0/pre.ssz_snappy": "0x2f47890373c9502b58489e7475e45e4153754dff28ae3fff5a1472b3a35cf0c8",
+    "minimal/phase0/operations/attestation/pyspec_tests/invalid_wrong_index_for_slot_1/attestation.ssz_snappy": "0xb1a6b7535571c94f0e7524c8f81cc8cf6ddb4680bd0fb90e286ab21c2670ee18",
+    "minimal/phase0/operations/attestation/pyspec_tests/invalid_wrong_index_for_slot_1/manifest.yaml": "0x01e09ec2cee68fd91d8449295099e9b2abc8b9541107fd1c83eaa664675beec6",
+    "minimal/phase0/operations/attestation/pyspec_tests/invalid_wrong_index_for_slot_1/meta.yaml": "0xe9421f6ba935dfa0f1acf832c360946f5d566c9c21d997a8a1d4367ce9fcb193",
+    "minimal/phase0/operations/attestation/pyspec_tests/invalid_wrong_index_for_slot_1/pre.ssz_snappy": "0x2f47890373c9502b58489e7475e45e4153754dff28ae3fff5a1472b3a35cf0c8"
+  }
+}

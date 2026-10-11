@@ -1,0 +1,28 @@
+{
+  "spec_release": "v1.7.0-beta.3",
+  "source_manifest_sha256": "513216f9ca4c07092e35dff6a6ce6eab383823c36dd232949d7a839192f7bc0f",
+  "classification": "published consensus inputs; execution responses are synthetic fixture assumptions",
+  "files": [
+    {
+      "source_member": "minimal/bellatrix/sync/optimistic/pyspec_tests/from_syncing_to_invalid/anchor_state.ssz_snappy",
+      "source_sha256": "0x6bcde23b51c7371485856ebdc4bd892cfbc86d033627a342bf4c9eec6b3c9ac0",
+      "decoded_path": "anchor_state.ssz",
+      "decoded_sha256": "0xf9180126f2484b633852494cc11d8e4d39b6e89f6ca5b19b4d145cea27e91d4c",
+      "decoded_bytes": 19665
+    },
+    {
+      "source_member": "minimal/bellatrix/sync/optimistic/pyspec_tests/from_syncing_to_invalid/anchor_block.ssz_snappy",
+      "source_sha256": "0xc78a43e1fed421221d4a55bdf768e3fc1135ff0526b9aefbc1de0398029bf876",
+      "decoded_path": "anchor_block.ssz",
+      "decoded_sha256": "0x00d62069d0a995aa5fa7db9ccbed419d2f61ef98db9a0f9be6a49504d79271ee",
+      "decoded_bytes": 916
+    },
+    {
+      "source_member": "minimal/bellatrix/sync/optimistic/pyspec_tests/from_syncing_to_invalid/block_0xea10d80a3532600cad4f70350ff1bd20a0ce7cfa14534b2ee7e9937bbeb31012.ssz_snappy",
+      "source_sha256": "0xca9520eaef646abea137ad72b19f46e4b35771894e92339f07bece25f59614c8",
+      "decoded_path": "first_block.ssz",
+      "decoded_sha256": "0x20ddc402c7eb22f515ed5e7bebb1e54f16d17914652c78ac432776f8fbd89109",
+      "decoded_bytes": 1016
+    }
+  ]
+}

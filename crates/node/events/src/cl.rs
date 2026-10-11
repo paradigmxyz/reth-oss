@@ -75,4 +75,6 @@ pub enum ConsensusLayerHealthEvent {
     NeverSeen,
     /// Forkchoice updates from the Consensus Layer client have not been received for a while.
     HaveNotReceivedUpdatesForAWhile(Duration),
+    /// Consensus running in this process has not published a recent execution forkchoice update.
+    InProcessUpdatesDelayed(Duration),
 }

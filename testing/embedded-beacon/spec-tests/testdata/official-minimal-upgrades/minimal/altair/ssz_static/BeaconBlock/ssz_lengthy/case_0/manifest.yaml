@@ -1,0 +1,6 @@
+preset: minimal
+fork: altair
+runner: ssz_static
+handler: BeaconBlock
+suite: ssz_lengthy
+case: case_0

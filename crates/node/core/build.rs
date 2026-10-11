@@ -19,6 +19,11 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     emitter.add_instructions(&git_builder)?;
 
+    // Rebuild version metadata when container or packaging overrides change.
+    for variable in ["VERGEN_GIT_SHA", "VERGEN_GIT_DESCRIBE", "VERGEN_GIT_DIRTY"] {
+        println!("cargo:rerun-if-env-changed={variable}");
+    }
+
     emitter.emit_and_set()?;
     let sha = env::var("VERGEN_GIT_SHA")?;
     let sha_short = &sha[0..7];

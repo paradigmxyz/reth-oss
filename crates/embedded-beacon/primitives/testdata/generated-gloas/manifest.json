@@ -1,0 +1,63 @@
+{
+  "kind": "generated structural SSZ fixtures",
+  "consensus_spec_pin": "v1.7.0-beta.3",
+  "reference_ssz_package": "eth-ssz-specs==0.1.0",
+  "preset": "mainnet",
+  "cases": {
+    "bid": {
+      "root": "0xf793fb8012c0fcf9fe9d03b752a2341012dc9e674f1bc5845fac8891bb2a9322",
+      "ssz_length": 272,
+      "preset": "mainnet"
+    },
+    "signed-bid": {
+      "root": "0x293f23638b60842c9b3bbfb433892cb05c8d2bd7888c6111c5e1ef46c2fbfe1f",
+      "ssz_length": 372,
+      "preset": "mainnet"
+    },
+    "ptc-data": {
+      "root": "0x9c116822fc78b4eb36ce4f026ca1e6306f3eecc10458acf7454abf40aa9e6e41",
+      "ssz_length": 42,
+      "preset": "mainnet"
+    },
+    "ptc-vote": {
+      "root": "0x464d9d3f34f88052a9fd1f259844d2f75455ec5f652748096c4846100cea5f7a",
+      "ssz_length": 202,
+      "preset": "mainnet"
+    },
+    "ptc-vote-minimal": {
+      "root": "0xc8a88a1a3e77c2e020b1f8dfaac00bfa27c7aee538ab04f00171701f6a266748",
+      "ssz_length": 140,
+      "preset": "minimal"
+    },
+    "indexed-ptc": {
+      "root": "0xedf4c9cb4c3ca9a16942f593deb911a9a140998741fbf9d86483833ddfa3db95",
+      "ssz_length": 158,
+      "preset": "mainnet"
+    },
+    "indexed-ptc-minimal": {
+      "root": "0x114b43fd38e2309961edb3ef0ec1ff4007818fb203923d60711b67fbecb86300",
+      "ssz_length": 158,
+      "preset": "minimal"
+    },
+    "payload": {
+      "root": "0xf1e5f9a46da3b8d6c680bb75e9df2348c43aedf1beec246c8014a86d1f7579c1",
+      "ssz_length": 602,
+      "preset": "mainnet"
+    },
+    "requests": {
+      "root": "0x02fb75d8836ea0ee5b01f3d14eb1e0c32bbe0317054e18f803940acf10fbd66c",
+      "ssz_length": 656,
+      "preset": "mainnet"
+    },
+    "envelope": {
+      "root": "0x87b5ad8fce26c11b30b061c4d7aac87312932c8b2a92888ff7301d99b01d74a5",
+      "ssz_length": 1338,
+      "preset": "mainnet"
+    },
+    "signed-envelope": {
+      "root": "0xaa255b25ca30411a390edeb93808f7342a0808cf705cb2cf07d098e2586b7387",
+      "ssz_length": 1438,
+      "preset": "mainnet"
+    }
+  }
+}

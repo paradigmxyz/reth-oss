@@ -1,0 +1,737 @@
+diff --git a/src/lib.rs b/src/lib.rs
+index ae614367e..7dbc7d623 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -124,6 +124,7 @@ pub use self::{
+         score_parameter_decay, score_parameter_decay_with_base, PeerScoreParams,
+         PeerScoreThresholds, TopicScoreParams,
+     },
++    protocol::IngressLimits,
+     subscription_filter::{
+         AllowAllSubscriptionFilter, CallbackSubscriptionFilter, CombinedSubscriptionFilters,
+         MaxCountSubscriptionFilter, RegexSubscriptionFilter, TopicSubscriptionFilter,
+diff --git a/src/config.rs b/src/config.rs
+index 366f88f63..61001dfb8 100644
+--- a/src/config.rs
++++ b/src/config.rs
+@@ -25,7 +25,7 @@ use libp2p_swarm::StreamProtocol;
+ 
+ use crate::{
+     error::ConfigBuilderError,
+-    protocol::{ProtocolConfig, ProtocolId, FLOODSUB_PROTOCOL},
++    protocol::{IngressLimits, ProtocolConfig, ProtocolId, FLOODSUB_PROTOCOL},
+     types::{Message, MessageId, PeerKind},
+     TopicHash,
+ };
+@@ -569,6 +569,15 @@ impl From<Config> for ConfigBuilder {
+ }
+ 
+ impl ConfigBuilder {
++    /// Bound inbound RPC object counts before owned protobuf decoding.
++    ///
++    /// This is opt-in. Exceeding a limit is a local capacity error, not an invalid-message score
++    /// penalty or application consensus verdict. Structurally malformed frames keep InvalidData.
++    pub fn ingress_limits(&mut self, limits: IngressLimits) -> &mut Self {
++        self.config.protocol.ingress_limits = Some(limits);
++        self
++    }
++
+     /// The protocol id prefix to negotiate this protocol (default is `/meshsub/1.1.0` and
+     /// `/meshsub/1.0.0`).
+     pub fn protocol_id_prefix(
+diff --git a/src/protocol.rs b/src/protocol.rs
+index f77f69953..9990eba61 100644
+--- a/src/protocol.rs
++++ b/src/protocol.rs
+@@ -41,6 +41,27 @@ use crate::{
+     ValidationError,
+ };
+ 
++mod preflight;
++
++/// Optional allocation limits for decoded inbound RPC records.
++///
++/// These limits are checked on borrowed wire bytes before owned protobuf decoding. A complete
++/// structurally valid frame that exceeds them returns a local `WouldBlock` I/O error. Normal
++/// configurations leave this unset and retain the original decoder path and wire semantics.
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub struct IngressLimits {
++    /// Maximum publications in one RPC, including empty publication records.
++    pub max_published_messages: usize,
++    /// Maximum subscription records in one RPC.
++    pub max_subscriptions: usize,
++    /// Maximum actions in each optional control envelope.
++    pub max_controls: usize,
++    /// Maximum message IDs across IHAVE, IWANT and IDONTWANT in each control envelope.
++    pub max_message_ids: usize,
++    /// Maximum peer records in each PRUNE action.
++    pub max_prune_peers: usize,
++}
++
+ pub(crate) const SIGNING_PREFIX: &[u8] = b"libp2p-pubsub:";
+ 
+ pub(crate) const GOSSIPSUB_1_2_0_PROTOCOL: ProtocolId = ProtocolId {
+@@ -72,6 +93,8 @@ pub struct ProtocolConfig {
+     pub(crate) default_max_transmit_size: usize,
+     /// The max transmit sizes for a topic.
+     pub(crate) max_transmit_sizes: HashMap<TopicHash, usize>,
++    /// Optional bounds applied before owned inbound RPC decoding.
++    pub(crate) ingress_limits: Option<IngressLimits>,
+ }
+ 
+ impl Default for ProtocolConfig {
+@@ -85,6 +108,7 @@ impl Default for ProtocolConfig {
+             ],
+             default_max_transmit_size: 65536,
+             max_transmit_sizes: HashMap::new(),
++            ingress_limits: None,
+         }
+     }
+ }
+@@ -139,7 +163,8 @@ where
+                     self.default_max_transmit_size,
+                     self.validation_mode,
+                     self.max_transmit_sizes,
+-                ),
++                )
++                .with_ingress_limits(self.ingress_limits),
+             ),
+             protocol_id.kind,
+         )))
+@@ -162,7 +187,8 @@ where
+                     self.default_max_transmit_size,
+                     self.validation_mode,
+                     self.max_transmit_sizes,
+-                ),
++                )
++                .with_ingress_limits(self.ingress_limits),
+             ),
+             protocol_id.kind,
+         )))
+@@ -178,6 +204,10 @@ pub struct GossipsubCodec {
+     codec: quick_protobuf_codec::Codec<proto::RPC>,
+     /// Maximum transmit sizes per topic, with a default if not specified.
+     max_transmit_sizes: HashMap<TopicHash, usize>,
++    /// The wire frame bound used by the original codec.
++    max_length: usize,
++    /// Unset for the original generic decoder path.
++    ingress_limits: Option<IngressLimits>,
+ }
+ 
+ impl GossipsubCodec {
+@@ -191,9 +221,16 @@ impl GossipsubCodec {
+             validation_mode,
+             codec,
+             max_transmit_sizes,
++            max_length,
++            ingress_limits: None,
+         }
+     }
+ 
++    fn with_ingress_limits(mut self, limits: Option<IngressLimits>) -> Self {
++        self.ingress_limits = limits;
++        self
++    }
++
+     /// Get the max transmit size for a given topic if it exists.
+     fn max_transmit_size_for_topic(&self, topic: &TopicHash) -> Option<usize> {
+         self.max_transmit_sizes.get(topic).copied()
+@@ -270,6 +307,11 @@ impl Decoder for GossipsubCodec {
+     type Error = quick_protobuf_codec::Error;
+ 
+     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
++        if let Some(limits) = self.ingress_limits {
++            if !preflight::check(src, self.max_length, limits)? {
++                return Ok(None);
++            }
++        }
+         let Some(rpc) = self.codec.decode(src)? else {
+             return Ok(None);
+         };
+diff --git a/src/protocol/preflight.rs b/src/protocol/preflight.rs
+new file mode 100644
+index 000000000..48db51b1c
+--- /dev/null
++++ b/src/protocol/preflight.rs
+@@ -0,0 +1,258 @@
++// Copyright 2020 Sigma Prime Pty Ltd.
++//
++// Permission is hereby granted, free of charge, to any person obtaining a
++// copy of this software and associated documentation files (the "Software"),
++// to deal in the Software without restriction, including without limitation
++// the rights to use, copy, modify, merge, publish, distribute, sublicense,
++// and/or sell copies of the Software, and to permit persons to whom the
++// Software is furnished to do so, subject to the following conditions:
++//
++// The above copyright notice and this permission notice shall be included in
++// all copies or substantial portions of the Software.
++//
++// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
++// OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
++// FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
++// DEALINGS IN THE SOFTWARE.
++
++//! Borrowed protobuf record counts before owned decoding can allocate repeated objects.
++//!
++//! Scalar parsing and unknown-field skipping use the pinned protobuf reader. Every nested
++//! record has its own bounded slice. A capacity hit is remembered while the complete frame
++//! structure is scanned, so a later malformed field retains InvalidData classification.
++
++use super::IngressLimits;
++use quick_protobuf::{BytesReader, Error, Result};
++use std::io;
++
++struct Cursor<'a> {
++    bytes: &'a [u8],
++}
++impl<'a> Cursor<'a> {
++    fn new(bytes: &'a [u8]) -> Self {
++        Self { bytes }
++    }
++    fn is_empty(&self) -> bool {
++        self.bytes.is_empty()
++    }
++    fn varint32(&mut self) -> Result<u32> {
++        let mut reader = BytesReader::from_bytes(self.bytes);
++        let value = reader.read_varint32(self.bytes)?;
++        self.bytes = &self.bytes[self.bytes.len() - reader.len()..];
++        Ok(value)
++    }
++    fn varint64(&mut self) -> Result<u64> {
++        let mut reader = BytesReader::from_bytes(self.bytes);
++        let value = reader.read_varint64(self.bytes)?;
++        self.bytes = &self.bytes[self.bytes.len() - reader.len()..];
++        Ok(value)
++    }
++    fn bytes(&mut self) -> Result<&'a [u8]> {
++        let length = self.varint32()? as usize;
++        let value = self.bytes.get(..length).ok_or(Error::UnexpectedEndOfBuffer)?;
++        self.bytes = &self.bytes[length..];
++        Ok(value)
++    }
++    fn string(&mut self) -> Result<()> {
++        std::str::from_utf8(self.bytes()?).map_err(Error::from)?;
++        Ok(())
++    }
++    fn unknown(&mut self, tag: u32) -> Result<()> {
++        let mut reader = BytesReader::from_bytes(self.bytes);
++        reader.read_unknown(self.bytes, tag)?;
++        self.bytes = &self.bytes[self.bytes.len() - reader.len()..];
++        Ok(())
++    }
++}
++
++#[derive(Default)]
++struct Scan {
++    exceeded: bool,
++}
++impl Scan {
++    fn count(&mut self, count: &mut usize, limit: usize) {
++        *count = count.saturating_add(1);
++        self.exceeded |= *count > limit;
++    }
++    fn rpc(&mut self, bytes: &[u8], limits: IngressLimits) -> Result<()> {
++        let mut cursor = Cursor::new(bytes);
++        let mut publications = 0;
++        let mut subscriptions = 0;
++        while !cursor.is_empty() {
++            match cursor.varint32()? {
++                10 => {
++                    self.count(&mut subscriptions, limits.max_subscriptions);
++                    subscription(cursor.bytes()?)?;
++                }
++                18 => {
++                    self.count(&mut publications, limits.max_published_messages);
++                    publication(cursor.bytes()?)?;
++                }
++                26 => self.controls(cursor.bytes()?, limits)?,
++                tag => cursor.unknown(tag)?,
++            }
++        }
++        Ok(())
++    }
++    fn controls(&mut self, bytes: &[u8], limits: IngressLimits) -> Result<()> {
++        let mut cursor = Cursor::new(bytes);
++        // A repeated optional control envelope replaces its predecessor in the native
++        // decoder. Bound each envelope (including discarded ones), without summing their
++        // mutually exclusive retained records or changing protobuf last-value semantics.
++        let mut actions = 0;
++        let mut ids = 0;
++        while !cursor.is_empty() {
++            match cursor.varint32()? {
++                tag @ (10 | 18 | 26 | 34 | 42) => {
++                    self.count(&mut actions, limits.max_controls);
++                    let record = cursor.bytes()?;
++                    match tag {
++                        10 => self.ids(record, true, &mut ids, limits.max_message_ids)?,
++                        18 | 42 => self.ids(record, false, &mut ids, limits.max_message_ids)?,
++                        26 => graft(record)?,
++                        34 => self.prune(record, limits.max_prune_peers)?,
++                        _ => unreachable!(),
++                    }
++                }
++                tag => cursor.unknown(tag)?,
++            }
++        }
++        Ok(())
++    }
++    fn ids(&mut self, bytes: &[u8], ihave: bool, ids: &mut usize, limit: usize) -> Result<()> {
++        let mut cursor = Cursor::new(bytes);
++        while !cursor.is_empty() {
++            match cursor.varint32()? {
++                10 if ihave => cursor.string()?,
++                18 if ihave => {
++                    self.count(ids, limit);
++                    cursor.bytes()?;
++                }
++                10 => {
++                    self.count(ids, limit);
++                    cursor.bytes()?;
++                }
++                tag => cursor.unknown(tag)?,
++            }
++        }
++        Ok(())
++    }
++    fn prune(&mut self, bytes: &[u8], limit: usize) -> Result<()> {
++        let mut cursor = Cursor::new(bytes);
++        let mut peers = 0;
++        while !cursor.is_empty() {
++            match cursor.varint32()? {
++                10 => cursor.string()?,
++                18 => {
++                    self.count(&mut peers, limit);
++                    peer(cursor.bytes()?)?;
++                }
++                24 => {
++                    cursor.varint64()?;
++                }
++                tag => cursor.unknown(tag)?,
++            }
++        }
++        Ok(())
++    }
++}
++
++fn publication(bytes: &[u8]) -> Result<()> {
++    let mut cursor = Cursor::new(bytes);
++    while !cursor.is_empty() {
++        match cursor.varint32()? {
++            10 | 18 | 26 | 42 | 50 => {
++                cursor.bytes()?;
++            }
++            34 => cursor.string()?,
++            tag => cursor.unknown(tag)?,
++        }
++    }
++    Ok(())
++}
++fn subscription(bytes: &[u8]) -> Result<()> {
++    let mut cursor = Cursor::new(bytes);
++    while !cursor.is_empty() {
++        match cursor.varint32()? {
++            8 => {
++                cursor.varint32()?;
++            }
++            18 => cursor.string()?,
++            tag => cursor.unknown(tag)?,
++        }
++    }
++    Ok(())
++}
++fn graft(bytes: &[u8]) -> Result<()> {
++    let mut cursor = Cursor::new(bytes);
++    while !cursor.is_empty() {
++        match cursor.varint32()? {
++            10 => cursor.string()?,
++            tag => cursor.unknown(tag)?,
++        }
++    }
++    Ok(())
++}
++fn peer(bytes: &[u8]) -> Result<()> {
++    let mut cursor = Cursor::new(bytes);
++    while !cursor.is_empty() {
++        match cursor.varint32()? {
++            10 | 18 => {
++                cursor.bytes()?;
++            }
++            tag => cursor.unknown(tag)?,
++        }
++    }
++    Ok(())
++}
++
++/// Match the original codec's pointer-width unsigned length prefix without another dependency.
++/// Incomplete prefixes leave the input untouched. The original decoder rejects a terminating
++/// zero after the first byte and a continuation beyond its maximum byte count. Like that codec,
++/// a terminating final byte is shifted into usize with its existing truncation semantics.
++fn frame_length(bytes: &[u8]) -> io::Result<Option<(usize, &[u8])>> {
++    let mut length = 0usize;
++    let final_index = (usize::BITS as usize - 1) / 7;
++    for (index, &byte) in bytes.iter().enumerate() {
++        length |= usize::from(byte & 0x7f) << (index * 7);
++        if byte & 0x80 == 0 {
++            if index != 0 && byte == 0 {
++                return Err(io::Error::new(io::ErrorKind::InvalidData, "encoding is not minimal"));
++            }
++            return Ok(Some((length, &bytes[index + 1..])));
++        }
++        if index == final_index {
++            return Err(io::Error::new(io::ErrorKind::InvalidData, "input bytes exceed maximum"));
++        }
++    }
++    Ok(None)
++}
++/// Inspect the first complete framed RPC without advancing, copying or allocating its bytes.
++pub(super) fn check(
++    bytes: &[u8],
++    max_length: usize,
++    limits: IngressLimits,
++) -> std::result::Result<bool, quick_protobuf_codec::Error> {
++    let Some((length, remaining)) = frame_length(bytes)? else { return Ok(false) };
++    if length > max_length {
++        return Err(io::Error::new(
++            io::ErrorKind::PermissionDenied,
++            format!("message with {length}b exceeds maximum of {max_length}b"),
++        )
++        .into());
++    }
++    let Some(frame) = remaining.get(..length) else { return Ok(false) };
++    let mut scan = Scan::default();
++    scan.rpc(frame, limits).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
++    if scan.exceeded {
++        // ErrorKind alone avoids an owned error string or decoded object allocation.
++        return Err(io::Error::from(io::ErrorKind::WouldBlock).into());
++    }
++    Ok(true)
++}
++
++#[cfg(test)]
++mod tests;
+diff --git a/src/protocol/preflight/tests.rs b/src/protocol/preflight/tests.rs
+new file mode 100644
+index 000000000..09fc888d8
+--- /dev/null
++++ b/src/protocol/preflight/tests.rs
+@@ -0,0 +1,317 @@
++// Copyright 2020 Sigma Prime Pty Ltd.
++//
++// Permission is hereby granted, free of charge, to any person obtaining a
++// copy of this software and associated documentation files (the "Software"),
++// to deal in the Software without restriction, including without limitation
++// the rights to use, copy, modify, merge, publish, distribute, sublicense,
++// and/or sell copies of the Software, and to permit persons to whom the
++// Software is furnished to do so, subject to the following conditions:
++//
++// The above copyright notice and this permission notice shall be included in
++// all copies or substantial portions of the Software.
++//
++// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
++// OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
++// FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
++// DEALINGS IN THE SOFTWARE.
++
++use super::*;
++use crate::{
++    config::ValidationMode, handler::HandlerEvent, protocol::GossipsubCodec, Config, ConfigBuilder,
++};
++use asynchronous_codec::Decoder;
++use bytes::BytesMut;
++use std::collections::HashMap;
++
++const LIMITS: IngressLimits = IngressLimits {
++    max_published_messages: 16,
++    max_subscriptions: 256,
++    max_controls: 16,
++    max_message_ids: 1024,
++    max_prune_peers: 16,
++};
++const MAX_FRAME: usize = 12 * 1024 * 1024 + 1024;
++
++fn length_prefix(mut value: usize) -> Vec<u8> {
++    let mut result = Vec::new();
++    loop {
++        let low = (value & 0x7f) as u8;
++        value >>= 7;
++        result.push(if value == 0 { low } else { low | 0x80 });
++        if value == 0 {
++            return result;
++        }
++    }
++}
++fn record(tag: u8, data: &[u8]) -> Vec<u8> {
++    let mut result = vec![tag];
++    result.extend_from_slice(&length_prefix(data.len()));
++    result.extend_from_slice(data);
++    result
++}
++fn framed(payload: &[u8]) -> BytesMut {
++    let mut result = BytesMut::new();
++    result.extend_from_slice(&length_prefix(payload.len()));
++    result.extend_from_slice(payload);
++    result
++}
++fn codec(limits: Option<IngressLimits>) -> GossipsubCodec {
++    GossipsubCodec::new(MAX_FRAME, ValidationMode::Anonymous, HashMap::new())
++        .with_ingress_limits(limits)
++}
++fn capacity(payload: &[u8]) {
++    let mut source = framed(payload);
++    let original = source.clone();
++    let pointer = source.as_ptr();
++    let error: io::Error = codec(Some(LIMITS)).decode(&mut source).unwrap_err().into();
++    assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
++    assert_eq!(source, original, "capacity must precede owned decoder consumption");
++    assert_eq!(source.as_ptr(), pointer, "capacity must preserve the original buffer");
++}
++fn same_decode(payload: &[u8]) {
++    let mut guarded_source = framed(payload);
++    let mut native_source = guarded_source.clone();
++    let guarded = codec(Some(LIMITS)).decode(&mut guarded_source).unwrap().unwrap();
++    let native = codec(None).decode(&mut native_source).unwrap().unwrap();
++    let (
++        HandlerEvent::Message { rpc: guarded_rpc, invalid_messages: guarded_invalid },
++        HandlerEvent::Message { rpc: native_rpc, invalid_messages: native_invalid },
++    ) = (guarded, native)
++    else {
++        panic!("expected messages")
++    };
++    assert_eq!(guarded_rpc, native_rpc);
++    assert_eq!(format!("{guarded_invalid:?}"), format!("{native_invalid:?}"));
++    assert_eq!(guarded_source, native_source);
++}
++
++#[test]
++fn defaults_preserve_native_decoder_and_builder_opt_in() {
++    assert_eq!(Config::default().protocol_config().ingress_limits, None);
++    let opted_in = ConfigBuilder::default().ingress_limits(LIMITS).build().unwrap();
++    assert_eq!(opted_in.protocol_config().ingress_limits, Some(LIMITS));
++    assert_eq!(codec(None).ingress_limits, None);
++    let mut source = framed(&[18, 0].repeat(17));
++    let HandlerEvent::Message { rpc, .. } = codec(None).decode(&mut source).unwrap().unwrap()
++    else {
++        panic!("expected messages")
++    };
++    assert_eq!(rpc.messages.len(), 17, "unconfigured generic codec retains original behavior");
++}
++
++#[test]
++fn admitted_messages_controls_and_opaque_data_match_native() {
++    let mut publication = record(18, &[0xff, 0x00, 0x80, 0x81]);
++    publication.extend(record(34, b"/eth2/example/beacon_block/ssz_snappy"));
++    let mut payload = record(18, &publication);
++    payload.extend(record(10, &[8, 1, 18, 1, b't']));
++    let mut ids = record(10, &[0x42; 20]);
++    ids.extend(record(10, &[0x12; 20]));
++    let mut controls = record(18, &ids);
++    controls.extend(record(42, &ids));
++    controls.extend(record(26, &[10, 1, b't']));
++    let mut peer = record(10, &[1, 2, 3]);
++    peer.extend(record(18, &[9, 8, 7]));
++    let mut prune = record(10, b"t");
++    prune.extend(record(18, &peer));
++    prune.extend([24, 60]);
++    controls.extend(record(34, &prune));
++    payload.extend(record(26, &controls));
++    same_decode(&payload);
++}
++
++#[test]
++fn unknown_fields_and_nonminimal_protobuf_varints_match_native() {
++    let mut payload = record(10, &[0x88, 0x00, 0x81, 0x00, 18, 1, b't']);
++    payload.extend(record(18, &[0xa2, 0x00, 0x81, 0x00, b't']));
++    payload.extend([56, 1, 57]);
++    payload.extend([0; 8]);
++    payload.extend([58, 2, 0xfe, 0xff, 61]);
++    payload.extend([0; 4]);
++    same_decode(&payload);
++}
++
++#[test]
++fn exact_publication_limit_is_admitted_and_next_record_is_capacity() {
++    same_decode(&[]);
++    same_decode(&[18, 0].repeat(16));
++    capacity(&[18, 0].repeat(17));
++}
++
++#[test]
++fn huge_empty_publication_list_is_rejected_before_owned_decode() {
++    // This used to allocate 100,000 owned Message structs from only 200,000 wire bytes.
++    capacity(&[18, 0].repeat(100_000));
++}
++
++#[test]
++fn subscriptions_are_bounded_before_repeated_allocation() {
++    same_decode(&[10, 0].repeat(256));
++    capacity(&[10, 0].repeat(257));
++}
++
++#[test]
++fn every_control_action_is_counted_before_allocation() {
++    for tag in [10, 18, 26, 34, 42] {
++        same_decode(&record(26, &[tag, 0].repeat(16)));
++        capacity(&record(26, &[tag, 0].repeat(17)));
++    }
++}
++
++#[test]
++fn message_ids_are_aggregated_across_all_action_kinds() {
++    for (action, id_tag) in [(10, 18), (18, 10), (42, 10)] {
++        same_decode(&record(26, &record(action, &[id_tag, 0].repeat(1024))));
++        capacity(&record(26, &record(action, &[id_tag, 0].repeat(1025))));
++    }
++    let mut controls = record(10, &[18, 0].repeat(512));
++    controls.extend(record(18, &[10, 0].repeat(512)));
++    same_decode(&record(26, &controls));
++    controls.extend(record(42, &[10, 0]));
++    capacity(&record(26, &controls));
++}
++
++#[test]
++fn prune_peer_limit_is_per_action_and_preserves_backoff() {
++    let mut prune = [18, 0].repeat(16);
++    prune.extend([24, 60]);
++    same_decode(&record(26, &record(34, &prune)));
++    let mut two_prunes = record(34, &prune);
++    two_prunes.extend(record(34, &prune));
++    same_decode(&record(26, &two_prunes));
++    capacity(&record(26, &record(34, &[18, 0].repeat(17))));
++}
++
++#[test]
++fn repeated_optional_control_preserves_last_value_and_checks_discarded_envelopes() {
++    let first = record(18, &[10, 0].repeat(1024));
++    let second = record(42, &[10, 0].repeat(1024));
++    let mut payload = record(26, &first);
++    payload.extend(record(26, &second));
++    same_decode(&payload);
++    let mut oversized = record(26, &record(18, &[10, 0].repeat(1025)));
++    oversized.extend(record(26, &[]));
++    capacity(&oversized);
++}
++
++#[test]
++fn malformed_fields_after_capacity_keep_invalid_data_classification() {
++    let bad_fields: &[&[u8]] = &[
++        &[18, 3, 34, 2, b't'], // truncated topic field in a complete publication
++        &[18, 3, 34, 1, 0xff], // invalid UTF-8
++        &[63],                 // unknown wire type 7
++        &[56, 0x80],           // unterminated unknown varint
++        &[58, 4, 1],           // truncated unknown length-delimited field
++        &[57, 1],              // truncated unknown fixed64
++    ];
++    for bad in bad_fields {
++        let mut payload = [18, 0].repeat(17);
++        payload.extend_from_slice(bad);
++        let mut guarded_source = framed(&payload);
++        let original = guarded_source.clone();
++        let mut native_source = original.clone();
++        let guarded: io::Error =
++            codec(Some(LIMITS)).decode(&mut guarded_source).unwrap_err().into();
++        let native: io::Error = codec(None).decode(&mut native_source).unwrap_err().into();
++        assert_eq!(guarded.kind(), io::ErrorKind::InvalidData);
++        assert_eq!(guarded.kind(), native.kind());
++        assert_eq!(guarded_source, original);
++    }
++}
++
++#[test]
++fn malformed_nested_boundary_cannot_borrow_sibling_bytes() {
++    // The pinned reader can read a known field past a malformed nested length and then reset
++    // its cursor. The opt-in preflight rejects that structural violation with InvalidData.
++    let mut source = framed(&[18, 2, 34, 2, 56, 1]);
++    let original = source.clone();
++    let error: io::Error = codec(Some(LIMITS)).decode(&mut source).unwrap_err().into();
++    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
++    assert_eq!(source, original);
++}
++
++#[test]
++fn incomplete_and_oversized_frame_behavior_matches_native() {
++    for partial in [&[][..], &[0x80], &[5, 18, 0]] {
++        let mut guarded = BytesMut::from(partial);
++        let mut native = guarded.clone();
++        assert!(codec(Some(LIMITS)).decode(&mut guarded).unwrap().is_none());
++        assert!(codec(None).decode(&mut native).unwrap().is_none());
++        assert_eq!(guarded, native);
++        assert_eq!(guarded.as_ref(), partial);
++    }
++    let prefix = length_prefix(MAX_FRAME + 1);
++    let mut guarded = BytesMut::from(prefix.as_slice());
++    let mut native = guarded.clone();
++    let guarded_error: io::Error = codec(Some(LIMITS)).decode(&mut guarded).unwrap_err().into();
++    let native_error: io::Error = codec(None).decode(&mut native).unwrap_err().into();
++    assert_eq!(guarded_error.kind(), io::ErrorKind::PermissionDenied);
++    assert_eq!(guarded_error.to_string(), native_error.to_string());
++    assert_eq!(guarded, native);
++}
++
++#[test]
++fn malformed_stream_prefix_is_not_capacity() {
++    let mut source = BytesMut::from(&[0x80, 0x00][..]);
++    let mut native = source.clone();
++    let guarded: io::Error = codec(Some(LIMITS)).decode(&mut source).unwrap_err().into();
++    let unguarded: io::Error = codec(None).decode(&mut native).unwrap_err().into();
++    assert_eq!(guarded.kind(), io::ErrorKind::InvalidData);
++    assert_eq!(guarded.kind(), unguarded.kind());
++    assert_eq!(source, native);
++}
++
++#[test]
++fn pointer_width_prefix_errors_match_original_codec() {
++    let width = (usize::BITS as usize + 6) / 7;
++    let mut prefixes = vec![vec![], vec![0x80], vec![0x80, 0], vec![0x81, 0]];
++    for length in 1..width {
++        prefixes.push(vec![0xff; length]); // incomplete at every supported continuation depth
++    }
++    prefixes.push(vec![0xff; width]); // continuation at final byte is overflow
++    prefixes.push(vec![0xff; width + 1]);
++    let mut nonminimal = vec![0x80; width - 1];
++    nonminimal.push(0);
++    prefixes.push(nonminimal);
++    // Retain the exact native final-byte truncation rule instead of inventing stricter framing.
++    for last in [1, 2, 0x7f] {
++        let mut prefix = vec![0x80; width - 1];
++        prefix.push(last);
++        prefixes.push(prefix);
++    }
++    for prefix in prefixes {
++        let mut guarded_source = BytesMut::from(prefix.as_slice());
++        let mut native_source = guarded_source.clone();
++        let guarded = codec(Some(LIMITS)).decode(&mut guarded_source);
++        let native = codec(None).decode(&mut native_source);
++        match (guarded, native) {
++            (Ok(None), Ok(None)) => {}
++            (
++                Ok(Some(HandlerEvent::Message { rpc: left, .. })),
++                Ok(Some(HandlerEvent::Message { rpc: right, .. })),
++            ) => assert_eq!(left, right),
++            (Err(left), Err(right)) => {
++                let left: io::Error = left.into();
++                let right: io::Error = right.into();
++                assert_eq!(left.kind(), right.kind());
++                assert_eq!(left.to_string(), right.to_string());
++            }
++            (left, right) => panic!("different prefix classification: {left:?} / {right:?}"),
++        }
++        assert_eq!(guarded_source, native_source);
++    }
++}
++
++#[test]
++fn valid_prefix_length_and_remainder_are_exact() {
++    for value in [0, 1, 127, 128, 255, 16383, 16384, MAX_FRAME, usize::MAX] {
++        let mut prefix = length_prefix(value);
++        prefix.extend([0x42, 0x24]);
++        let (decoded, remaining) = frame_length(&prefix).unwrap().unwrap();
++        assert_eq!(decoded, value);
++        assert_eq!(remaining, &[0x42, 0x24]);
++    }
++}

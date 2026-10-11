@@ -1,0 +1,296 @@
+name: Complete consensus fixture conformance
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "bin/**"
+      - "crates/embedded-beacon/**"
+      - "testing/embedded-beacon/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/embedded-beacon-specs.yml"
+  merge_group:
+  push:
+    branches: [main]
+    paths:
+      - "bin/**"
+      - "crates/embedded-beacon/**"
+      - "testing/embedded-beacon/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/embedded-beacon-specs.yml"
+
+permissions: {}
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+
+jobs:
+  pubsub:
+    name: Complete scoped transport regression suite
+    runs-on: ubuntu-24.04
+    permissions:
+      id-token: write
+      contents: read
+    timeout-minutes: 45
+    env:
+      CARGO_BUILD_JOBS: "2"
+    steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@d5402286a7abdfb7232173b3228d56473feb8a66 # 2026-09-29T02-04-45Z-d5402286
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: tempoxyz/gh-actions/vendor/dtolnay/rust-toolchain@d5402286a7abdfb7232173b3228d56473feb8a66
+        with:
+          toolchain: "1.95"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          prefix-key: v1-embedded-pubsub
+          cache-bin: false
+          cache-targets: false
+          cache-on-failure: true
+      - name: Check isolated-copy and complete-run gate contracts offline
+        shell: bash
+        run: |
+          mkdir -p testing/embedded-beacon/artifacts
+          python3 -B -m unittest discover -s testing/embedded-beacon/scripts -p 'test_scoped_pubsub_tests.py' -v \
+            2>&1 | tee testing/embedded-beacon/artifacts/pubsub-copy-contracts.log
+      - name: Verify original provenance and prepare an independent test copy
+        run: |
+          python3 -B testing/embedded-beacon/scripts/scoped-pubsub-tests.py prepare \
+            --repository "$GITHUB_WORKSPACE" --temp-root "$RUNNER_TEMP" \
+            --artifacts testing/embedded-beacon/artifacts/pubsub
+      - name: Compile metrics tests and execute the complete binary inventory
+        run: |
+          python3 -B testing/embedded-beacon/scripts/scoped-pubsub-tests.py run \
+            --preparation testing/embedded-beacon/artifacts/pubsub/preparation.json
+      - name: Report exact complete transport regression evidence
+        if: always()
+        run: |
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          from pathlib import Path
+          gate = Path("testing/embedded-beacon/artifacts/pubsub/ci-gate.json")
+          if gate.exists():
+              result = json.loads(gate.read_text(encoding="utf-8"))
+              if result.get("accepted") is True:
+                  print(f"Scoped transport: {result['tests']} library tests passed with metrics; none failed, ignored or filtered.")
+                  print(f"Executable SHA-256: `{result['test_executable_sha256']}`.")
+                  print(f"Complete test-name SHA-256: `{result['test_names_sha256']}`.")
+                  print("Production manifests, lockfile and scoped source remained unchanged.")
+              else:
+                  print(f"Complete transport gate rejected: {result.get('error', result.get('source_verification_error', 'unknown error'))}")
+          else:
+              print("No terminal complete transport regression proof was produced.")
+          print("The copied test manifest alone restores quickcheck 1.0.3 and declares an independent workspace. The same compiled metrics binary supplies its full inventory and all terminal results.")
+          PY
+      - name: Preserve transport source provenance, isolated lock and all execution logs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: embedded-scoped-pubsub-regressions
+          path: |
+            testing/embedded-beacon/artifacts/pubsub
+            testing/embedded-beacon/artifacts/pubsub-copy-contracts.log
+          if-no-files-found: error
+          retention-days: 7
+  consensus:
+    name: Fresh complete primary and compliance corpus
+    runs-on: ubuntu-24.04
+    permissions:
+      id-token: write
+      contents: read
+    timeout-minutes: 360
+    env:
+      CARGO_BUILD_JOBS: "2"
+      RUST_MIN_STACK: "8388608"
+    steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@d5402286a7abdfb7232173b3228d56473feb8a66 # 2026-09-29T02-04-45Z-d5402286
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: tempoxyz/gh-actions/vendor/dtolnay/rust-toolchain@d5402286a7abdfb7232173b3228d56473feb8a66
+        with:
+          toolchain: "1.95"
+      - name: Install native build prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang lld libclang-dev cmake pkg-config
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          prefix-key: v1-embedded-consensus
+          cache-bin: false
+          cache-on-failure: true
+      - name: Verify bounded case scheduling, authenticated input guards and CLI parsing
+        run: cargo test --locked -p reth-embedded-beacon-spec-tests --lib --bin reth-embedded-beacon-spec-tests
+      - name: Check source preparation and strict complete report contracts
+        run: python3 -m unittest discover -s testing/embedded-beacon/scripts -p 'test_*consensus*fixtures.py' -v
+      - name: Resolve the latest published schema once and bind the original archives
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p testing/embedded-beacon/artifacts
+          python3 testing/embedded-beacon/scripts/published-consensus-fixtures.py resolve \
+            --release latest --output testing/embedded-beacon/artifacts/consensus-release-resolution.json \
+            > testing/embedded-beacon/artifacts/consensus-resolution-result.json
+          resolution_sha256=$(python3 -c 'import json; print(json.load(open("testing/embedded-beacon/artifacts/consensus-resolution-result.json"))["resolution_sha256"])')
+          echo "RESOLUTION_SHA256=$resolution_sha256" >> "$GITHUB_ENV"
+          python3 testing/embedded-beacon/scripts/published-consensus-fixtures.py prepare \
+            --resolution testing/embedded-beacon/artifacts/consensus-release-resolution.json \
+            --resolution-sha256 "$resolution_sha256" \
+            --work testing/embedded-beacon/spec-tests/downloads \
+            --output testing/embedded-beacon/spec-tests/fixtures/published \
+            > testing/embedded-beacon/artifacts/consensus-preparation-result.json
+          python3 - <<'PY' >> "$GITHUB_ENV"
+          import json
+          from pathlib import Path
+          result = json.loads(Path("testing/embedded-beacon/artifacts/consensus-preparation-result.json").read_text())
+          for name in ("source_record_sha256", "primary_manifest_sha256", "compliance_manifest_sha256"):
+              print(f"{name.upper()}={result[name]}")
+          PY
+          cp testing/embedded-beacon/spec-tests/fixtures/published/source-record.json testing/embedded-beacon/artifacts/consensus-source-record.json
+          cp testing/embedded-beacon/spec-tests/fixtures/published/primary-manifest.json testing/embedded-beacon/artifacts/consensus-primary-manifest.json
+          cp testing/embedded-beacon/spec-tests/fixtures/published/compliance-manifest.json testing/embedded-beacon/artifacts/consensus-compliance-manifest.json
+      - name: Execute every authenticated original case and independently verify the complete result
+        shell: bash
+        run: |
+          set +e
+          cargo run --locked --release -p reth-embedded-beacon-spec-tests -- run-authenticated-release \
+            --source-record testing/embedded-beacon/artifacts/consensus-source-record.json \
+            --source-record-sha256 "$SOURCE_RECORD_SHA256" \
+            --primary-fixtures testing/embedded-beacon/spec-tests/fixtures/published/primary \
+            --primary-manifest testing/embedded-beacon/artifacts/consensus-primary-manifest.json \
+            --primary-manifest-sha256 "$PRIMARY_MANIFEST_SHA256" \
+            --compliance-fixtures testing/embedded-beacon/spec-tests/fixtures/published/compliance \
+            --compliance-manifest testing/embedded-beacon/artifacts/consensus-compliance-manifest.json \
+            --compliance-manifest-sha256 "$COMPLIANCE_MANIFEST_SHA256" \
+            --json testing/embedded-beacon/artifacts/consensus-complete-results.json \
+            --junit testing/embedded-beacon/artifacts/consensus-complete-results.xml \
+            --authentication-workers 4 --case-workers 4 --progress-every 1024 \
+            2>&1 | tee testing/embedded-beacon/artifacts/consensus-complete-run.log
+          pipe_status=("${PIPESTATUS[@]}")
+          runner_status=${pipe_status[0]}
+          if [[ "${pipe_status[1]}" != "0" ]]; then
+            echo "Fixture log persistence failed" >&2
+            exit 1
+          fi
+          set -e
+          printf '%s\n' "$runner_status" > testing/embedded-beacon/artifacts/consensus-complete-run-status.txt
+          python3 testing/embedded-beacon/scripts/published-consensus-fixtures.py check \
+            --resolution testing/embedded-beacon/artifacts/consensus-release-resolution.json \
+            --resolution-sha256 "$RESOLUTION_SHA256" \
+            --source-record testing/embedded-beacon/artifacts/consensus-source-record.json \
+            --source-record-sha256 "$SOURCE_RECORD_SHA256" \
+            --work testing/embedded-beacon/spec-tests/downloads \
+            --primary-manifest testing/embedded-beacon/artifacts/consensus-primary-manifest.json \
+            --compliance-manifest testing/embedded-beacon/artifacts/consensus-compliance-manifest.json \
+            --report testing/embedded-beacon/artifacts/consensus-complete-results.json \
+            --runner-exit-code "$runner_status" \
+            --output testing/embedded-beacon/artifacts/consensus-complete-ci-gate.json
+      - name: Report complete fixture evidence and remaining runtime milestone
+        if: always()
+        run: |
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          from pathlib import Path
+          path = Path("testing/embedded-beacon/artifacts/consensus-complete-ci-gate.json")
+          if path.exists():
+              result = json.loads(path.read_text(encoding="utf-8"))
+              if result.get("accepted") is True:
+                  print(f"Release: {result['spec_release']}; original cases: {result['cases']}; all passed.")
+                  for source in result["corpora"]:
+                      print(f"{source['role']}: {source['files']} original file checks, {source['cases']} cases.")
+                  for marker in ("spec_only_bls_disabled", "spec_only_execution_mock", "spec_only_data_availability_mock", "spec_only_asserted_graph"):
+                      print(f"{marker}: {result[marker]}")
+              else:
+                  print(f"Complete fixture gate rejected: {result.get('error', 'unknown error')}")
+          else:
+              print("No terminal complete fixture proof was produced.")
+          print("This job requires one fresh exact full run. Expected-failure diagnostics and passing subsets cannot satisfy it. Independent runtime synchronization remains a separate milestone.")
+          PY
+      - name: Preserve original source provenance and complete JSON/JUnit evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: consensus-complete-fixtures
+          path: testing/embedded-beacon/artifacts
+          if-no-files-found: error
+          retention-days: 7
+
+  runtime:
+    name: Optional production node and launcher integration
+    runs-on: ubuntu-24.04
+    permissions:
+      id-token: write
+      contents: read
+    timeout-minutes: 180
+    env:
+      CARGO_BUILD_JOBS: "2"
+      RUST_MIN_STACK: "8388608"
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: clang
+      RUSTFLAGS: "-C link-arg=-fuse-ld=lld"
+    steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@d5402286a7abdfb7232173b3228d56473feb8a66 # 2026-09-29T02-04-45Z-d5402286
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: tempoxyz/gh-actions/vendor/dtolnay/rust-toolchain@d5402286a7abdfb7232173b3228d56473feb8a66 # 2026-09-29T02-04-45Z-d5402286
+        with:
+          toolchain: "1.95"
+      - name: Install native build prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang lld libclang-dev cmake pkg-config
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          prefix-key: v1-embedded-runtime
+          cache-bin: false
+          cache-on-failure: true
+      - name: Create bounded runtime diagnostics directory
+        run: mkdir -p testing/embedded-beacon/artifacts/runtime-ci
+      - name: Verify shared execution-pool ownership
+        run: |
+          cargo test --locked -p reth-embedded-beacon-shared-data --features reth --lib -- --test-threads=2 \
+            2>&1 | tee testing/embedded-beacon/artifacts/runtime-ci/shared-pool.log
+      - name: Verify production consensus admission, transport and recovery
+        run: |
+          cargo test --locked -p reth-embedded-beacon-node \
+            --features gossip-validation,peer-runtime,execution-verification,checkpoint-http,beacon-api \
+            --lib -- --test-threads=2 \
+            2>&1 | tee testing/embedded-beacon/artifacts/runtime-ci/node.log
+      - name: Verify feature-disabled launcher logging
+        run: |
+          cargo test --locked -p reth-embedded-beacon-launcher --no-default-features --test logging \
+            2>&1 | tee testing/embedded-beacon/artifacts/runtime-ci/logging.log
+      - name: Verify optional launcher profiles and runtime flags
+        run: |
+          cargo test --locked -p reth-embedded-beacon-launcher --features embedded-beacon \
+            --bin reth-embedded-beacon -- --test-threads=2 \
+            2>&1 | tee testing/embedded-beacon/artifacts/runtime-ci/launcher.log
+      - name: Verify real Engine API dispatch parity
+        run: |
+          cargo test --locked -p reth-embedded-beacon-execution-proxy --features integration-tests \
+            --test real_engine_parity -- --test-threads=1 \
+            2>&1 | tee testing/embedded-beacon/artifacts/runtime-ci/engine-parity.log
+      - name: Preserve optional runtime diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: embedded-beacon-runtime-regressions
+          path: testing/embedded-beacon/artifacts/runtime-ci
+          if-no-files-found: error
+          retention-days: 7

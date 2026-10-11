@@ -27,3 +27,13 @@
 
 # include example files
 !/examples
+
+# Embedded consensus packages stay in the source context; generated tests do not.
+/crates/embedded-beacon/*/work
+/testing/embedded-beacon/spec-tests/fixtures
+/testing/embedded-beacon/spec-tests/downloads
+/testing/embedded-beacon/artifacts
+/testing/embedded-beacon/*/work
+/testing/embedded-beacon/devnet/package/vendor
+**/__pycache__
+**/*.pyc

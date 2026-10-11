@@ -1,0 +1,26 @@
+{
+  "kind": "published_raw_ssz_fixture_case",
+  "spec_release": "v1.7.0-beta.3",
+  "archive": {
+    "name": "minimal.tar.gz",
+    "sha256": "b26832555fa5a67cc3964bf140ae99cb662f8045d6d205993e3fa27feb39ca6f",
+    "bytes": 468862009
+  },
+  "original_case": "minimal/altair/fork_choice/on_block/pyspec_tests/basic",
+  "transformation": "Raw Snappy decompression only; no field modifications.",
+  "published_compressed_sha256": {
+    "minimal/altair/fork_choice/on_block/pyspec_tests/basic/anchor_block.ssz_snappy": "0x4ef85f6f459d2d7ef174f08fb1beaa844261865aa1d29f081ee38f43041bfd76",
+    "minimal/altair/fork_choice/on_block/pyspec_tests/basic/anchor_state.ssz_snappy": "0x0e6a1424a86c9b8976c65bed746dbf4f2d6670bdce604fffd8408c3c00ad79b3",
+    "minimal/altair/fork_choice/on_block/pyspec_tests/basic/block_0xd8073ffdd11c559cb3d12141c5a5253b92dcf6d22deb5316704dba72313e1380.ssz_snappy": "0x4857e34c27c3e6a0f08197b65edf3853545a17b05871872cdd70ca521bece766",
+    "minimal/altair/fork_choice/on_block/pyspec_tests/basic/block_0xf01d17ac7ecfd1a489b991cf344c66339dfeba528189696ce98249178ce2c751.ssz_snappy": "0xbad7cf50a1124796cb5dfadf6a995d9dc335278b70627545aba95f9d44169cea",
+    "minimal/altair/fork_choice/on_block/pyspec_tests/basic/manifest.yaml": "0xa6363282cd1caa8776186a1d800f8b3a3f83c4c4f003698ca15345876651d64e",
+    "minimal/altair/fork_choice/on_block/pyspec_tests/basic/steps.yaml": "0x158de6e176be17f23398c828446ec2171ede05c6b10f0579b28c813ad5e81926"
+  },
+  "canonical_ssz_sha256": {
+    "anchor_block.ssz": "0xce4bb787b48ec51b591af4a3d3428fbdf626de2429b80dc9fa0dd8d0fd3df39f",
+    "anchor_state.ssz": "0x5053e66192d7f85dcdfcf46c51fb558c7167a1bd7dcb1e4daf9a26314f3424d5",
+    "block_0xd8073ffdd11c559cb3d12141c5a5253b92dcf6d22deb5316704dba72313e1380.ssz": "0x20d9dbdfb3f9a4b8fbde1c1c9f7e85a8ed3605b76477a505208f500107d92c2f",
+    "block_0xf01d17ac7ecfd1a489b991cf344c66339dfeba528189696ce98249178ce2c751.ssz": "0x467c2677b18364d71431f77876be65f07dc364bd68c9204c0ef4f55c132fa37c"
+  },
+  "complete_conformance": false
+}

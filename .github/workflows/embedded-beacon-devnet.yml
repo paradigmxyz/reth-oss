@@ -1,0 +1,139 @@
+name: Embedded beacon independent devnet
+
+# Manual scaffold until strict full CL conformance and local independent sync both pass.
+# Enable automatic sync checks only after those milestones; expected failures cannot unlock them.
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build custom launcher and Engine API parity tests
+    runs-on: ubuntu-24.04
+    permissions:
+      id-token: write
+      contents: read
+    timeout-minutes: 100
+    steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@d5402286a7abdfb7232173b3228d56473feb8a66 # 2026-09-29T02-04-45Z-d5402286
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Verify archive cache failure handling
+        run: python3 -m unittest discover -s testing/embedded-beacon/devnet/package -p 'test_*.py' -v
+      - name: Verify independent deployment and HTTP evidence contracts
+        run: python3 -Werror::ResourceWarning -m unittest discover -s testing/embedded-beacon/devnet/checks -p 'test_*.py' -v
+      - name: Build the custom launcher image
+        env:
+          BEACON_IMAGE: embedded-beacon:test
+          BEACON_BUILD_JOBS: "2"
+        run: bash testing/embedded-beacon/scripts/docker-build.sh
+      - name: Run component tests in the same Linux build
+        run: bash testing/embedded-beacon/scripts/docker-check.sh component-tests
+      - name: Verify bounded authenticated peer transport on Linux
+        run: bash testing/embedded-beacon/scripts/docker-check.sh peer-transport
+      - name: Verify discovery, QUIC and TCP interoperability on Linux
+        run: bash testing/embedded-beacon/scripts/docker-check.sh peer-discovery
+      - name: Verify execution-pool shared retention on Linux
+        run: bash testing/embedded-beacon/scripts/docker-check.sh shared-pool
+      - name: Verify checkpoint peer startup and mandatory typed execution validation
+        run: bash testing/embedded-beacon/scripts/docker-check.sh node-integration
+      - name: Verify native launcher flags, portable logging and minimal profiles
+        run: bash testing/embedded-beacon/scripts/docker-check.sh launcher-profile
+      - name: Run real Engine API dispatch parity tests
+        run: bash testing/embedded-beacon/scripts/docker-check.sh engine-parity
+      - name: Save the built image for isolated devnets
+        run: |
+          docker save embedded-beacon:test -o testing/embedded-beacon/artifacts/ci-image.tar
+          sha256sum testing/embedded-beacon/artifacts/ci-image.tar > testing/embedded-beacon/artifacts/ci-image.sha256
+      - name: Upload image and readiness
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: embedded-beacon-image
+          path: |
+            testing/embedded-beacon/artifacts/ci-image.tar
+            testing/embedded-beacon/artifacts/ci-image.sha256
+            testing/embedded-beacon/artifacts/docker-readiness.json
+            testing/embedded-beacon/artifacts/docker-image-id.txt
+          compression-level: 0
+          retention-days: 3
+          if-no-files-found: error
+      - name: Preserve build diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: embedded-beacon-build-diagnostics
+          path: testing/embedded-beacon/artifacts/*.log
+          retention-days: 7
+
+  independent:
+    name: Reference pair versus independent embedded node / ${{ matrix.profile }}
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      id-token: write
+      contents: read
+    timeout-minutes: 50
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [historical, gloas-transition, gloas-genesis]
+    steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@d5402286a7abdfb7232173b3228d56473feb8a66 # 2026-09-29T02-04-45Z-d5402286
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Download the tested custom image
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: embedded-beacon-image
+          path: testing/embedded-beacon/artifacts
+      - name: Verify and load the tested image
+        run: |
+          sha256sum --check testing/embedded-beacon/artifacts/ci-image.sha256
+          docker load --input testing/embedded-beacon/artifacts/ci-image.tar
+          rm testing/embedded-beacon/artifacts/ci-image.tar
+      - name: Install the pinned local Kurtosis CLI and engine
+        run: bash testing/embedded-beacon/scripts/install-kurtosis-local.sh
+      - name: Verify finalized blocks, fork transitions and transaction receipts
+        env:
+          BEACON_IMAGE: embedded-beacon:test
+        run: bash testing/embedded-beacon/devnet/run.sh '${{ matrix.profile }}'
+      - name: Record the independent readiness limitation
+        if: always()
+        run: |
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          from pathlib import Path
+          path = Path("testing/embedded-beacon/artifacts/docker-readiness.json")
+          print("This job requires one reference pair and one independent embedded node. Missing runtime components fail before deployment; earlier external-consensus baselines cannot satisfy this test.")
+          if path.exists():
+              readiness = json.loads(path.read_text())
+              print("\n| Required embedded component | Implemented |\n| --- | --- |")
+              for key, value in readiness.items():
+                  if key != "target_fork":
+                      print(f"| {key} | {value} |")
+          PY
+      - name: Preserve reports and container logs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: embedded-beacon-devnet-${{ matrix.profile }}
+          path: |
+            testing/embedded-beacon/artifacts
+            testing/embedded-beacon/devnet/package/pins.json
+            testing/embedded-beacon/devnet/package/schedules
+            testing/embedded-beacon/devnet/package/vendor/embedded-lock.json
+          retention-days: 7
+          if-no-files-found: error

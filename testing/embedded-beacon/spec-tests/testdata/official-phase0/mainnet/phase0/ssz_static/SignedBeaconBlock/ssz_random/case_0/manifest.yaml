@@ -1,0 +1,6 @@
+preset: mainnet
+fork: phase0
+runner: ssz_static
+handler: SignedBeaconBlock
+suite: ssz_random
+case: case_0

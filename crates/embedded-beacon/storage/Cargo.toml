@@ -1,0 +1,27 @@
+[package]
+name = "reth-embedded-beacon-storage"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Isolated atomic metadata and snapshot storage for embedded beacon"
+
+[lints]
+workspace = true
+
+[dependencies]
+reth-embedded-beacon-shared-data.workspace = true
+reth-embedded-beacon-state-transition.workspace = true
+reth-embedded-beacon-primitives.workspace = true
+parking_lot.workspace = true
+reth-fs-util.workspace = true
+serde = { workspace = true, features = ["derive"] }
+sha2.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+reth-embedded-beacon-shared-data = { workspace = true, features = ["test-utils"] }
+tempfile.workspace = true
+
+[features]
+default = []

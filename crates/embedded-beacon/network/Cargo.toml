@@ -1,0 +1,44 @@
+[package]
+name = "reth-embedded-beacon-network"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[features]
+default = []
+transport = [
+    "dep:libp2p",
+    "dep:libp2p-mplex",
+    "dep:libp2p-gossipsub",
+    "dep:prometheus-client",
+    "dep:futures",
+    "dep:tokio",
+    "dep:async-trait",
+    "dep:reth-embedded-beacon-state-transition",
+]
+discovery = ["transport", "dep:discv5", "dep:bytes"]
+
+[dependencies]
+reth-embedded-beacon-primitives.workspace = true
+reth-embedded-beacon-config.workspace = true
+snap.workspace = true
+thiserror.workspace = true
+
+# transport
+reth-embedded-beacon-state-transition = { workspace = true, optional = true }
+libp2p = { workspace = true, optional = true, features = ["tcp", "quic", "noise", "yamux", "tokio", "secp256k1", "request-response", "macros"] }
+libp2p-mplex = { workspace = true, optional = true }
+libp2p-gossipsub = { path = "../gossipsub", version = "=0.49.5", optional = true, features = ["metrics"] }
+prometheus-client = { version = "=0.23.1", optional = true }
+discv5 = { workspace = true, optional = true }
+bytes = { workspace = true, optional = true }
+futures = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true, features = ["macros", "time", "rt-multi-thread"] }
+async-trait = { workspace = true, optional = true }
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints]
+workspace = true

@@ -104,13 +104,16 @@ blockchain_test!(invalid_blocks, InvalidBlocks);
 #[test]
 fn eest_fixtures() {
     reth_tracing::init_test_tracing();
-    let suite_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("execution-spec-tests")
-        .join("blockchain_tests");
-
-    if !suite_path.exists() {
-        return;
-    }
+    let suite_path = execution_fixture_path();
 
     BlockchainTests::new(suite_path).run();
+}
+
+/// The explicit override points directly at the blockchain_tests directory.
+fn execution_fixture_path() -> PathBuf {
+    std::env::var_os("RETH_EEST_FIXTURES").map(PathBuf::from).unwrap_or_else(|| {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("execution-spec-tests")
+            .join("blockchain_tests")
+    })
 }

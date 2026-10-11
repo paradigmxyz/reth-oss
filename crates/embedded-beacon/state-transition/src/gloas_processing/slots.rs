@@ -1,0 +1,266 @@
+//! Incremental Gloas root-ring updates for empty-slot replay.
+
+use super::{epochs, position, transact, BeaconState, Constants, GloasParameters, ProcessingError};
+use crate::{phase0_processing::slot_cache::RootTree, ssz::Ssz};
+use reth_embedded_beacon_primitives::{progressive_container_root, uint64_root, Root};
+
+mod gossip_replay;
+pub use gossip_replay::replay_slots;
+
+pub(super) struct SlotCache {
+    fields: [Root; 46],
+    block_roots: RootTree,
+    state_roots: RootTree,
+    randao_mixes: RootTree,
+    availability: RootTree,
+    constants: Constants,
+}
+
+impl SlotCache {
+    pub(super) fn new(state: &BeaconState, constants: &Constants) -> Result<Self, ProcessingError> {
+        let preset = constants.preset();
+        let block_roots = RootTree::new(&state.block_roots.values)?;
+        let state_roots = RootTree::new(&state.state_roots.values)?;
+        let randao_mixes = RootTree::new(&state.randao_mixes.values)?;
+        let chunks = state
+            .execution_payload_availability
+            .bits
+            .as_ssz()
+            .chunks(32)
+            .map(|bytes| {
+                let mut chunk = [0; 32];
+                chunk[..bytes.len()].copy_from_slice(bytes);
+                chunk
+            })
+            .collect::<Vec<_>>();
+        let availability = RootTree::new(&chunks)?;
+        // Exact complete Gloas field order; all other fields are rebuilt after every epoch.
+        let fields = [
+            uint64_root(state.genesis_time),
+            state.genesis_validators_root,
+            uint64_root(state.slot),
+            state.fork.hash_tree_root(preset)?,
+            state.latest_block_header.hash_tree_root(),
+            block_roots.root(),
+            state_roots.root(),
+            state.historical_roots.hash_tree_root(preset)?,
+            state.eth1_data.hash_tree_root(preset)?,
+            state.eth1_data_votes.hash_tree_root(preset)?,
+            uint64_root(state.eth1_deposit_index),
+            state.validators.hash_tree_root(preset)?,
+            state.balances.hash_tree_root(preset)?,
+            randao_mixes.root(),
+            state.slashings.hash_tree_root(preset)?,
+            state.previous_epoch_participation.hash_tree_root(preset)?,
+            state.current_epoch_participation.hash_tree_root(preset)?,
+            state.justification_bits.hash_tree_root(preset)?,
+            Ssz::hash_tree_root(&state.previous_justified_checkpoint, preset)?,
+            Ssz::hash_tree_root(&state.current_justified_checkpoint, preset)?,
+            Ssz::hash_tree_root(&state.finalized_checkpoint, preset)?,
+            state.inactivity_scores.hash_tree_root(preset)?,
+            state.current_sync_committee.hash_tree_root(preset)?,
+            state.next_sync_committee.hash_tree_root(preset)?,
+            state.latest_block_hash,
+            uint64_root(state.next_withdrawal_index),
+            uint64_root(state.next_withdrawal_validator_index),
+            state.historical_summaries.hash_tree_root(preset)?,
+            uint64_root(state.deposit_requests_start_index),
+            uint64_root(state.deposit_balance_to_consume),
+            uint64_root(state.exit_balance_to_consume),
+            uint64_root(state.earliest_exit_epoch),
+            uint64_root(state.consolidation_balance_to_consume),
+            uint64_root(state.earliest_consolidation_epoch),
+            state.pending_deposits.hash_tree_root(preset)?,
+            state.pending_partial_withdrawals.hash_tree_root(preset)?,
+            state.pending_consolidations.hash_tree_root(preset)?,
+            state.proposer_lookahead.hash_tree_root(preset)?,
+            state.builders.hash_tree_root(preset)?,
+            uint64_root(state.next_withdrawal_builder_index),
+            availability.root(),
+            state.builder_pending_payments.hash_tree_root(preset)?,
+            state.builder_pending_withdrawals.hash_tree_root(preset)?,
+            state.latest_execution_payload_bid.hash_tree_root(preset)?,
+            state.payload_expected_withdrawals.hash_tree_root(preset)?,
+            state.ptc_window.hash_tree_root(preset)?,
+        ];
+        Ok(Self {
+            fields,
+            block_roots,
+            state_roots,
+            randao_mixes,
+            availability,
+            constants: *constants,
+        })
+    }
+
+    pub(super) fn root(&self) -> Result<Root, ProcessingError> {
+        Ok(progressive_container_root(&self.fields, &[true; 46])?)
+    }
+
+    pub(super) fn process_slot(&mut self, state: &mut BeaconState) -> Result<(), ProcessingError> {
+        let index = position(state.slot, self.constants.historical_slots)?;
+        let previous_state_root = self.root()?;
+        *state
+            .state_roots
+            .values
+            .get_mut(index)
+            .ok_or(ProcessingError::InvalidState("state-root ring is truncated"))? =
+            previous_state_root;
+        self.state_roots.update(index, previous_state_root)?;
+        if state.latest_block_header.state_root == [0; 32] {
+            state.latest_block_header.state_root = previous_state_root;
+            self.fields[4] = state.latest_block_header.hash_tree_root();
+        }
+        let block_root = state.latest_block_header.hash_tree_root();
+        *state
+            .block_roots
+            .values
+            .get_mut(index)
+            .ok_or(ProcessingError::InvalidState("block-root ring is truncated"))? = block_root;
+        self.block_roots.update(index, block_root)?;
+        self.fields[5] = self.block_roots.root();
+        self.fields[6] = self.state_roots.root();
+        let next = position(
+            super::add(state.slot, 1, "availability next slot")?,
+            self.constants.historical_slots,
+        )?;
+        state.execution_payload_availability.bits.set(next, false)?;
+        let chunk_index = next / 256;
+        let bytes = state.execution_payload_availability.bits.as_ssz();
+        let start = chunk_index * 32;
+        let end = (start + 32).min(bytes.len());
+        let mut chunk = [0; 32];
+        chunk[..end - start].copy_from_slice(&bytes[start..end]);
+        self.availability.update(chunk_index, chunk)?;
+        self.fields[40] = self.availability.root();
+        Ok(())
+    }
+
+    pub(super) fn refresh_epoch(&mut self, state: &BeaconState) -> Result<(), ProcessingError> {
+        let preset = self.constants.preset();
+        // Gloas epochs only overwrite the next RANDAO entry; unchanged roots remain shared.
+        let next = super::add(state.slot / self.constants.slots_per_epoch, 1, "cached next epoch")?;
+        let index = position(next, self.constants.historical_epochs)?;
+        let mix = *state
+            .randao_mixes
+            .values
+            .get(index)
+            .ok_or(ProcessingError::InvalidState("RANDAO ring is truncated"))?;
+        self.randao_mixes.update(index, mix)?;
+        self.fields[7] = state.historical_roots.hash_tree_root(preset)?;
+        self.fields[9] = state.eth1_data_votes.hash_tree_root(preset)?;
+        self.fields[11] = state.validators.hash_tree_root(preset)?;
+        self.fields[12] = state.balances.hash_tree_root(preset)?;
+        self.fields[13] = self.randao_mixes.root();
+        self.fields[14] = state.slashings.hash_tree_root(preset)?;
+        self.fields[15] = state.previous_epoch_participation.hash_tree_root(preset)?;
+        self.fields[16] = state.current_epoch_participation.hash_tree_root(preset)?;
+        self.fields[17] = state.justification_bits.hash_tree_root(preset)?;
+        self.fields[18] = Ssz::hash_tree_root(&state.previous_justified_checkpoint, preset)?;
+        self.fields[19] = Ssz::hash_tree_root(&state.current_justified_checkpoint, preset)?;
+        self.fields[20] = Ssz::hash_tree_root(&state.finalized_checkpoint, preset)?;
+        self.fields[21] = state.inactivity_scores.hash_tree_root(preset)?;
+        self.fields[22] = state.current_sync_committee.hash_tree_root(preset)?;
+        self.fields[23] = state.next_sync_committee.hash_tree_root(preset)?;
+        self.fields[27] = state.historical_summaries.hash_tree_root(preset)?;
+        self.fields[29] = uint64_root(state.deposit_balance_to_consume);
+        self.fields[30] = uint64_root(state.exit_balance_to_consume);
+        self.fields[31] = uint64_root(state.earliest_exit_epoch);
+        self.fields[32] = uint64_root(state.consolidation_balance_to_consume);
+        self.fields[33] = uint64_root(state.earliest_consolidation_epoch);
+        self.fields[34] = state.pending_deposits.hash_tree_root(preset)?;
+        self.fields[35] = state.pending_partial_withdrawals.hash_tree_root(preset)?;
+        self.fields[36] = state.pending_consolidations.hash_tree_root(preset)?;
+        self.fields[37] = state.proposer_lookahead.hash_tree_root(preset)?;
+        self.fields[38] = state.builders.hash_tree_root(preset)?;
+        self.fields[39] = uint64_root(state.next_withdrawal_builder_index);
+        self.fields[41] = state.builder_pending_payments.hash_tree_root(preset)?;
+        self.fields[42] = state.builder_pending_withdrawals.hash_tree_root(preset)?;
+        self.fields[43] = state.latest_execution_payload_bid.hash_tree_root(preset)?;
+        self.fields[44] = state.payload_expected_withdrawals.hash_tree_root(preset)?;
+        self.fields[45] = state.ptc_window.hash_tree_root(preset)?;
+        Ok(())
+    }
+
+    pub(super) fn advance_slot(&mut self, slot: u64) {
+        self.fields[2] = uint64_root(slot);
+    }
+}
+
+/// Cache the exact complete pre-state root and fill the latest header once.
+pub fn process_slot(
+    state: &mut BeaconState,
+    parameters: &GloasParameters,
+) -> Result<(), ProcessingError> {
+    transact(state, parameters, slot_kernel)
+}
+/// Replay empty slots with exact complete Gloas epochs and all 46 field commitments.
+pub fn process_slots(
+    state: &mut BeaconState,
+    target_slot: u64,
+    parameters: &GloasParameters,
+) -> Result<(), ProcessingError> {
+    transact(state, parameters, |candidate, constants| {
+        slots_kernel(candidate, target_slot, parameters, constants)
+    })
+}
+
+#[cfg(feature = "spec-tests")]
+pub(crate) fn process_slots_with_policy<const VERIFY_BLS: bool>(
+    state: &mut BeaconState,
+    target_slot: u64,
+    parameters: &GloasParameters,
+) -> Result<(), ProcessingError> {
+    crate::common::require_signature_policy::<VERIFY_BLS>()?;
+    transact(state, parameters, |candidate, constants| {
+        slots_kernel_with_policy::<VERIFY_BLS>(candidate, target_slot, parameters, constants)
+    })
+}
+pub(super) fn slot_kernel(
+    state: &mut BeaconState,
+    constants: &Constants,
+) -> Result<(), ProcessingError> {
+    let root = state.hash_tree_root(constants.preset())?;
+    let index = position(state.slot, constants.historical_slots)?;
+    state.state_roots.values[index] = root;
+    if state.latest_block_header.state_root == [0; 32] {
+        state.latest_block_header.state_root = root;
+    }
+    state.block_roots.values[index] = state.latest_block_header.hash_tree_root();
+    let next =
+        position(super::add(state.slot, 1, "availability next slot")?, constants.historical_slots)?;
+    state.execution_payload_availability.bits.set(next, false)?;
+    Ok(())
+}
+pub(super) fn slots_kernel(
+    state: &mut BeaconState,
+    target_slot: u64,
+    parameters: &GloasParameters,
+    constants: &Constants,
+) -> Result<(), ProcessingError> {
+    slots_kernel_with_policy::<true>(state, target_slot, parameters, constants)
+}
+
+pub(super) fn slots_kernel_with_policy<const VERIFY_BLS: bool>(
+    state: &mut BeaconState,
+    target_slot: u64,
+    parameters: &GloasParameters,
+    constants: &Constants,
+) -> Result<(), ProcessingError> {
+    crate::common::require_signature_policy::<VERIFY_BLS>()?;
+    if state.slot >= target_slot {
+        return Err(ProcessingError::SlotNotIncreasing { current: state.slot, target: target_slot })
+    }
+    let mut cache = SlotCache::new(state, constants)?;
+    while state.slot < target_slot {
+        cache.process_slot(state)?;
+        let next = super::add(state.slot, 1, "next slot")?;
+        if next.is_multiple_of(constants.slots_per_epoch) {
+            epochs::epoch_kernel_with_policy::<VERIFY_BLS>(state, parameters, constants)?;
+            cache.refresh_epoch(state)?;
+        }
+        state.slot = next;
+        cache.advance_slot(next);
+    }
+    Ok(())
+}

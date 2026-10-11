@@ -1,0 +1,22 @@
+[package]
+name = "reth-embedded-beacon-fork-choice"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = []
+spec-tests = ["reth-embedded-beacon-state-transition/spec-tests"]
+
+[dependencies]
+reth-embedded-beacon-crypto.workspace = true
+reth-embedded-beacon-primitives.workspace = true
+reth-embedded-beacon-state-transition.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+blst = "0.3.16"

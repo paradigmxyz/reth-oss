@@ -10,6 +10,7 @@ exclude = [".github/"]
 [workspace]
 members = [
     "bin/reth-bb/",
+    "bin/reth-embedded-beacon/",
     "bin/reth/",
     "crates/storage/rpc-provider/",
     "crates/chain-state/",
@@ -23,6 +24,18 @@ members = [
     "crates/consensus/consensus/",
     "crates/consensus/debug-client/",
     "crates/e2e-test-utils/",
+    "crates/embedded-beacon/config/",
+    "crates/embedded-beacon/crypto/",
+    "crates/embedded-beacon/data-availability/",
+    "crates/embedded-beacon/execution-proxy/",
+    "crates/embedded-beacon/fork-choice/",
+    "crates/embedded-beacon/network/",
+    "crates/embedded-beacon/node/",
+    "crates/embedded-beacon/primitives/",
+    "crates/embedded-beacon/shared-data/",
+    "crates/embedded-beacon/state-transition/",
+    "crates/embedded-beacon/storage/",
+    "crates/embedded-beacon/sync/",
     "crates/engine/invalid-block-hooks/",
     "crates/engine/local",
     "crates/engine/primitives/",
@@ -147,12 +160,13 @@ members = [
     "examples/txpool-tracing/",
     "examples/custom-beacon-withdrawals",
     "testing/ef-tests/",
+    "testing/embedded-beacon/spec-tests/",
     "testing/testing-utils",
     "testing/runner",
     "crates/tracing-otlp",
 ]
 default-members = ["bin/reth"]
-exclude = ["docs/cli"]
+exclude = ["docs/cli", "crates/embedded-beacon/gossipsub"]
 
 # Explicitly set the resolver to version 2, which is the default for packages with edition >= 2021
 # https://doc.rust-lang.org/edition-guide/rust-2021/default-cargo-resolver.html
@@ -272,6 +286,10 @@ proptest.opt-level = 3
 rand_chacha.opt-level = 3
 rand_xorshift.opt-level = 3
 unarray.opt-level = 3
+# Full beacon state authentication remains practical in development builds.
+# These optional workspace crates do not affect standalone execution node builds.
+reth-embedded-beacon-primitives.opt-level = 3
+reth-embedded-beacon-state-transition.opt-level = 1
 
 # Meant for testing - all optimizations, but with debug assertions and overflow checks.
 [profile.hivetests]
@@ -338,6 +356,18 @@ reth-discv5 = { path = "crates/net/discv5" }
 reth-dns-discovery = { path = "crates/net/dns" }
 reth-downloaders = { path = "crates/net/downloaders" }
 reth-e2e-test-utils = { path = "crates/e2e-test-utils" }
+reth-embedded-beacon-config = { path = "crates/embedded-beacon/config" }
+reth-embedded-beacon-crypto = { path = "crates/embedded-beacon/crypto" }
+reth-embedded-beacon-data-availability = { path = "crates/embedded-beacon/data-availability" }
+reth-embedded-beacon-execution-proxy = { path = "crates/embedded-beacon/execution-proxy" }
+reth-embedded-beacon-fork-choice = { path = "crates/embedded-beacon/fork-choice" }
+reth-embedded-beacon-network = { path = "crates/embedded-beacon/network" }
+reth-embedded-beacon-node = { path = "crates/embedded-beacon/node" }
+reth-embedded-beacon-primitives = { path = "crates/embedded-beacon/primitives" }
+reth-embedded-beacon-shared-data = { path = "crates/embedded-beacon/shared-data" }
+reth-embedded-beacon-state-transition = { path = "crates/embedded-beacon/state-transition" }
+reth-embedded-beacon-storage = { path = "crates/embedded-beacon/storage" }
+reth-embedded-beacon-sync = { path = "crates/embedded-beacon/sync" }
 reth-ecies = { path = "crates/net/ecies" }
 reth-engine-local = { path = "crates/engine/local" }
 reth-execution-cache = { path = "crates/engine/execution-cache" }
@@ -495,6 +525,8 @@ imbl = "7"
 humantime-serde = "1.1"
 itertools = { version = "0.14", default-features = false }
 linked_hash_set = "0.1"
+libp2p = { version = "=0.56.0", default-features = false }
+libp2p-mplex = "=0.43.1"
 libc = "0.2"
 lz4 = "1.28.1"
 modular-bitfield = "0.13.1"
@@ -520,6 +552,7 @@ tracing = { version = "0.1.0", default-features = false, features = ["attributes
 tracing-appender = "0.2.5"
 url = { version = "2.3", default-features = false }
 zstd = "0.13"
+zeroize = "1.8"
 byteorder = "1"
 fixed-cache = { version = "0.1.10", default-features = false, features = ["alloc"] }
 moka = "0.12"

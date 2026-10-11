@@ -4,6 +4,8 @@ use std::{fmt, fmt::Display};
 use tracing_appender::non_blocking::NonBlocking;
 use tracing_subscriber::{layer::Filter, Layer, Registry};
 
+mod target_color;
+
 /// Represents the logging format.
 ///
 /// This enum defines the supported formats for logging output.
@@ -46,6 +48,20 @@ impl LogFormat {
     where
         F: Filter<Registry> + Send + Sync + 'static,
     {
+        self.apply_with_bright_cyan_target(filter, color, show_target, file_writer, None)
+    }
+
+    pub(crate) fn apply_with_bright_cyan_target<F>(
+        &self,
+        filter: F,
+        color: Option<String>,
+        show_target: bool,
+        file_writer: Option<NonBlocking>,
+        bright_cyan_target: Option<&'static str>,
+    ) -> BoxedLayer<Registry>
+    where
+        F: Filter<Registry> + Send + Sync + 'static,
+    {
         let ansi = if let Some(color) = color {
             std::env::var("RUST_LOG_STYLE").map(|val| val != "never").unwrap_or(color != "never")
         } else {
@@ -73,6 +89,18 @@ impl LogFormat {
                 }
             }
             Self::Terminal => {
+                if file_writer.is_none() &&
+                    let Some(bright_cyan_target) = bright_cyan_target
+                {
+                    return tracing_subscriber::fmt::layer()
+                        .event_format(target_color::BrightCyanTargetFormat::new(
+                            bright_cyan_target,
+                            target,
+                        ))
+                        .with_ansi(ansi)
+                        .with_filter(filter)
+                        .boxed();
+                }
                 let layer = tracing_subscriber::fmt::layer().with_ansi(ansi).with_target(target);
                 if let Some(writer) = file_writer {
                     layer.with_writer(writer).with_filter(filter).boxed()

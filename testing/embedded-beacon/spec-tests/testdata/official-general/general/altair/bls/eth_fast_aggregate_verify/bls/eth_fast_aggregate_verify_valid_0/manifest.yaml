@@ -1,0 +1,6 @@
+preset: general
+fork: altair
+runner: bls
+handler: eth_fast_aggregate_verify
+suite: bls
+case: eth_fast_aggregate_verify_valid_0

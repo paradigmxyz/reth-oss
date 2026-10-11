@@ -1,0 +1,64 @@
+- checks:
+    head:
+      slot: 0
+      root: '0xdd79fae2e505861809a1639e91209b76d38b6191376c9816604fe86599866873'
+- {tick: 6}
+- checks:
+    time: 6
+    head:
+      slot: 0
+      root: '0xdd79fae2e505861809a1639e91209b76d38b6191376c9816604fe86599866873'
+    justified_checkpoint:
+      epoch: 0
+      root: '0xdd79fae2e505861809a1639e91209b76d38b6191376c9816604fe86599866873'
+    finalized_checkpoint:
+      epoch: 0
+      root: '0xdd79fae2e505861809a1639e91209b76d38b6191376c9816604fe86599866873'
+    proposer_boost_root: '0x0000000000000000000000000000000000000000000000000000000000000000'
+- {block: 
+    block_0xaea2b6221e3b407d02eaa6c7f5db5ee16417f6a1c2ee7a7bbed35a639122b9ea, 
+    valid: true}
+- checks:
+    time: 6
+    head:
+      slot: 1
+      root: '0xaea2b6221e3b407d02eaa6c7f5db5ee16417f6a1c2ee7a7bbed35a639122b9ea'
+    justified_checkpoint:
+      epoch: 0
+      root: '0xdd79fae2e505861809a1639e91209b76d38b6191376c9816604fe86599866873'
+    finalized_checkpoint:
+      epoch: 0
+      root: '0xdd79fae2e505861809a1639e91209b76d38b6191376c9816604fe86599866873'
+    proposer_boost_root: '0xaea2b6221e3b407d02eaa6c7f5db5ee16417f6a1c2ee7a7bbed35a639122b9ea'
+- {tick: 12}
+- checks:
+    time: 12
+    head:
+      slot: 1
+      root: '0xaea2b6221e3b407d02eaa6c7f5db5ee16417f6a1c2ee7a7bbed35a639122b9ea'
+    justified_checkpoint:
+      epoch: 0
+      root: '0xdd79fae2e505861809a1639e91209b76d38b6191376c9816604fe86599866873'
+    finalized_checkpoint:
+      epoch: 0
+      root: '0xdd79fae2e505861809a1639e91209b76d38b6191376c9816604fe86599866873'
+    proposer_boost_root: '0x0000000000000000000000000000000000000000000000000000000000000000'
+- {block: 
+    block_0xd67277dd28eee02b0be87a91979ffb54b074ec3cabb2388c74f7e0117ce29518, 
+    valid: true}
+- checks:
+    time: 12
+    head:
+      slot: 2
+      root: '0xd67277dd28eee02b0be87a91979ffb54b074ec3cabb2388c74f7e0117ce29518'
+    justified_checkpoint:
+      epoch: 0
+      root: '0xdd79fae2e505861809a1639e91209b76d38b6191376c9816604fe86599866873'
+    finalized_checkpoint:
+      epoch: 0
+      root: '0xdd79fae2e505861809a1639e91209b76d38b6191376c9816604fe86599866873'
+    proposer_boost_root: '0xd67277dd28eee02b0be87a91979ffb54b074ec3cabb2388c74f7e0117ce29518'
+- checks:
+    head:
+      slot: 2
+      root: '0xd67277dd28eee02b0be87a91979ffb54b074ec3cabb2388c74f7e0117ce29518'

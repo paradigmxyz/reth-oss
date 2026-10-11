@@ -1,0 +1,73 @@
+{
+  "schema_version": 1,
+  "provider": "ethPandaOps",
+  "provider_documentation": "https://ethpandaops.io/docs/tooling/checkpointz/",
+  "mainnet_access_documentation": "https://ethpandaops.io/docs/guides/client-developers/api-access/",
+  "metadata_basis": "Canonical registry metadata supplies fork configuration and signed bootstrap records; checkpoint trust is selected separately.",
+  "networks": {
+    "mainnet": {
+      "chain_id": 1,
+      "genesis_time": 1606824023,
+      "genesis_validators_root": "0x4b363db94e286120d76eb905340fdd4e54bfe9f06bf33ff6cf5ad27f511bfe95",
+      "genesis_fork_version": "0x00000000",
+      "checkpoint_url": "https://beacon.mainnet.ethpandaops.io",
+      "checkpoint_access": "provider_api_key_required",
+      "registry": {
+        "repository": "eth-clients/eth2-networks",
+        "branch": "master",
+        "directory": "shared/mainnet",
+        "files": [
+          "config.yaml",
+          "bootstrap_nodes.txt"
+        ],
+        "genesis_file": "genesis.ssz"
+      }
+    },
+    "hoodi": {
+      "chain_id": 560048,
+      "genesis_time": 1742213400,
+      "genesis_validators_root": "0x212f13fc4df078b6cb7db228f1c8307566dcecf900867401a92023d7ba99cb5f",
+      "genesis_fork_version": "0x10000910",
+      "checkpoint_url": "https://checkpoint-sync.hoodi.ethpandaops.io",
+      "checkpoint_access": "public",
+      "registry": {
+        "repository": "eth-clients/hoodi",
+        "branch": "main",
+        "directory": "metadata",
+        "files": [
+          "config.yaml",
+          "genesis_validators_root.txt",
+          "bootstrap_nodes.yaml"
+        ],
+        "genesis_file": "genesis.ssz"
+      },
+      "reviewed_config": {
+        "source_commit": "ef8998901c1350f41a0bcc0a2a8d4baad973abcf",
+        "sha256": "6bb49140d29d33489f6813cf95896a75d8cdd5f9f28ab5c1d9570966ced6bc8c",
+        "fixture": "testdata/hoodi-config.yaml",
+        "gloas_fork_epoch": 132352,
+        "gloas_fork_version": "0x80000910",
+        "gloas_activation_timestamp": 1793036568,
+        "gas_limit_schedule_advisory": true
+      }
+    },
+    "sepolia": {
+      "chain_id": 11155111,
+      "genesis_time": 1655733600,
+      "genesis_validators_root": "0xd8ea171f3c94aea21ebc42a1ed61052acf3f9209c00e4efbaaddac09ed9b8078",
+      "genesis_fork_version": "0x90000069",
+      "checkpoint_url": "https://checkpoint-sync.sepolia.ethpandaops.io",
+      "checkpoint_access": "public",
+      "registry": {
+        "repository": "eth-clients/sepolia",
+        "branch": "main",
+        "directory": "metadata",
+        "files": [
+          "config.yaml",
+          "bootstrap_nodes.yaml"
+        ],
+        "genesis_file": "genesis.ssz"
+      }
+    }
+  }
+}

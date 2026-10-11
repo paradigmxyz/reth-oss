@@ -13,7 +13,7 @@ use reth_db_common::init::{insert_genesis_hashes, insert_genesis_history, insert
 use reth_ethereum_consensus::{validate_block_post_execution, EthBeaconConsensus};
 use reth_ethereum_primitives::Block;
 use reth_evm::{
-    execute::{BlockExecutionOutput, Executor},
+    execute::{BlockExecutionError, BlockExecutionOutput, Executor},
     ConfigureEvm,
 };
 use reth_evm_ethereum::EthEvmConfig;
@@ -78,75 +78,9 @@ impl BlockchainTestCase {
         )
     }
 
-    /// Checks if the test case is a particular test called `UncleFromSideChain`
-    ///
-    /// This fixture fails as expected, however it fails at the wrong block number.
-    /// Given we no longer have uncle blocks, this test case was pulled out such
-    /// that we ensure it still fails as expected, however we do not check the block number.
-    #[inline]
-    fn is_uncle_sidechain_case(name: &str) -> bool {
-        name.contains("UncleFromSideChain")
-    }
-
-    /// If the test expects an exception, return the block number
-    /// at which it must occur together with the original message.
-    ///
-    /// Note: There is a +1 here because the genesis block is not included
-    /// in the set of blocks, so the first block is actually block number 1
-    /// and not block number 0.
-    #[inline]
-    fn expected_failure(case: &BlockchainTest) -> Option<(u64, String)> {
-        case.blocks.iter().enumerate().find_map(|(idx, blk)| {
-            blk.expect_exception.as_ref().map(|msg| ((idx + 1) as u64, msg.clone()))
-        })
-    }
-
-    /// Execute a single `BlockchainTest`, validating the outcome against the
-    /// expectations encoded in the JSON file.
-    pub fn run_single_case(name: &str, case: &BlockchainTest) -> Result<(), Error> {
-        let expectation = Self::expected_failure(case);
-        match run_case(case) {
-            // All blocks executed successfully.
-            Ok(()) => {
-                // Check if the test case specifies that it should have failed
-                if let Some((block, msg)) = expectation {
-                    Err(Error::Assertion(format!(
-                        "Test case: {name}\nExpected failure at block {block} - {msg}, but all blocks succeeded",
-                    )))
-                } else {
-                    Ok(())
-                }
-            }
-
-            // A block processing failure occurred.
-            Err(Error::BlockProcessingFailed { block_number, err }) => {
-                match expectation {
-                    // It happened on exactly the block we were told to fail on
-                    Some((expected, _)) if block_number == expected => Ok(()),
-
-                    // Uncle side‑chain edge case, we accept as long as it failed.
-                    // But we don't check the exact block number.
-                    _ if Self::is_uncle_sidechain_case(name) => Ok(()),
-
-                    // Expected failure, but block number does not match
-                    Some((expected, _)) => Err(Error::Assertion(format!(
-                        "Test case: {name}\nExpected failure at block {expected}\nGot failure at block {block_number}",
-                    ))),
-
-                    // No failure expected at all - bubble up original error.
-                    None => Err(Error::BlockProcessingFailed { block_number, err }),
-                }
-            }
-
-            // Non‑processing error – forward as‑is.
-            //
-            // This should only happen if we get an unexpected error from processing the block.
-            // Since it is unexpected, we treat it as a test failure.
-            //
-            // One reason for this happening is when one forgets to wrap the error from `run_case`
-            // so that it produces an `Error::BlockProcessingFailed`
-            Err(other) => Err(other),
-        }
+    /// Execute the entire fixture, including valid blocks after an expected rejection.
+    pub fn run_single_case(_name: &str, case: &BlockchainTest) -> Result<(), Error> {
+        run_case(case)
     }
 }
 
@@ -173,13 +107,25 @@ impl Case for BlockchainTestCase {
             return Err(Error::Skipped);
         }
 
-        // Iterate through test cases, filtering by the network type to exclude specific forks.
+        if self.tests.is_empty() {
+            return Err(Error::Assertion("fixture file contains no test cases".into()))
+        }
+        let has_excluded = self.tests.values().any(|case| Self::excluded_fork(case.network));
         self.tests
             .into_iter()
             .filter(|(_, case)| !Self::excluded_fork(case.network))
             .par_bridge_buffered()
             .with_min_len(64)
-            .try_for_each(|(name, case)| Self::run_single_case(&name, &case).map(|_| ()))
+            .try_for_each(|(name, case)| {
+                Self::run_single_case(&name, &case)
+                    .map_err(|err| Error::NamedFixture { name, err: Box::new(err) })
+            })?;
+        // A partially or completely excluded file must never be counted as a complete pass.
+        if has_excluded {
+            Err(Error::Skipped)
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -197,7 +143,7 @@ impl Case for BlockchainTestCase {
 /// - `Err(Error)` if any block fails to execute correctly.
 fn run_case(case: &BlockchainTest) -> Result<(), Error> {
     // Create a new test database and initialize a provider for the test case.
-    let chain_spec = case.network.to_chain_spec();
+    let chain_spec = case.chain_spec()?;
     let factory = create_test_provider_factory_with_chain_spec(chain_spec.clone());
     let provider = factory.database_provider_rw().unwrap();
 
@@ -227,78 +173,101 @@ fn run_case(case: &BlockchainTest) -> Result<(), Error> {
         .map_err(|err| Error::block_failed(0, err))?;
 
     // Build the genesis trie, as `init_genesis` does, so block 1 reads stored nodes.
-    let (_, trie_updates) = reth_trie_db::with_adapter!(provider, |A| {
+    let (computed_genesis_root, trie_updates) = reth_trie_db::with_adapter!(provider, |A| {
         StateRoot::<reth_trie_db::DatabaseTrieCursorFactory<_, A>, _>::from_tx(provider.tx_ref())
             .root_with_updates()
     })
     .map_err(|err| Error::block_failed(0, err))?;
+    crate::assert::assert_equal(
+        genesis_block.state_root,
+        computed_genesis_root,
+        "genesis allocation root does not match",
+    )?;
     provider.write_trie_updates(trie_updates).map_err(|err| Error::block_failed(0, err))?;
-
-    // Decode blocks
-    let blocks = decode_blocks(&case.blocks)?;
 
     let executor_provider = EthEvmConfig::ethereum(chain_spec.clone());
     let mut parent = genesis_block;
     let mut bal_buf = Vec::new();
 
-    for (block_index, block) in blocks.iter().enumerate() {
-        // Note: same as the comment on `decode_blocks` as to why we cannot use block.number
+    for (block_index, fixture) in case.blocks.iter().enumerate() {
         let block_number = (block_index + 1) as u64;
+        // Decode and validate one candidate before publishing any of its state. Rejected blocks
+        // do not prevent later candidates from extending the last accepted parent.
+        let attempt = (|| {
+            let block = decode_block(fixture, block_number)?;
+            // Consensus checks before block execution
+            pre_execution_checks(chain_spec.clone(), &parent, &block)
+                .map_err(|err| Error::block_failed(block_number, err))?;
 
-        // Insert the block into the database
-        provider.insert_block(block).map_err(|err| Error::block_failed(block_number, err))?;
-        provider
-            .static_file_provider()
-            .commit()
+            // Execute the block
+            let state_provider = provider.latest();
+            let state_db = StateProviderDatabase((&state_provider).into_evm_state_provider());
+            let mut executor = executor_provider.batch_executor(state_db);
+
+            let result = executor
+                .execute_one(&block)
+                .map_err(|err| classify_execution_error(block_number, err))?;
+            // Check the block access list size cap and compute its hash for post-Amsterdam blocks
+            // so the consensus check below validates it.
+            let block_access_list_hash = executor
+                .take_bal()
+                .map(|bal| {
+                    let bal = Bal::from(bal);
+                    bal.validate_gas_limit(block.gas_limit)
+                        .map(|()| bal.compute_hash_with_buf(&mut bal_buf))
+                })
+                .transpose()
+                .map_err(|err| Error::block_failed(block_number, err))?;
+            let output =
+                BlockExecutionOutput { state: executor.into_state().take_bundle(), result };
+
+            // Consensus checks after block execution
+            validate_block_post_execution(
+                &block,
+                &chain_spec,
+                &output,
+                None,
+                block_access_list_hash,
+            )
             .map_err(|err| Error::block_failed(block_number, err))?;
 
-        // Consensus checks before block execution
-        pre_execution_checks(chain_spec.clone(), &parent, block)
-            .map_err(|err| Error::block_failed(block_number, err))?;
-
-        // Execute the block
-        let state_provider = provider.latest();
-        let state_db = StateProviderDatabase((&state_provider).into_evm_state_provider());
-        let mut executor = executor_provider.batch_executor(state_db);
-
-        let result = executor
-            .execute_one(&(*block).clone())
-            .map_err(|err| Error::block_failed(block_number, err))?;
-        // Check the block access list size cap and compute its hash for post-Amsterdam blocks so
-        // the consensus check below validates it.
-        let block_access_list_hash = executor
-            .take_bal()
-            .map(|bal| {
-                let bal = Bal::from(bal);
-                bal.validate_gas_limit(block.gas_limit)
-                    .map(|()| bal.compute_hash_with_buf(&mut bal_buf))
-            })
-            .transpose()
-            .map_err(|err| Error::block_failed(block_number, err))?;
-        let output = BlockExecutionOutput { state: executor.into_state().take_bundle(), result };
-
-        // Consensus checks after block execution
-        validate_block_post_execution(block, &chain_spec, &output, None, block_access_list_hash)
-            .map_err(|err| Error::block_failed(block_number, err))?;
-
-        // Compute and check the post state root
-        let hashed_state = state_provider
-            .hashed_post_state(&output.state)
-            .map_err(|err| Error::block_failed(block_number, err))?;
-        let sorted = hashed_state.clone_into_sorted();
-        let (computed_state_root, trie_updates) = reth_trie_db::with_adapter!(provider, |A| {
+            // Compute and check the post state root
+            let hashed_state = state_provider
+                .hashed_post_state(&output.state)
+                .map_err(|err| Error::harness_failed(block_number, err))?;
+            let sorted = hashed_state.clone_into_sorted();
+            let (computed_state_root, trie_updates) = reth_trie_db::with_adapter!(provider, |A| {
             StateRoot::<reth_trie_db::DatabaseTrieCursorFactory<_, A>, _>::overlay_root_with_updates(
                 provider.tx_ref(),
                 &sorted,
             )
         })
-        .map_err(|err| Error::block_failed(block_number, err))?;
-        if computed_state_root != block.state_root {
-            return Err(Error::block_failed(
-                block_number,
-                Error::Assertion("state root mismatch".to_string()),
-            ));
-        }
+        .map_err(|err| Error::harness_failed(block_number, err))?;
+            if computed_state_root != block.state_root {
+                return Err(Error::block_failed(
+                    block_number,
+                    Error::Assertion("state root mismatch".to_string()),
+                ));
+            }
+
+            Ok::<_, Error>((block, output, hashed_state, trie_updates))
+        })();
+        let (block, output, hashed_state, trie_updates) = match (attempt, &fixture.expect_exception)
+        {
+            (Ok(_), Some(expected)) => {
+                return Err(Error::Assertion(format!(
+                    "block {block_number} succeeded but fixture expects {expected}"
+                )))
+            }
+            (Err(Error::BlockProcessingFailed { .. }), Some(_)) => continue,
+            (Err(error), _) => return Err(error),
+            (Ok(result), None) => result,
+        };
+        provider.insert_block(&block).map_err(|err| Error::block_failed(block_number, err))?;
+        provider
+            .static_file_provider()
+            .commit()
+            .map_err(|err| Error::block_failed(block_number, err))?;
 
         // Commit the post state/state diff to the database
         provider
@@ -345,28 +314,40 @@ fn run_case(case: &BlockchainTest) -> Result<(), Error> {
         }
     }
 
+    crate::assert::assert_equal(
+        case.lastblockhash,
+        parent.hash(),
+        "last valid block hash does not match",
+    )?;
+    if let Some(expected) = case.post_state_hash {
+        crate::assert::assert_equal(
+            expected,
+            parent.state_root,
+            "final state root does not match",
+        )?;
+    }
     Ok(())
 }
 
-fn decode_blocks(
-    test_case_blocks: &[crate::models::Block],
-) -> Result<Vec<RecoveredBlock<Block>>, Error> {
-    let mut blocks = Vec::with_capacity(test_case_blocks.len());
-    for (block_index, block) in test_case_blocks.iter().enumerate() {
-        // The blocks do not include the genesis block which is why we have the plus one.
-        // We also cannot use block.number because for invalid blocks, this may be incorrect.
-        let block_number = (block_index + 1) as u64;
-
-        let decoded = SealedBlock::<Block>::decode(&mut block.rlp.as_ref())
-            .map_err(|err| Error::block_failed(block_number, err))?;
-
-        let recovered_block =
-            decoded.try_recover().map_err(|err| Error::block_failed(block_number, err))?;
-
-        blocks.push(recovered_block);
+fn classify_execution_error(block_number: u64, error: BlockExecutionError) -> Error {
+    match error {
+        BlockExecutionError::Validation(error) => Error::block_failed(block_number, error),
+        BlockExecutionError::Internal(error) => Error::harness_failed(block_number, error),
     }
+}
 
-    Ok(blocks)
+fn decode_block(
+    block: &crate::models::Block,
+    block_number: u64,
+) -> Result<RecoveredBlock<Block>, Error> {
+    // The candidate index remains authoritative even when an invalid header lies about its number.
+    let mut remaining = block.rlp.as_ref();
+    let decoded = SealedBlock::<Block>::decode(&mut remaining)
+        .map_err(|err| Error::block_failed(block_number, err))?;
+    if !remaining.is_empty() {
+        return Err(Error::block_failed(block_number, alloy_rlp::Error::UnexpectedLength))
+    }
+    decoded.try_recover().map_err(|err| Error::block_failed(block_number, err))
 }
 
 fn pre_execution_checks(
@@ -455,4 +436,133 @@ pub fn should_skip(path: &Path) -> bool {
 fn path_contains(path_str: &str, rhs: &[&str]) -> bool {
     let rhs = rhs.join(std::path::MAIN_SEPARATOR_STR);
     path_str.contains(&rhs)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy_primitives::{Bytes, B256, U256};
+
+    fn authentic_fixture() -> BlockchainTest {
+        serde_json::from_str::<BTreeMap<String, BlockchainTest>>(include_str!(
+            "../../testdata/chainid-cancun.json"
+        ))
+        .unwrap()
+        .into_values()
+        .next()
+        .unwrap()
+    }
+
+    #[test]
+    fn operational_failures_and_empty_or_excluded_files_cannot_pass() {
+        let error = classify_execution_error(7, BlockExecutionError::msg("database read failed"));
+        assert!(matches!(error, Error::HarnessFailed { block_number: 7, .. }));
+        let invalid =
+            crate::models::Block { rlp: Bytes::from_static(&[0xff]), ..Default::default() };
+        assert!(matches!(
+            decode_block(&invalid, 7),
+            Err(Error::BlockProcessingFailed { block_number: 7, .. })
+        ));
+        assert!(BlockchainTestCase { tests: BTreeMap::new(), skip: false }.run().is_err());
+        let mut excluded = authentic_fixture();
+        excluded.network = ForkSpec::Constantinople;
+        assert!(matches!(
+            BlockchainTestCase {
+                tests: BTreeMap::from([("excluded".into(), excluded)]),
+                skip: false
+            }
+            .run(),
+            Err(Error::Skipped)
+        ));
+    }
+
+    #[test]
+    fn authentic_chain_id_fixture_executes_and_checks_final_state() {
+        run_case(&authentic_fixture()).unwrap();
+    }
+
+    #[test]
+    fn rejected_candidates_leave_valid_parent_and_post_state_intact() {
+        let mut case = authentic_fixture();
+        let rejected = crate::models::Block {
+            rlp: Bytes::from_static(&[0xff]),
+            expect_exception: Some("invalid RLP".into()),
+            ..Default::default()
+        };
+        case.blocks.insert(0, rejected);
+        case.blocks.push(crate::models::Block {
+            rlp: Bytes::from_static(&[0xff]),
+            expect_exception: Some("invalid RLP".into()),
+            ..Default::default()
+        });
+        run_case(&case).unwrap();
+    }
+
+    #[test]
+    fn valid_candidate_cannot_satisfy_expected_rejection() {
+        let mut case = authentic_fixture();
+        case.blocks[0].expect_exception = Some("invalid RLP".into());
+        assert!(run_case(&case).is_err());
+    }
+
+    #[test]
+    fn fixture_chain_id_changes_actual_execution_without_mutating_fork_cache() {
+        let mut case = authentic_fixture();
+        case.config.as_mut().unwrap().chain_id = U256::from(2);
+        assert_eq!(case.chain_spec().unwrap().chain.id(), 2);
+        assert_eq!(case.network.to_chain_spec().chain.id(), 1);
+        assert!(run_case(&case).is_err());
+    }
+
+    #[test]
+    fn final_hash_and_optional_state_root_are_enforced() {
+        let mut case = authentic_fixture();
+        case.lastblockhash = B256::ZERO;
+        assert!(run_case(&case).is_err());
+        let mut case = authentic_fixture();
+        case.post_state_hash = Some(B256::ZERO);
+        assert!(run_case(&case).is_err());
+    }
+
+    #[test]
+    fn fixture_schedule_uses_hex_parameters_and_preserves_transaction_limit() {
+        let mut case = authentic_fixture();
+        case.network = ForkSpec::Amsterdam;
+        let config = case.config.as_mut().unwrap();
+        config.network = Some(ForkSpec::Amsterdam);
+        config.blob_schedule.insert(
+            "Amsterdam".into(),
+            serde_json::from_str(
+                r#"{"target":"0x0e","max":"0x15","baseFeeUpdateFraction":"0xb24b3f"}"#,
+            )
+            .unwrap(),
+        );
+        let spec = case.chain_spec().unwrap();
+        let params = spec.blob_params.active_scheduled_params_at_timestamp(0).unwrap();
+        assert_eq!(
+            (
+                params.target_blob_count,
+                params.max_blob_count,
+                params.update_fraction,
+                params.max_blobs_per_tx
+            ),
+            (14, 21, 11_684_671, 6)
+        );
+    }
+
+    #[test]
+    fn conflicting_or_unknown_fixture_configuration_fails() {
+        let mut case = authentic_fixture();
+        case.config.as_mut().unwrap().network = Some(ForkSpec::Prague);
+        assert!(case.chain_spec().is_err());
+        let mut case = authentic_fixture();
+        case.config.as_mut().unwrap().blob_schedule.insert(
+            "Unknown".into(),
+            serde_json::from_str(
+                r#"{"target":"0x03","max":"0x06","baseFeeUpdateFraction":"0x32f0ed"}"#,
+            )
+            .unwrap(),
+        );
+        assert!(case.chain_spec().is_err());
+    }
 }

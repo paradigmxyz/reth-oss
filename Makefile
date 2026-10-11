@@ -28,10 +28,11 @@ EF_TESTS_TAG := v17.0
 EF_TESTS_URL := https://github.com/ethereum/tests/archive/refs/tags/$(EF_TESTS_TAG).tar.gz
 EF_TESTS_DIR := ./testing/ef-tests/ethereum-tests
 
-# The release tag of https://github.com/ethereum/execution-spec-tests to use for EEST tests
-EEST_TESTS_TAG := v4.5.0
-EEST_TESTS_URL := https://github.com/ethereum/execution-spec-tests/releases/download/$(EEST_TESTS_TAG)/fixtures_stable.tar.gz
+# Resolve the current published execution fixture channel, including prereleases.
+EEST_TESTS_TAG ?= latest
 EEST_TESTS_DIR := ./testing/ef-tests/execution-spec-tests
+EEST_PROVENANCE := ./testing/ef-tests/execution-spec-provenance.json
+EEST_DOWNLOAD_SCRIPT := ./testing/embedded-beacon/scripts/download-execution-fixtures.py
 
 ##@ Help
 
@@ -181,18 +182,20 @@ $(EF_TESTS_DIR):
 	tar -xzf ethereum-tests.tar.gz --strip-components=1 -C $(EF_TESTS_DIR)
 	rm ethereum-tests.tar.gz
 
-# Downloads and unpacks EEST tests in the `$(EEST_TESTS_DIR)` directory.
-#
-# Requires `wget` and `tar`
+# Download execution blockchain fixtures with published digest and exact inventory checks.
+# Requires Python 3.9 or newer.
 $(EEST_TESTS_DIR):
-	mkdir $(EEST_TESTS_DIR)
-	wget $(EEST_TESTS_URL) -O execution-spec-tests.tar.gz
-	tar -xzf execution-spec-tests.tar.gz --strip-components=1 -C $(EEST_TESTS_DIR)
-	rm execution-spec-tests.tar.gz
+	python3 $(EEST_DOWNLOAD_SCRIPT) --release '$(EEST_TESTS_TAG)' --fixtures $(EEST_TESTS_DIR) --work testing/embedded-beacon/execution-tests/work/archives --provenance $(EEST_PROVENANCE)
 
 .PHONY: ef-tests
-ef-tests: $(EF_TESTS_DIR) $(EEST_TESTS_DIR) ## Runs Legacy and EEST tests.
-	cargo nextest run --no-fail-fast -p ef-tests --release --features ef-tests
+ef-tests: $(EF_TESTS_DIR) $(EEST_TESTS_DIR) ## Runs Legacy and current execution fixtures.
+	python3 $(EEST_DOWNLOAD_SCRIPT) --verify --fixtures $(EEST_TESTS_DIR) --provenance $(EEST_PROVENANCE)
+	cargo nextest run --locked --no-fail-fast -p ef-tests --cargo-profile hivetests --features ef-tests
+
+.PHONY: eest-tests
+eest-tests: $(EEST_TESTS_DIR) ## Runs the authenticated execution blockchain fixtures only.
+	python3 $(EEST_DOWNLOAD_SCRIPT) --verify --fixtures $(EEST_TESTS_DIR) --provenance $(EEST_PROVENANCE)
+	cargo test --locked --profile hivetests -p ef-tests --features ef-tests --test tests -- eest_fixtures --exact --nocapture
 
 ##@ Other
 

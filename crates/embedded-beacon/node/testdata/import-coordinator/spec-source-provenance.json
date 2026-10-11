@@ -1,0 +1,124 @@
+{
+  "consensus": {
+    "spec_release": "v1.7.0-beta.3",
+    "commit": "71c00190f157b8dda556bf4e6135c39307569e62",
+    "files": [
+      {
+        "path": "specs/bellatrix/fork-choice.md",
+        "url": "https://raw.githubusercontent.com/ethereum/consensus-specs/71c00190f157b8dda556bf4e6135c39307569e62/specs/bellatrix/fork-choice.md",
+        "bytes": 8001,
+        "git_blob_sha1": "17c1aa0df6398c7874d9b750010bb0dad533e4b8",
+        "sha256": "8283d3c0181ad9a93c1391dd6c40e0dd5d85bc920f95550191bf4962c1d4155d"
+      },
+      {
+        "path": "specs/capella/fork-choice.md",
+        "url": "https://raw.githubusercontent.com/ethereum/consensus-specs/71c00190f157b8dda556bf4e6135c39307569e62/specs/capella/fork-choice.md",
+        "bytes": 3573,
+        "git_blob_sha1": "b2c8f3ac588c9aafc9af2ee112958a5d659b7e8e",
+        "sha256": "5adaa413ab093938bcc6b9bf25d4e88d9dd7f79158e4aa27b237b3e52b0b412b"
+      },
+      {
+        "path": "specs/deneb/fork-choice.md",
+        "url": "https://raw.githubusercontent.com/ethereum/consensus-specs/71c00190f157b8dda556bf4e6135c39307569e62/specs/deneb/fork-choice.md",
+        "bytes": 4921,
+        "git_blob_sha1": "6e71d12685d857dc4a33b395bfa7385df882a68c",
+        "sha256": "b5c69621856a4f78878d96c31c804e02b0727499226d6e1e294fcc7f7b0c5fde"
+      },
+      {
+        "path": "specs/fulu/fork-choice.md",
+        "url": "https://raw.githubusercontent.com/ethereum/consensus-specs/71c00190f157b8dda556bf4e6135c39307569e62/specs/fulu/fork-choice.md",
+        "bytes": 5995,
+        "git_blob_sha1": "ce107758e448dea31557dc15b48d51317b57bb81",
+        "sha256": "0ecf7eb2e3d794f691f8d36022766dbfa4de63817c73a5a78fa2439a2e59fcdf"
+      },
+      {
+        "path": "specs/gloas/fork-choice.md",
+        "url": "https://raw.githubusercontent.com/ethereum/consensus-specs/71c00190f157b8dda556bf4e6135c39307569e62/specs/gloas/fork-choice.md",
+        "bytes": 44092,
+        "git_blob_sha1": "3a2d743802da54b6b22764b54822f23391a3f122",
+        "sha256": "f07902dca9c40fe9a542ee099f5f8b0dcb2fb2fd0228603474bf799de5bcc5cf"
+      },
+      {
+        "path": "specs/bellatrix/beacon-chain.md",
+        "url": "https://raw.githubusercontent.com/ethereum/consensus-specs/71c00190f157b8dda556bf4e6135c39307569e62/specs/bellatrix/beacon-chain.md",
+        "bytes": 15868,
+        "git_blob_sha1": "5c642e112b6122b619a48de1060311ee62ae41c8",
+        "sha256": "5486818693267ad19d61e74a7128627313b55242307cdbbf1decf47745f3f547"
+      },
+      {
+        "path": "specs/capella/beacon-chain.md",
+        "url": "https://raw.githubusercontent.com/ethereum/consensus-specs/71c00190f157b8dda556bf4e6135c39307569e62/specs/capella/beacon-chain.md",
+        "bytes": 21131,
+        "git_blob_sha1": "3bd4ecfee21da192f0a26c0cc3b49436144bfb00",
+        "sha256": "89f75468f8566ae69c5c9f6b33694f9c7536f565f8ddea69cba9e118f396d7fe"
+      },
+      {
+        "path": "specs/bellatrix/fast-confirmation.md",
+        "url": "https://raw.githubusercontent.com/ethereum/consensus-specs/71c00190f157b8dda556bf4e6135c39307569e62/specs/bellatrix/fast-confirmation.md",
+        "bytes": 974,
+        "git_blob_sha1": "4bfcb939e0ce2b0620238553fdef4b9b9501ddf6",
+        "sha256": "f2bafa051a09b64b2d6ed7bbf19f2b8c6cf385d7bced18299d13653182e4fd9a"
+      },
+      {
+        "path": "specs/gloas/fast-confirmation.md",
+        "url": "https://raw.githubusercontent.com/ethereum/consensus-specs/71c00190f157b8dda556bf4e6135c39307569e62/specs/gloas/fast-confirmation.md",
+        "bytes": 1248,
+        "git_blob_sha1": "cf1259fd948a392595616df0ba034c024116fead",
+        "sha256": "44ea3dcd269a681709ec8b0f2604fc966c2295abfae4ce1faccc54aaada88213"
+      },
+      {
+        "path": "specs/phase0/fast-confirmation.md",
+        "url": "https://raw.githubusercontent.com/ethereum/consensus-specs/71c00190f157b8dda556bf4e6135c39307569e62/specs/phase0/fast-confirmation.md",
+        "bytes": 44815,
+        "git_blob_sha1": "a468ffb68df340ebb24759f84c90602735d740f1",
+        "sha256": "add1997062255aa0e7ca65757ee8bada12f162c7fd243c7c096cddb3eebaa847"
+      }
+    ]
+  },
+  "engine_api": {
+    "commit": "34151926fbf395e66797add1f60fd759681678e6",
+    "files": [
+      {
+        "source": "https://raw.githubusercontent.com/ethereum/execution-apis/34151926fbf395e66797add1f60fd759681678e6/src/engine/paris.md",
+        "sha256": "ab679bb056aafd1b0ce9bff6642841ff3e68c61b33d50715737d469742df282c",
+        "bytes": 21987
+      },
+      {
+        "source": "https://raw.githubusercontent.com/ethereum/execution-apis/34151926fbf395e66797add1f60fd759681678e6/src/engine/shanghai.md",
+        "sha256": "68b8552f3d1cfadef97cf13dbcb74b96b02f80f794fb94c8b4f3fe3d814a78e1",
+        "bytes": 13131
+      },
+      {
+        "source": "https://raw.githubusercontent.com/ethereum/execution-apis/34151926fbf395e66797add1f60fd759681678e6/src/engine/cancun.md",
+        "sha256": "6b2a2034bf298599bb98bb7d9c98286140be7867fd71add8d6d01a47b46a7e98",
+        "bytes": 12416
+      },
+      {
+        "source": "https://raw.githubusercontent.com/ethereum/execution-apis/34151926fbf395e66797add1f60fd759681678e6/src/engine/amsterdam.md",
+        "sha256": "ea77cef510497aea0325ddb2bda767bd0550a66041febc93b381b6df2bd703b3",
+        "bytes": 16133
+      },
+      {
+        "source": "https://raw.githubusercontent.com/ethereum/execution-apis/34151926fbf395e66797add1f60fd759681678e6/src/engine/bogota.md",
+        "sha256": "903e343bf130cc5ed7b8d8430c8411db405e0397af8504269228729ee9788d2d",
+        "bytes": 9471
+      }
+    ]
+  },
+  "interpretation": {
+    "forkchoice_no_attributes": {
+      "bellatrix": "V1",
+      "capella": "V2",
+      "deneb": "V3",
+      "electra": "V3",
+      "fulu": "V3",
+      "gloas": "V4"
+    },
+    "latest_valid_hash": "Exact VALID acknowledgement of the graph-derived head; no payload job.",
+    "safe_hash": "Sealed latest_confirmed and block_info on the actual graph, compared with strict verified execution queries; Gloas parent association uses EMPTY ancestry.",
+    "gloas_finalized_hash": "Actual finalized beacon bid parent_block_hash.",
+    "custody": "Omit optional custody until actual advertised sampler identity/count is integrated.",
+    "v5": "Later extended contract deliberately unselected.",
+    "missed_confirmation_deadline": "Conservative local policy: actual tick, reset only optional confirmation history with sealed finalized initialization, no historical/backdated observations, future timely observations only."
+  }
+}

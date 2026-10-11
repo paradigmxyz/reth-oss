@@ -1,0 +1,12 @@
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: embedded-beacon-prometheus
+    type: prometheus
+    access: proxy
+    url: $BEACON_PROMETHEUS_URL
+    isDefault: true
+    editable: false
+    jsonData:
+      timeInterval: 5s

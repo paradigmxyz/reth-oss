@@ -72,6 +72,7 @@ const DEFAULT_ENV_FILTER_DIRECTIVES: [&str; 11] = [
 #[derive(Default)]
 pub struct Layers {
     inner: Vec<BoxedLayer<Registry>>,
+    stdout_bright_cyan_target: Option<&'static str>,
 }
 
 impl fmt::Debug for Layers {
@@ -84,6 +85,12 @@ impl Layers {
     /// Creates a new `Layers` instance.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Color an exact target and its `::` descendants bright cyan in ANSI terminal stdout only.
+    /// This opt-in leaves structured/file layers and default console formatting unchanged.
+    pub fn set_stdout_bright_cyan_target(&mut self, target: &'static str) {
+        self.stdout_bright_cyan_target = Some(target);
     }
 
     /// Adds a layer to the collection of layers.
@@ -144,11 +151,23 @@ impl Layers {
 
         if reloadable {
             let (reloadable_filter, handle) = reload::Layer::new(filter);
-            let layer = format.apply(reloadable_filter, color, show_target, None);
+            let layer = format.apply_with_bright_cyan_target(
+                reloadable_filter,
+                color,
+                show_target,
+                None,
+                self.stdout_bright_cyan_target,
+            );
             self.add_layer(layer);
             Ok(Some(handle))
         } else {
-            let layer = format.apply(filter, color, show_target, None);
+            let layer = format.apply_with_bright_cyan_target(
+                filter,
+                color,
+                show_target,
+                None,
+                self.stdout_bright_cyan_target,
+            );
             self.add_layer(layer);
             Ok(None)
         }

@@ -1,0 +1,125 @@
+{
+  "spec_release": "v1.7.0-beta.3",
+  "commit": "71c00190f157b8dda556bf4e6135c39307569e62",
+  "tree_source": "../compliance-reference/tree.json",
+  "files": [
+    {
+      "path": "specs/phase0/weak-subjectivity.md",
+      "url": "https://raw.githubusercontent.com/ethereum/consensus-specs/71c00190f157b8dda556bf4e6135c39307569e62/specs/phase0/weak-subjectivity.md",
+      "bytes": 9005,
+      "git_blob_sha1": "ec4b3f52daf0962892dfaf5cd02520da66c57943",
+      "sha256": "8f12fdd4b84c51dd715aef9f13b8eb32d94890e6f4cbf5038fc3441bed66aa04"
+    },
+    {
+      "path": "specs/electra/weak-subjectivity.md",
+      "url": "https://raw.githubusercontent.com/ethereum/consensus-specs/71c00190f157b8dda556bf4e6135c39307569e62/specs/electra/weak-subjectivity.md",
+      "bytes": 3284,
+      "git_blob_sha1": "deb94a210d0520657eb8db3018413b1b066ed3dc",
+      "sha256": "b4a3784aaabd18baa71889fccae9ae69cc3946091a777ceeee7d0013bd44d07b"
+    },
+    {
+      "path": "specs/gloas/weak-subjectivity.md",
+      "url": "https://raw.githubusercontent.com/ethereum/consensus-specs/71c00190f157b8dda556bf4e6135c39307569e62/specs/gloas/weak-subjectivity.md",
+      "bytes": 2701,
+      "git_blob_sha1": "552e2293c8c6e8004cba8098ffe458d8db5a46c7",
+      "sha256": "7d55b8c29ce023b388ae1e4353931f8178c13240f882555ab77872847b79ba8b"
+    },
+    {
+      "path": "specs/phase0/beacon-chain.md",
+      "url": "https://raw.githubusercontent.com/ethereum/consensus-specs/71c00190f157b8dda556bf4e6135c39307569e62/specs/phase0/beacon-chain.md",
+      "bytes": 82776,
+      "git_blob_sha1": "cbaeeb5d6cd5622b43e508832560bd3033f66723",
+      "sha256": "0d18644c78bb76103a62b2544dd2af959dbaf79f286e0ed0b8729cffb6df052e"
+    },
+    {
+      "path": "specs/deneb/beacon-chain.md",
+      "url": "https://raw.githubusercontent.com/ethereum/consensus-specs/71c00190f157b8dda556bf4e6135c39307569e62/specs/deneb/beacon-chain.md",
+      "bytes": 21822,
+      "git_blob_sha1": "48224a15b2b01a3c18c3d456202c458b0f4c5c19",
+      "sha256": "e20523b731123b61284c114ba8aa566aaffe58e4baf6b6cfe75c822ffeee18f5"
+    },
+    {
+      "path": "specs/electra/beacon-chain.md",
+      "url": "https://raw.githubusercontent.com/ethereum/consensus-specs/71c00190f157b8dda556bf4e6135c39307569e62/specs/electra/beacon-chain.md",
+      "bytes": 76429,
+      "git_blob_sha1": "f45877734140dd23f0c7659858849af7d525bebf",
+      "sha256": "96e2cf6ed31dde2e9f721cb4bee71f84823c87ceb1ae16a6ee238a0f2f475a52"
+    },
+    {
+      "path": "specs/gloas/beacon-chain.md",
+      "url": "https://raw.githubusercontent.com/ethereum/consensus-specs/71c00190f157b8dda556bf4e6135c39307569e62/specs/gloas/beacon-chain.md",
+      "bytes": 88147,
+      "git_blob_sha1": "d9a7bb38f10a06d1a10aa93015c2fc0137006e73",
+      "sha256": "1d2038287cefd1120733fa987c1e7b15005e3bb6f2d907b57e771ebe67b0174d"
+    },
+    {
+      "path": "configs/mainnet.yaml",
+      "url": "https://raw.githubusercontent.com/ethereum/consensus-specs/71c00190f157b8dda556bf4e6135c39307569e62/configs/mainnet.yaml",
+      "bytes": 7011,
+      "git_blob_sha1": "e7e9856006ff6814e92ff5449b626b3421fbc7d4",
+      "sha256": "6bb21464225762a3bbd8a8e1768818592fc0fa616b48556b6df64ffd5571f062"
+    },
+    {
+      "path": "configs/minimal.yaml",
+      "url": "https://raw.githubusercontent.com/ethereum/consensus-specs/71c00190f157b8dda556bf4e6135c39307569e62/configs/minimal.yaml",
+      "bytes": 6933,
+      "git_blob_sha1": "6ee61e23bd4e8900003be2fda2848cfdaa944fc5",
+      "sha256": "91074cbc6d3faf0d3edb528c1b01dd214c42912a151bbf09065a0eec2c250d4c"
+    },
+    {
+      "path": "presets/mainnet/phase0.yaml",
+      "url": "https://raw.githubusercontent.com/ethereum/consensus-specs/71c00190f157b8dda556bf4e6135c39307569e62/presets/mainnet/phase0.yaml",
+      "bytes": 2342,
+      "git_blob_sha1": "44030cc5b9c19b80cc72639ba348c226c34aa88e",
+      "sha256": "026a5f7b00f4ce05ec4530de9811070be850565e2ab3ba8130eb9c30cc7708f4"
+    },
+    {
+      "path": "presets/minimal/phase0.yaml",
+      "url": "https://raw.githubusercontent.com/ethereum/consensus-specs/71c00190f157b8dda556bf4e6135c39307569e62/presets/minimal/phase0.yaml",
+      "bytes": 2447,
+      "git_blob_sha1": "e90046b7385132c6f7ec5fd37c64ffd2efd90b43",
+      "sha256": "e5adcabf45a9c7d5cbaecd42893dcaff7ada826f3e55c176bccc5aa7418710cc"
+    },
+    {
+      "path": "presets/mainnet/electra.yaml",
+      "url": "https://raw.githubusercontent.com/ethereum/consensus-specs/71c00190f157b8dda556bf4e6135c39307569e62/presets/mainnet/electra.yaml",
+      "bytes": 1679,
+      "git_blob_sha1": "55308d5b1ca3476a96bcc675ce9ef6c0003bfabc",
+      "sha256": "98d9d23a2bb9e9b776536c1c37eb714b9f5b91f0a3bbe9c9d441b13cf4cd477a"
+    },
+    {
+      "path": "presets/minimal/electra.yaml",
+      "url": "https://raw.githubusercontent.com/ethereum/consensus-specs/71c00190f157b8dda556bf4e6135c39307569e62/presets/minimal/electra.yaml",
+      "bytes": 1691,
+      "git_blob_sha1": "f1161e175c0f2d53f6ed411498eb5fee358891a1",
+      "sha256": "94f957bdc7da6cd562fa888d066688109427657ee064c8afeb3af567d3f50b0b"
+    }
+  ],
+  "reference_calculation": "pinned Python function executed unchanged; minimal registry extracted from canonical SSZ fixed offsets and 121-byte Validator entries",
+  "published_state_reference_cases": [
+    {
+      "fork": "fulu",
+      "preset": "minimal",
+      "original_input": "embedded-beacon/node/testdata/fulu-upgrade/post.ssz_snappy",
+      "source_sha256": "9b46b8bfd96638d0c6f07b2195cb884b88590bc040f49a9d7e266f64c02b65b0",
+      "state_slot": 16,
+      "state_epoch": 2,
+      "registry_count": 64,
+      "active_validator_count": 32,
+      "total_active_balance_gwei": 1024000000000,
+      "expected_period_epochs": 256
+    },
+    {
+      "fork": "gloas",
+      "preset": "minimal",
+      "original_input": "embedded-beacon/node/testdata/gloas-invalid-payload-attestation/state.ssz_snappy",
+      "source_sha256": "fb185ff77bfcaf4430b88f021c29804940cb889a36060d7dcf5ecb0cee9232a7",
+      "state_slot": 0,
+      "state_epoch": 0,
+      "registry_count": 64,
+      "active_validator_count": 64,
+      "total_active_balance_gwei": 2048000000000,
+      "expected_period_epochs": 256
+    }
+  ]
+}

@@ -373,6 +373,15 @@ impl NodeState {
                         "Beacon client online, but no consensus updates received for a while. This may be because of a reth error, or an error in the beacon client! Please investigate reth and beacon client logs!"
                     )
                 }
+                ConsensusLayerHealthEvent::InProcessUpdatesDelayed(period) => {
+                    warn!(
+                        target: "beacon::execution",
+                        seconds_since_forkchoice_update = period.as_secs(),
+                        latest_block = %OptionalField(self.latest_block),
+                        head_hash = %OptionalField(self.head_block_hash),
+                        "[beacon] Embedded consensus has not published a recent execution forkchoice update"
+                    )
+                }
             }
         }
     }

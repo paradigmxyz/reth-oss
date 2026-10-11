@@ -27,6 +27,24 @@ pub enum Error {
         #[source]
         err: Box<dyn std::error::Error + Send + Sync>,
     },
+    /// An execution or storage harness failure cannot satisfy expected invalidity.
+    #[error("block {block_number} execution harness failed: {err}")]
+    HarnessFailed {
+        /// Candidate index in the fixture.
+        block_number: u64,
+        /// Original operational failure.
+        #[source]
+        err: Box<dyn std::error::Error + Send + Sync>,
+    },
+    /// The failing fixture within a multi-case JSON file.
+    #[error("fixture {name}: {err}")]
+    NamedFixture {
+        /// Published case identifier.
+        name: String,
+        /// Original failure.
+        #[source]
+        err: Box<Self>,
+    },
     /// An IO error occurred
     #[error("an error occurred interacting with the file system at {path}: {error}")]
     Io {
@@ -63,6 +81,14 @@ pub enum Error {
 }
 
 impl Error {
+    /// Preserve a harness failure outside the consensus-invalid category.
+    pub fn harness_failed(
+        block_number: u64,
+        err: impl std::error::Error + Send + Sync + 'static,
+    ) -> Self {
+        Self::HarnessFailed { block_number, err: Box::new(err) }
+    }
+
     /// Create a new [`Error::BlockProcessingFailed`] error.
     pub fn block_failed(
         block_number: u64,
@@ -96,7 +122,20 @@ pub(crate) fn assert_tests_pass(suite_name: &str, path: &Path, results: &[CaseRe
 
     print_results(suite_name, path, &passed, &failed, &skipped);
 
+    if let Some(destination) = std::env::var_os("RETH_EF_TEST_REPORT") {
+        let cases = results.iter().map(|case| {
+            serde_json::json!({"path": case.path, "description": case.desc, "outcome": match &case.result { Ok(()) => "passed", Err(Error::Skipped) => "skipped", Err(_) => "failed" }, "error": case.result.as_ref().err().map(ToString::to_string)})
+        }).collect::<Vec<_>>();
+        let report = serde_json::json!({"suite": suite_name, "fixture_directory": path, "fixture_files": results.len(), "passed_files": passed.len(), "failed_files": failed.len(), "skipped_files": skipped.len(), "complete_execution_conformance": false, "cases": cases});
+        std::fs::write(
+            destination,
+            serde_json::to_vec_pretty(&report).expect("serialize execution report"),
+        )
+        .expect("write execution report");
+    }
+
     assert!(failed.is_empty(), "Some tests failed (see above)");
+    assert!(!passed.is_empty(), "No execution fixtures passed; all fixtures were skipped");
 }
 
 /// Categorize test results into `(passed, failed, skipped)`.

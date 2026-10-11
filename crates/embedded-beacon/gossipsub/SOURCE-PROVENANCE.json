@@ -1,0 +1,303 @@
+{
+  "package": "libp2p-gossipsub",
+  "version": "0.49.5",
+  "license": "MIT",
+  "source_revision": "d6a16b6a88959d1b25e9807d89959b2f9127724c",
+  "source_path": "protocols/gossipsub",
+  "registry_archive_sha256": "3573f3d8e30bd62cda336df5c7c1041a1caa40a648376b8e1e274d585c0ed25c",
+  "snapshot_method": "Exact installed registry package copy; registry acquisition marker excluded.",
+  "original_files": [
+    {
+      "path": ".cargo_vcs_info.json",
+      "sha256": "694227211a1163493cf2cec94281804f9d3b9de476f6f2f82e095fb58baab3b4",
+      "bytes": 113
+    },
+    {
+      "path": "Cargo.lock",
+      "sha256": "3de23d8804ae4837be373addffde59b4456bd303eadf4ec15e10b47ea83f3074",
+      "bytes": 48247
+    },
+    {
+      "path": "Cargo.toml",
+      "sha256": "988b744acf13c79eb12ac3a5f0e2bd6477435b048cf5b8f62af14459679f89eb",
+      "bytes": 2895
+    },
+    {
+      "path": "Cargo.toml.orig",
+      "sha256": "ac54d8b2d817a67a2a81a98f18cb330dce171d335c4f0bc66c5941a69ce76c64",
+      "bytes": 1757
+    },
+    {
+      "path": "CHANGELOG.md",
+      "sha256": "2a36532de2531efb3109394fa10c78b9059c0c8d5d52cd4e09ff269b6968c13b",
+      "bytes": 16446
+    },
+    {
+      "path": "src/backoff.rs",
+      "sha256": "0af5e555567d7788602f8ad1ff977ce0a9214585a13d88a86421be40a661aa22",
+      "bytes": 7551
+    },
+    {
+      "path": "src/behaviour.rs",
+      "sha256": "494714fb728d6c5b3dd3c0ceb115372dbcd2fd26367d4a882fd0b4af75130225",
+      "bytes": 145293
+    },
+    {
+      "path": "src/config.rs",
+      "sha256": "78433a00e1272a673d9794179f292e72f0c128cc0f03b164accc9f74b31064ed",
+      "bytes": 53776
+    },
+    {
+      "path": "src/error.rs",
+      "sha256": "4151bee368a96ac01338ca765618ef4d44c3bb864b63444301ddd8d846dfffe0",
+      "bytes": 5994
+    },
+    {
+      "path": "src/gossip_promises.rs",
+      "sha256": "0ca8fea2cf104fe8549cb4981dd7fbd2633bd9865733e5895011952e99931a64",
+      "bytes": 4549
+    },
+    {
+      "path": "src/handler.rs",
+      "sha256": "32ff1b36444486984fb6a431ef97c62391061139ee75325a4d7482e3696e1d83",
+      "bytes": 22954
+    },
+    {
+      "path": "src/lib.rs",
+      "sha256": "70bab73b87d8b809b20c11c5e086f0d15b3cb56aaa0fca26c79413ceb191ca7a",
+      "bytes": 6206
+    },
+    {
+      "path": "src/mcache.rs",
+      "sha256": "ecc6d605222d6a56035f974df4cacf80beee8fa98c16c96f4c8aa3d5a94b77b7",
+      "bytes": 13080
+    },
+    {
+      "path": "src/metrics.rs",
+      "sha256": "387681b4d9e9952523e68eb2b67f427bd3d21499d78b9d9699d91d954246ffbb",
+      "bytes": 27551
+    },
+    {
+      "path": "src/peer_score.rs",
+      "sha256": "87fe77e4c82e8a2a4f9cc352a7300ad5ed54dce2bdf9792c538356ea4468e225",
+      "bytes": 39225
+    },
+    {
+      "path": "src/protocol.rs",
+      "sha256": "b2b447220a3c1aeb8bd56a92f7c6c2920d959ceefcd1a7035fd1ec4b433eb95b",
+      "bytes": 26620
+    },
+    {
+      "path": "src/rpc_proto.rs",
+      "sha256": "47e1b7d87d3c7b5dc23add7ab6015caca14a119e4b5a7f1ee6cccd6956ecf100",
+      "bytes": 4396
+    },
+    {
+      "path": "src/rpc.rs",
+      "sha256": "9f0b94b8fb5e1052aecc642cf145c47d41b7fb7096e7c8d94cab6de622061039",
+      "bytes": 7369
+    },
+    {
+      "path": "src/subscription_filter.rs",
+      "sha256": "4eaac8cb45edc1c2f2b9710dead664d4ddee73b5ec2b6c3ffea019cbd310dea8",
+      "bytes": 14608
+    },
+    {
+      "path": "src/time_cache.rs",
+      "sha256": "5ea122f02a33cc2f7ed29842906368f6d0031b12aedd0c44b01c69bd3ad750af",
+      "bytes": 6568
+    },
+    {
+      "path": "src/topic.rs",
+      "sha256": "0249c4bd950c2a9340127b395f82b7a55fa8fd8339dd67c35b0b8f8f26b6082d",
+      "bytes": 3908
+    },
+    {
+      "path": "src/transform.rs",
+      "sha256": "43cd9ffcb62adee8d868bb7c972da8f8b0fd944b876dab7558850ee0ade6e8b9",
+      "bytes": 3262
+    },
+    {
+      "path": "src/types.rs",
+      "sha256": "00f6e2ae34e30400736e24bc973303cb936b0a4b798b9fd1d39c90b3f0da24a9",
+      "bytes": 22158
+    },
+    {
+      "path": "src/behaviour/tests.rs",
+      "sha256": "aea98e969f23e7e69786d000c9ae693c91e8d5a062ff3b32af3729cb69a4f28d",
+      "bytes": 211711
+    },
+    {
+      "path": "src/generated/compat.proto",
+      "sha256": "b429afd2343843617f886f09b62a06fbb00a84d910f2b47810e4be3ae300b517",
+      "bytes": 226
+    },
+    {
+      "path": "src/generated/mod.rs",
+      "sha256": "fb32d5c38ecdb43a5a63a58e59ed0405df640fc6ad2eb60702dcf32f26fd0944",
+      "bytes": 69
+    },
+    {
+      "path": "src/generated/rpc.proto",
+      "sha256": "0a069b08f38a5931951ca6744d75fbe2bdd30a3966eeaa2c9f174828e803eaea",
+      "bytes": 2050
+    },
+    {
+      "path": "src/generated/compat/mod.rs",
+      "sha256": "b46ffabbff515cdcc5bce0fc3c54f01b3aa0525199d4f79228b0e7c13d53c5ab",
+      "bytes": 46
+    },
+    {
+      "path": "src/generated/compat/pb.rs",
+      "sha256": "20ec3660d700f07aa29813222b5899217ad175993c786e6f1ab01f818e0b3354",
+      "bytes": 2736
+    },
+    {
+      "path": "src/generated/gossipsub/mod.rs",
+      "sha256": "b46ffabbff515cdcc5bce0fc3c54f01b3aa0525199d4f79228b0e7c13d53c5ab",
+      "bytes": 46
+    },
+    {
+      "path": "src/generated/gossipsub/pb.rs",
+      "sha256": "01e1679d6a9ed0a939327a72594970df8efbe2942f67c38628466a7607c56d83",
+      "bytes": 20440
+    },
+    {
+      "path": "src/peer_score/params.rs",
+      "sha256": "e7a59baa4e72044a5123e355e655fb578ecc3718aa237af1ba76a3b2b1b1c88a",
+      "bytes": 17530
+    },
+    {
+      "path": "src/peer_score/tests.rs",
+      "sha256": "7da4eff4ff7fe8b7f417730bb63c8002f964bca4e9c6af892c2b7c8c772c0cf1",
+      "bytes": 35595
+    },
+    {
+      "path": "tests/smoke.rs",
+      "sha256": "6935da6d8fbb4b501d3f621a11b2892d5c8c5c2ad1555dfb4bcff2e866ed7617",
+      "bytes": 7664
+    }
+  ],
+  "local_changes": [
+    {
+      "path": "src/peer_score.rs",
+      "purpose": "Remove empty IP sets in explicit and bulk peer cleanup."
+    },
+    {
+      "path": "src/peer_score/tests.rs",
+      "purpose": "Four deterministic cleanup, retention, shared-IP and churn regression tests."
+    },
+    {
+      "path": "src/behaviour.rs",
+      "purpose": "Expose scoped score-capacity admission and route mandatory priority overflow through real slow-peer counters/scoring."
+    },
+    {
+      "path": "src/rpc.rs",
+      "purpose": "Bound priority controls with explicit slow-peer errors; preserve FIFO and payload count limits, release rejected/stale publication slots."
+    },
+    {
+      "path": "src/lib.rs",
+      "purpose": "Export optional record limits only from the scoped transport snapshot."
+    },
+    {
+      "path": "src/config.rs",
+      "purpose": "Opt-in pre-allocation ingress record bounds; default remains unset."
+    },
+    {
+      "path": "src/protocol.rs",
+      "purpose": "Preserve generic decoding and route opted-in negotiated codecs through borrowed wire preflight."
+    }
+  ],
+  "patched_files": [
+    {
+      "path": "src/peer_score.rs",
+      "sha256": "1c78f7e45e0fb9e5d0aed635d24e62cd48724d6b7263f184455c8f3328afb8fe"
+    },
+    {
+      "path": "src/peer_score/tests.rs",
+      "sha256": "dd952584c06201aff5cdb2370b07f35d86d598676997d25fba11b3e9b995b098"
+    },
+    {
+      "path": "src/behaviour.rs",
+      "sha256": "4ad4977cbff8ca3ab0224b11507ed0cb0061ff19e4ac350d4ccd595d702ccf3c"
+    },
+    {
+      "path": "src/rpc.rs",
+      "sha256": "e9729f18c3eeae9863723161b88f2d41d8727552daa5c631d17f5277eca2b659"
+    },
+    {
+      "path": "src/lib.rs",
+      "sha256": "2b44c3bcbadb5743a0952e0bc22a93e4eba8861b51cc44f9c7c592c788edd3f0"
+    },
+    {
+      "path": "src/config.rs",
+      "sha256": "dbcaf0bd43370185a8ac8fea107b9fc882861ccb2af512d79e6ea919156e9755"
+    },
+    {
+      "path": "src/protocol.rs",
+      "sha256": "f219d07b1c912f3f0404ac18d6d78d95f9242e77add29c18c9a3a15d8db0879d"
+    }
+  ],
+  "tests_executed": false,
+  "archive_verified": true,
+  "archive_original_files_verified": 34,
+  "original_bytes": 782639,
+  "local_auxiliary_files": [
+    {
+      "path": "LICENSE-MIT",
+      "sha256": "4516eff70d7565c0d38a6c68b94dc1d57478c86fa55bf8bf45bd1ad21f9e7c4e"
+    },
+    {
+      "path": "EMBEDDED-SNAPSHOT.md",
+      "sha256": "c63b9be8a45eeb475b0f3642b71273d8dbf19f14476f492f8a2b54b47d00998e"
+    },
+    {
+      "path": "patches/0001-release-empty-peer-ip-sets.patch",
+      "sha256": "aa1e7c8acbb57e8d02fadc740d76e79709dc0a49425c741e022c9d9ca7031004"
+    },
+    {
+      "path": "patches/0002-empty-ip-key-regressions.patch",
+      "sha256": "a25b71865c30b00afa3478af6c8fd321cb507b3010044b72d27fba5fbda5057c"
+    },
+    {
+      "path": "patches/0003-bounded-peer-score-admission.patch",
+      "sha256": "cbbdb133a8b6d691ad5fcb8a7543c7e7381ee00a61a25761619dc3256627184b"
+    },
+    {
+      "path": "patches/0004-bound-priority-queue-and-report-overflow.patch",
+      "sha256": "037b255d9cfa2e3dfba318dd025ba3b6f96a5ea274780cc8b26bc1064d66abc1"
+    },
+    {
+      "path": "patches/0005-preflight-ingress-records.patch",
+      "sha256": "e407be502915b1cda2c53f6c28ad08ff4a07d4f8312ebef1fd611f1f08b596b6"
+    }
+  ],
+  "local_added_files": [
+    {
+      "path": "src/peer_score/capacity.rs",
+      "purpose": "Purge only expired disconnected score records and check capacity; four deterministic scoring, shared-IP and pending-slot controls.",
+      "sha256": "f9e17b20543faa3d09bba16127cb2441e2e6ca9074c438502becda19a0e88e45"
+    },
+    {
+      "path": "src/rpc/queue_bounds.rs",
+      "purpose": "Four actual stalled-consumer FIFO, overflow and publication accounting regression controls.",
+      "sha256": "4f2ae8256db61403f862e4a51d1a4f0bc0e90dc70b8d5a3fc15e95d775348037"
+    },
+    {
+      "path": "src/behaviour/queue_bounds.rs",
+      "purpose": "Actual mandatory-control overflow verifies failed admission, preserved queue, real penalty and SlowPeer event.",
+      "sha256": "29047a9430a1d5c7df0ba2b391887bdb1488d367f1981874bec2113fffd11253"
+    },
+    {
+      "path": "src/protocol/preflight.rs",
+      "purpose": "Fixed-depth borrowed protobuf wire scanner; capacity and malformed errors remain distinct.",
+      "sha256": "84488d85b3001561c4a3b90fdfcacadcf203a3de44022e9fc2e8f12d862ec63c"
+    },
+    {
+      "path": "src/protocol/preflight/tests.rs",
+      "purpose": "Sixteen actual codec boundary, byte-preservation, malformed, pointer-width prefix parity and allocation-amplification controls.",
+      "sha256": "a5008f41212bb373c5156d4db6a309e3bb29cdb85ea51173725140a1dd34b44b"
+    }
+  ],
+  "source_regression_controls": 29
+}

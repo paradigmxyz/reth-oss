@@ -1,0 +1,28 @@
+{
+  "spec_release": "v1.7.0-beta.3",
+  "source_manifest_sha256": "513216f9ca4c07092e35dff6a6ce6eab383823c36dd232949d7a839192f7bc0f",
+  "classification": "unchanged published first-merge signed consensus inputs; execution responses remain synthetic fixture assumptions",
+  "files": [
+    {
+      "source_member": "minimal/bellatrix/fork_choice/on_merge_block/pyspec_tests/all_valid/anchor_state.ssz_snappy",
+      "source_sha256": "0xeedd2c0d0c291b97b86495b63469cebdf49ce7037fe2057ef9c4f7127d663007",
+      "decoded_path": "anchor_state.ssz",
+      "decoded_sha256": "0xa2b1a7ae988bfc4e99460711876715397dc9c55a97e6ec5f8582a7fdd5c4f641",
+      "decoded_bytes": 19665
+    },
+    {
+      "source_member": "minimal/bellatrix/fork_choice/on_merge_block/pyspec_tests/all_valid/anchor_block.ssz_snappy",
+      "source_sha256": "0xea893ab3a8352ecba32ccf5d9851ea0f41f3056a5098a8cd9db535d9f1fbf76a",
+      "decoded_path": "anchor_block.ssz",
+      "decoded_sha256": "0x8f8486d75b1d346ab252c1738bcf526d8a81c2cab93c5fe0f1a2ee33447a9095",
+      "decoded_bytes": 916
+    },
+    {
+      "source_member": "minimal/bellatrix/fork_choice/on_merge_block/pyspec_tests/all_valid/block_0x6ec5ad13d2bf5a7d927b2e731692ecd2a42a7942b9e21aacc8589583e23288d4.ssz_snappy",
+      "source_sha256": "0x18e973cca019d6ad60f21f65cc6ff67d7eb3f0410edad744e88522670d97b276",
+      "decoded_path": "first_merge_block.ssz",
+      "decoded_sha256": "0xd2f60601d4a96b7b00a51c6f1b5a9630d5b4a7a1836216dbd7c962e9581736a0",
+      "decoded_bytes": 1016
+    }
+  ]
+}

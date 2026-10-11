@@ -1,0 +1,7 @@
+# Generated fixture inputs and test reports. Keep checked-in testdata visible.
+/artifacts/
+/spec-tests/downloads/
+/spec-tests/fixtures/
+/spec-tests/work/
+/execution-tests/work/
+/devnet/work/

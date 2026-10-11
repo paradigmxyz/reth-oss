@@ -1,0 +1,80 @@
+{
+  "schema_version": 1,
+  "resolved_on": "2026-10-08",
+  "kurtosis": {
+    "version": "1.20.0",
+    "linux_amd64_url": "https://github.com/kurtosis-tech/kurtosis-cli-release-artifacts/releases/download/1.20.0/kurtosis-cli_1.20.0_linux_amd64.tar.gz",
+    "linux_amd64_sha256": "3866e805a83a63d3d0b177f54c3fb556066b8c0e12f6442a0579bb7deaa1d5ae",
+    "windows_amd64_url": "https://github.com/kurtosis-tech/kurtosis-cli-release-artifacts/releases/download/1.20.0/kurtosis-cli_1.20.0_windows_amd64.tar.gz",
+    "windows_amd64_sha256": "698ee62b8ee9679c7fe3952b4ad75cc69ef6934c56d63ae780655e91a6193c5f"
+  },
+  "ethereum_package": {
+    "commit": "bdbea4124dc8485b03991a137bb82347019b3922",
+    "archive_url": "https://api.github.com/repos/ethpandaops/ethereum-package/tarball/bdbea4124dc8485b03991a137bb82347019b3922",
+    "archive_sha256": "5362f168f9f0c79867987fcb285520fc9bc6142ea1a1c83445d489a636497060"
+  },
+  "images": {
+    "reference_el": {
+      "image": "ethpandaops/reth@sha256:2c4d0af245c1a117338fc19169a09dd1fca8fc610299a2612bb68a218efe6a28",
+      "resolved_tag": "main-ae9b816",
+      "published_at": "2026-10-08T02:44:14.743146Z",
+      "source_revision": "ae9b816748e0bddb7bb91791b88845a3c695d089",
+      "amd64_manifest": "sha256:088b321b7ed669862195897178fdea23c5b1347ce174db5462a536f18c8c5d86"
+    },
+    "beacon_and_validator": {
+      "image": "ethpandaops/lighthouse@sha256:cec341c0c4f4348cff40a56d8f5fc56aa8947fe2ee807ffb10c52a0cdc8c834a",
+      "resolved_tag": "unstable-95206a0",
+      "published_at": "2026-10-07T22:35:48.233595Z"
+    },
+    "genesis_generator": {
+      "image": "ethpandaops/ethereum-genesis-generator@sha256:87d128ac2db9e0f5bd651050f7e852cbecbe8e60508334bffcdb77e52e0fd9d7",
+      "resolved_tag": "6.2.3",
+      "published_at": "2026-10-05T09:34:09.016328Z"
+    },
+    "validator_key_generator": {
+      "image": "protolambda/eth2-val-tools@sha256:46147228f291266148a6a21a2b9541367ad5f70e619d79cd5393459baf539f58",
+      "resolved_tag": "latest",
+      "published_at": "2026-07-06T10:45:44.12714Z"
+    },
+    "yq": {
+      "image": "linuxserver/yq@sha256:459ea899679213d9aa951398a5461d61f24dcce7358ef02398e506a0884854ed",
+      "resolved_tag": "latest",
+      "published_at": "2026-10-08T01:03:13.802576Z"
+    },
+    "transaction_generator": {
+      "image": "ethpandaops/spamoor@sha256:6de803385d3d344b65da5d8916b71c08170f42b27bf2c1621f642939c5b7c02c",
+      "resolved_tag": "master",
+      "published_at": "2026-09-24T08:25:43.298646Z"
+    }
+  },
+  "services": {
+    "reference_el": {
+      "name": "el-1-reth-lighthouse",
+      "port": "rpc"
+    },
+    "reference_beacon": {
+      "name": "cl-1-lighthouse-reth",
+      "port": "http"
+    },
+    "sut_el": {
+      "name": "embedded-beacon-sut",
+      "port": "rpc"
+    },
+    "sut_beacon": {
+      "name": "embedded-beacon-sut",
+      "port": "beacon"
+    }
+  },
+  "provenance": {
+    "package_source": "https://github.com/ethpandaops/ethereum-package/tree/bdbea4124dc8485b03991a137bb82347019b3922",
+    "cli_service_config": "https://docs.kurtosis.com/api-reference/starlark-reference/service-config/",
+    "cli_release": "https://github.com/kurtosis-tech/kurtosis-cli-release-artifacts/releases/tag/1.20.0",
+    "gloas_reference_guidance": "https://notes.ethereum.org/@ethpandaops/glamsterdam-devnet-11",
+    "consensus_api_implementation": "https://github.com/sigp/lighthouse/blob/95206a0248980d4530f290fa1aac105481c59c2c/beacon_node/http_api/src/beacon/execution_payload_envelopes.rs",
+    "shell_task_image_selection": "https://github.com/kurtosis-tech/kurtosis/blob/1.20.0/core/server/api_container/server/startosis_engine/kurtosis_instruction/tasks/run_sh.go",
+    "execution_genesis_hash": "https://github.com/ethpandaops/eth-beacon-genesis/blob/9bbbf55fa9603b4c2e656fe7c441a340ea61f6d6/beaconchain/phase0.go",
+    "reference_execution_image_metadata": "https://hub.docker.com/v2/repositories/ethpandaops/reth/tags/main-ae9b816",
+    "reference_execution_engine_api": "https://github.com/paradigmxyz/reth/blob/ae9b816748e0bddb7bb91791b88845a3c695d089/crates/rpc/rpc-engine-api/src/engine_api.rs",
+    "reference_execution_source_identity": "linux/amd64 SLSA provenance from the immutable multi-platform image index"
+  }
+}

@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "audited_on": "2026-10-09",
+  "reference_source_revision": "95206a0248980d4530f290fa1aac105481c59c2c",
+  "sources": [
+    {
+      "url": "https://raw.githubusercontent.com/sigp/lighthouse/95206a0248980d4530f290fa1aac105481c59c2c/beacon_node/beacon_chain/src/execution_payload.rs",
+      "path": "beacon_node/beacon_chain/src/execution_payload.rs",
+      "sha256": "db919c10095bfee57199701ece3f4f93718de30b7d2788355a93ebc0ee50f51a",
+      "bytes": 18170
+    },
+    {
+      "url": "https://raw.githubusercontent.com/sigp/lighthouse/95206a0248980d4530f290fa1aac105481c59c2c/consensus/types/src/core/chain_spec.rs",
+      "path": "consensus/types/src/core/chain_spec.rs",
+      "sha256": "fcde2c2908d48fa7bdd408b30c47a2e68ce282822933f39bc894b08d8b8e92e2",
+      "bytes": 184549
+    },
+    {
+      "url": "https://raw.githubusercontent.com/sigp/lighthouse/95206a0248980d4530f290fa1aac105481c59c2c/consensus/types/src/execution/execution_payload_envelope.rs",
+      "path": "consensus/types/src/execution/execution_payload_envelope.rs",
+      "sha256": "6c358ab3de8976615762644ec23c3453693f5b674e77892ae319496650a17186",
+      "bytes": 3010
+    },
+    {
+      "url": "https://raw.githubusercontent.com/sigp/lighthouse/95206a0248980d4530f290fa1aac105481c59c2c/testing/ef_tests/Makefile",
+      "path": "testing/ef_tests/Makefile",
+      "sha256": "ee0069ee851d9798388a30ae88bec35d86a25b70fee5f9ad321d08eda0558035",
+      "bytes": 1676
+    }
+  ],
+  "historical": {
+    "status": "unsupported_selected_reference",
+    "reason": "Actual get_execution_payload reads latest_execution_payload_header.block_hash at lines303-304 and passes it at329. prepare_execution_payload assigns that unchanged parent_hash at390. A genuine Phase0-to-Bellatrix upgrade has a zero execution header. The private terminal override cannot cause this producer to select the committed nonzero execution genesis terminal parent.",
+    "required_terminal": "actual execution genesis block hash",
+    "required_activation_epoch": 2,
+    "must_not": [
+      "inject execution header into the upgrade state",
+      "skip Bellatrix or any requested observed fork",
+      "substitute an unverified image"
+    ],
+    "resolution": "Obtain and verify an immutable reference with both actual terminal-selection production and exact target Gloas support; preserve every original schedule requirement."
+  },
+  "gloas": {
+    "source_support": "Gloas fork activation config and complete signed envelope parent_beacon_block_root schema exist in selected source.",
+    "exact_spec_compatibility": "unverified until exact pinned full conformance and real independent runtime observation; image/source feature existence is not acceptance.",
+    "live_acceptance": "not_run"
+  },
+  "deployment": "not_run"
+}

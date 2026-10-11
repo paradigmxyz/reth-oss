@@ -1,0 +1,6 @@
+preset: minimal
+fork: phase0
+runner: epoch_processing
+handler: rewards_and_penalties
+suite: pyspec_tests
+case: full_attestations_default_balances_except_a_validator_with_one_gwei

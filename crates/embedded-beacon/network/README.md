@@ -1,0 +1,15 @@
+# Embedded beacon networking
+
+The wire codecs enforce exact protocol identifiers, canonical unsigned length prefixes, framed Snappy checksums, full stream EOF, and compressed and decompressed byte limits. Status v1/v2 and fork-aware block responses use the configured network digest, including scheduled blob parameters.
+
+The dormant peer runtime shares one secp256k1 identity across signed discovery records, TCP/Noise and QUIC/TLS. Checked authenticated status exchanges precede block and envelope retrieval. Connection limits, outbound request ownership, private inbound response channels and deadlines remain bounded. Construction does not enable public networking or establish live synchronization.
+
+Gloas envelope range/root responses decode the complete signed SSZ schema. Each pending request retains small private-field EnvelopeBlockReference values copied only from completely decoded WireBlock objects. References contain the actual message root, beacon slot, parent root, fork and digest. They retain no block bytes or response permits: a coordinator imports or persists blocks and drops its BlockBatch before requesting envelopes. Returned root, parent, payload slot number and digest must match those original references. Response context always uses the referenced beacon slot, never the payload timestamp. Range ancestry walks the bounded original block map through omitted envelopes, including EMPTY payload nodes.
+
+Providers must select envelopes from the validated local head's payload chain and exclude EMPTY nodes before calling the response method. Structural wire checks cannot prove that provider selection, builder signatures, execution validity, data availability or consensus import. Those checks remain the coordinator's responsibility. Root responses may omit unavailable envelopes. Valid incoming requests retain the pinned wire maximum of 128 items; this follower requests and serves at most 16 objects per batch, with a 32 MiB aggregate response bound.
+
+Block and envelope codecs share two aggregate read/retention permits and two write permits. Retained batch clones keep their read reservation; canceled blocking SSZ/compression workers keep their reservation until actual worker completion. Original block metadata carries no reservation, preventing block batches waiting for envelopes from exhausting both permits permanently.
+
+The envelope rules follow the pinned [Gloas networking specification](https://github.com/ethereum/consensus-specs/blob/v1.7.0-beta.3/specs/gloas/p2p-interface.md#executionpayloadenvelopesbyrange-v1). Actual TCP/Noise range and QUIC/TLS root tests retrieve blocks first, release their batches, then retrieve linked envelopes on the same authenticated connections. Additional regressions cover full schema, range/root linkage, EMPTY gaps, scheduled context, malformed framing, EOF, cancellation and aggregate budgets. These local wire tests do not establish public sync or chain advancement.
+
+Gossip transport subscriptions, peer scoring, sidecar Req/Resp and a live consensus import coordinator remain implementation work.

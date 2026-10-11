@@ -1,0 +1,1 @@
+eth-ssz-specs==0.1.0

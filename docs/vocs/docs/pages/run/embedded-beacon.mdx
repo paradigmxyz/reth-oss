@@ -1,0 +1,611 @@
+---
+description: Develop and run the optional embedded beacon follower for Reth.
+---
+
+# Embedded beacon
+
+The embedded beacon adds a consensus follower to Reth through a separate launcher
+in `bin/reth-embedded-beacon/` and libraries under `crates/embedded-beacon/`. It
+validates received consensus data and passes execution payloads to Reth's typed Engine API. The implementation targets
+Gloas and includes earlier forks for replay and fork transitions.
+
+**This is experimental.** The complete authenticated 73,992-case consensus
+fixture run has passed. Embedded startup remains gated by default pending
+independent runtime acceptance. An explicit `--beacon.experimental-sync` permits a
+Hoodi checkpoint attempt through the same bootstrap and validation paths. Hoodi
+and mainnet synchronization have not been demonstrated. Building the launcher or
+passing component tests does not establish public-network synchronization.
+
+## Launch Hoodi
+
+From the repository root in Linux or WSL:
+
+```sh
+sh launch.sh --hoodi
+```
+
+The launcher defaults to `maxperf`, builds the binary when missing or stale, and
+runs one Reth process with `--minimal --embedded-beacon`. It selects a fresh
+provider-finalized Hoodi checkpoint and leaves all SSZ, signature, fork, data
+availability and execution checks to the native node. The checkpoint provider is
+the explicit trust source; this selection does not independently prove finality.
+Build output and node logs stream to the terminal. With ANSI colour enabled,
+beacon log lines use bright cyan throughout, including timestamps, levels and
+fields. Root fields use full `0x`-prefixed, 32-byte hexadecimal values. Press Ctrl+C
+to stop; the data directory is preserved for the next launch.
+
+```sh
+sh launch.sh --hoodi --profile release
+sh launch.sh --hoodi --verbose
+sh launch.sh --hoodi --profile release --fcr
+```
+
+The Hoodi launcher uses a bounded idle decoded-state budget of 512 MiB and a
+separate 512 MiB shared immutable-byte cache. The storage source owns the entire
+decoded-state pool, allowing checkpoint and replay states to share its capacity.
+The graph holds cold references and obtains checked owning guards for reads;
+it has no separate idle decoded-state pool. Source lease wrappers keep idle
+ownership only while the storage cache owns that exact immutable allocation.
+Active read leases and transition candidates have separately enforced resident
+limits; these cache settings are not limits on total process memory.
+Change the settings with `--state-cache-mib` and `--cache-mib`, or
+`BEACON_STATE_CACHE_MIB` and `BEACON_CACHE_MIB`. The binary accepts
+`--beacon.state-cache-mib` (1–2048 MiB); its default remains 64 MiB with `--minimal`
+and 256 MiB otherwise. This memory cache is separate from
+`--beacon.cache-mib`, which bounds shared immutable bytes. Cache settings do not
+change durable retention, execution pruning, consensus validation or the preset.
+The effective profile and storage startup log report both cache limits.
+
+Authenticated epoch-boundary replay proofs use the storage source's bounded
+decoded-state budget. A reusable proof retains the exact immutable origin and boundary states;
+each lookup still checks the durable owners, recorded roots and original state
+allocations. Entries exceeding the budget are verified without being cached.
+Shared leases count each state allocation once against the resident memory limit.
+
+Fast confirmation is disabled by default. `--fcr` enables this optional rule and
+its dedicated `beacon::fcr` debug diagnostics in the launcher. The binary also
+accepts `node --embedded-beacon --fcr`; use
+`--log.stdout.filter 'info,beacon::fcr=debug'` to inspect it directly. It waits
+until the consensus head is recent and optimistic execution catch-up has settled.
+During catch-up, execution safety hashes stay zero. With FCR enabled, a previous
+real VALID forkchoice acknowledgement from the same execution adapter is also
+required before publishing nonzero safety targets. A new SYNCING response remains
+unacknowledged and retries the same target.
+A genuine missed deadline suspends confirmation until a timely observation; the
+execution safe hash falls back to the authenticated finalized execution hash.
+Ordinary fork choice, signature validation, execution validation and finality
+continue with or without FCR. These confirmations depend on the timely-attestation
+assumption described in the [consensus specification](https://ethereum.github.io/consensus-specs/specs/phase0/fast-confirmation/).
+
+RPC, beacon HTTP, metrics, Prometheus and Grafana bind to localhost. The monitoring
+stack starts by default; `--no-grafana` skips it while retaining node metrics.
+The launch path uses Bash, Docker, curl, jq, OpenSSL and standard Unix tools.
+Python remains available for fixture tooling and is not required for launch.
+An optional ignored `launch.local.sh`, or `--config FILE`, supplies private Docker,
+image, cache and data settings. `--data-dir PATH` and `--advertise-ip IPV4` override
+local settings. `sh launch.sh --help` lists the supported arguments.
+
+In PowerShell, run this from the repository root:
+
+```powershell
+wsl -d Ubuntu -- bash ./launch.sh --hoodi
+```
+
+## Build and inspect
+
+Run commands from the repository root:
+
+```sh
+cargo build --locked --release -p reth-embedded-beacon-launcher \
+  --features embedded-beacon
+
+./target/release/reth-embedded-beacon node --beacon.status
+
+./target/release/reth-embedded-beacon node \
+  --chain hoodi --minimal --embedded-beacon --beacon.profile
+```
+
+Docker tooling can source `testing/embedded-beacon/scripts/docker-settings.sh`
+and call `beacon_docker_settings` to derive the repository from the helper's path.
+It honors the caller's Docker context and `DOCKER_HOST`, uses the caller's UID/GID,
+and accepts `BEACON_TARGET_DIR`, `CARGO_HOME`, `BEACON_DATA_DIR`,
+`BEACON_BUILD_IMAGE`, `BEACON_RUN_IMAGE`, `BEACON_BUILD_JOBS` and
+`BEACON_PROFILE=release|maxperf|debug`. `beacon_ensure_build_image` creates a missing local
+build environment from the Dockerfile's pinned `build-environment` target. The root launcher loads an optional ignored `launch.local.sh` to reuse local
+build and data settings. It accepts `--config FILE` to choose another file.
+`BEACON_METRICS_ADDR` defaults to `127.0.0.1:9001`.
+The local monitoring stack starts with
+`bash testing/embedded-beacon/devnet/observability/run.sh up`; its Grafana dashboard
+and Prometheus are bound to localhost. The root launcher starts it by default;
+`BEACON_OBSERVABILITY=false` disables that startup hook.
+
+The Hoodi launcher accepts `--profile maxperf|release|debug` and defaults to
+`maxperf`. An explicit argument overrides `BEACON_PROFILE`. Missing or stale
+binaries are built with the selected Cargo profile before launch. `release`
+uses optimization level 3 and thin link-time optimization; `maxperf` inherits
+release settings and uses full link-time optimization with one code-generation
+unit. A maximum-performance build can also be created directly:
+
+```sh
+cargo build --locked --profile maxperf -p reth-embedded-beacon-launcher \
+  --features embedded-beacon
+
+./target/maxperf/reth-embedded-beacon node --beacon.status
+```
+
+The executable is `reth-embedded-beacon`. Its Cargo feature and runtime flag are
+both named `embedded-beacon`. Status and profile commands print the compiled
+capabilities without opening a database. `--beacon.experimental-sync` admits only
+canonical Hoodi checkpoint attempts while leaving reported readiness unverified;
+it never skips signatures, consensus, data availability or execution validation.
+
+Without the runtime flag, the feature-enabled launcher uses Reth's ordinary
+execution-node builder:
+
+```sh
+./target/release/reth-embedded-beacon node --chain hoodi
+```
+
+The existing `reth` executable and its defaults are unchanged. An execution-only
+node still needs a source of valid consensus updates to follow a proof-of-stake
+chain.
+
+## Embedded Hoodi configuration
+
+The following explicitly opts into an experimental Hoodi checkpoint attempt.
+Placeholder trust and address values must be replaced. Without the experimental
+flag, compiled readiness must pass before any database is opened:
+
+```sh
+./target/release/reth-embedded-beacon node \
+  --chain hoodi --minimal --embedded-beacon \
+  --beacon.experimental-sync \
+  --datadir /data/embedded-hoodi \
+  --beacon.sync-mode checkpoint \
+  --beacon.checkpoint-url https://CHECKPOINT_ARTIFACT_SOURCE \
+  --beacon.trusted-checkpoint EPOCH:0xTRUSTED_BLOCK_ROOT \
+  --beacon.listen-ip PUBLIC_LITERAL_IP \
+  --beacon.bind-ip 0.0.0.0 \
+  --beacon.bootnodes-file /data/hoodi/bootnodes.txt \
+  --beacon.http
+```
+
+Checkpoint trust is an explicit epoch and block root. A download source supplies
+artifacts; its advertised head does not establish trust. Bootstrap checks bind
+original SSZ data to the selected chain, checkpoint, fork schedule and
+weak-subjectivity rules.
+
+For Bellatrix through Fulu checkpoints, the authenticated consensus follower can
+start while execution is catching up. It admits execution-optimistic descendants
+only after real `SYNCING` or `ACCEPTED` payload replies, with complete consensus,
+signature and data-availability checks. One importer owns both initial and
+advancing execution targets. Temporary queue saturation defers the exact bounded
+original input without granting validity or stopping execution sync; observation
+queries retry on a later owner turn. No competing fixed-checkpoint updater runs beside
+it. Only exact `VALID` replies can grant execution acknowledgement. API responses
+and logs expose execution optimism separately from the beacon head slot.
+
+Peer startup preserves the authenticated snapshot's clock when validation crosses
+slot boundaries, then refreshes from the importer before live peer IO. It rejects
+snapshots from the future and keeps exact consensus configuration checks.
+
+Authenticated recovery replays original consensus inputs before publishing its
+restored head. Its initial discovery clock uses current local time while head and
+finality remain bound to the authenticated anchor. Retained payload hashes and
+saved snapshots cannot supply execution validity. Gloas checkpoint and envelope
+startup retain their separate strict execution requirements; deferred Gloas
+envelope import is not enabled by this path.
+
+Recovery retries the same signed original when required data is explicitly
+missing. Each data request keeps its original enqueue deadline across peer
+retries, and an issued request remains owned until its exact transport response
+or terminal failure. Proof, storage and uncertain execution failures still stop
+recovery; logs preserve the original recovery error. Repeated missing-data INFO
+messages are limited to thirty-second intervals; debug verbosity includes each
+retry attempt.
+
+For Fulu and Gloas, the follower verifies eight sample columns derived from its
+persisted discovery identity, including its four custody columns. Partial peer
+responses are verified independently, and later requests fetch only missing
+samples from rotating checked peers. Bounded original sample bytes survive retries
+of the same candidate and are freshly reverified on every attempt. Candidate
+release clears those temporary inputs; durable retention keeps only custody data.
+Retained local sidecars are reverified against the original candidate before use. Every selected sample must pass KZG
+checks and its fork-specific binding: the signed block header and inclusion proof
+for Fulu, or the exact block and payload bid for Gloas. Signed discovery records
+and checked peer metadata provide custody hints for choosing providers of the
+remaining sample columns. Hints expire after 120 seconds and cannot grant
+availability or consensus validity. A bounded cycle gives every eligible provider,
+including peers without a custody hint, a turn before another provider repeats.
+The cycle belongs to one exact block root and slot; failed local admission does
+not consume a turn. Candidate changes and disconnected peers reset their relevant
+routing state. Archive records likewise cannot grant validity.
+
+An exact resource-unavailable reply retires that provider connection so discovery
+can fill its bounded slot with another provider. Transient server errors keep the
+connection. A full discovery queue defers its next query instead of stopping sync.
+
+Restart with the same `--datadir` to reuse committed execution headers and stage
+checkpoints. Container removal and rebuilding the binary do not remove a mounted
+data directory. Body-stage stream batches can be configured in that directory's
+`reth.toml`; the setting is loaded at startup:
+
+```toml
+[stages.bodies]
+downloader_stream_batch_size = 15000
+```
+
+This changes the local stream/commit batch, while peer request sizes retain their
+own setting. Larger batches do not imply a proportional increase in download speed.
+
+Genesis mode uses `--beacon.sync-mode genesis`, `--beacon.genesis` and an
+integrity-indexed history directory supplied through `--beacon.archive`. Public
+network genesis mode currently requires that archive. Peer seeds are signed
+routing records; routing discovery alone does not admit a consensus peer.
+
+`--beacon.listen-ip` is the literal advertised address. `--beacon.bind-ip` selects
+the local interface when address translation is needed. The default beacon port
+is 9000, with a separate QUIC port defaulting to its checked successor. The seed
+file contains one signed discovery record per line.
+
+The follower has no validator keys, local attestations, block proposals or builder
+signing duties. Received attestations, slashings and Gloas payload attestations
+remain necessary for consensus validation and head selection. Gloas bid and
+envelope validation, builder accounting and payload-aware fork choice are still
+required even when the node produces no bids.
+
+## Libraries and modules
+
+| Crate directory | Responsibility |
+| --- | --- |
+| `config` | Chain identity, fork schedules, clocks and resource profiles. |
+| `primitives` | Consensus types, SSZ primitives and roots. |
+| `crypto` | Domains, signatures and signature verification. |
+| `state-transition` | Fork-specific block, slot, epoch and upgrade processing. |
+| `fork-choice` | Consensus stores, received votes, payload status and head selection. |
+| `data-availability` | Blob and column verification. |
+| `network` | Discovery, bounded gossip, authenticated peers and request/response transport. |
+| `shared-data` | Immutable object storage, durable owner pins and object collection. |
+| `storage` | Consensus persistence and integrity-checked archives. |
+| `sync` | Retrieval scheduling and bounded synchronization work. |
+| `execution-proxy` | Typed execution calls, version checks and uncertain-call reconciliation. |
+| `node` | Bootstrap, admission, data availability, replay and read-only Beacon API. |
+
+The launcher is a binary package under `bin/reth-embedded-beacon/`. The Rust
+fixture runner lives under `testing/embedded-beacon/spec-tests/`, alongside its
+source pins and retained regression data; Python fixture helpers and independent
+devnet tooling also live under `testing/embedded-beacon/`.
+
+The `node` crate separates peer runtime, import coordination, gossip validation,
+bootstrap, compact persistence, execution verification and API serving into
+modules. A file-based Rust module can have a same-named directory containing its
+children. For example, `node/src/attestation_gossip.rs` contains production
+validation and bounded seen-attestation state;
+`node/src/attestation_gossip/tests.rs` contains that module's regression tests.
+
+## Storage and resource profile
+
+Shared storage deduplicates byte-identical objects with the same semantic kind
+and encoding. Execution-pool, consensus and recovery owners keep independent
+pins. Pool eviction cannot release consensus ownership. Blobs, columns, cells and
+proofs remain distinct when their bytes or representations differ.
+
+The embedded minimal profile sets a 64 MiB shared byte cache; the standard
+embedded profile uses 256 MiB. `--beacon.cache-mib` supplies an explicit override.
+Minimal mode also supplies smaller execution RPC cache defaults while preserving
+explicit user overrides. It keeps the selected public network's consensus preset;
+Hoodi does not become a minimal consensus test network.
+
+Finalized pruning and collection must preserve required replay, unfinalized states
+and retained sidecars. Node-owned object collection checks all durable owners and
+commits reference removal before unlinking. Its per-slot scan and unlink budgets
+bound that work; they do not bound all reference-metadata processing or total
+process memory. Caller-held bytes, metadata and execution state add to the cache
+budget. No measured whole-node disk-reduction percentage is claimed.
+
+## Observations
+
+`--beacon.http` enables a read-only Beacon API, defaulting to `127.0.0.1:5052`.
+`--beacon.http-addr` and `--beacon.http-port` change that binding. The API observes
+the authenticated importer and retained original objects; it does not override
+readiness or fabricate a signature for an unsigned checkpoint seed.
+
+Execution JSON-RPC remains useful for blocks, gas limits, receipts and state.
+Its exposure follows the ordinary Reth RPC flags. Internal consensus-to-execution
+calls use the captured typed Engine API and do not require JSON-RPC transport
+between the embedded components.
+
+Beacon messages include `[beacon]` and use `beacon::*` tracing targets.
+Use `--log.stdout.filter info,beacon=debug` for beacon debugging. Checkpoint authentication shows an
+activity bar and elapsed time in terminal output; piped terminal output reports
+activity every ten seconds. JSON and logfmt retain structured phase and elapsed
+fields, and `--quiet` suppresses the display. The activity bar indicates ongoing
+verification, without estimating a completion percentage. The initial prompt to
+launch an external beacon client is suppressed when consensus runs in process;
+stalled forkchoice warnings remain enabled under `beacon::execution` with the
+seconds since the last update and the execution head. They indicate missing
+execution forkchoice progress, even if block validation is still running.
+
+Pending gossip validation has a sixty-second deadline and separate bounded
+retention. Acceptance starts the ordinary short forwarding window; accepted
+traffic does not inherit the longer pending lifetime. Expired callbacks appear
+at debug level with their actual verdict, while verified rejection still applies
+the peer penalty. The raw cache and application byte limits remain enforced.
+
+Development builds optimize the optional beacon hashing and state codec crates
+while retaining debug assertions and overflow checks. Identical checkpoint and
+post-block states share one full decode and root computation. Unequal states
+still require the complete bounded replay and exact canonical state comparison.
+Use a release build for sustained node operation.
+
+During signed-history recovery, a startup progress log reports `is_syncing=true`
+and `recovering=true`, checked peers and pending data requests every thirty
+seconds. Exact replay progress includes completed and remaining transcript events,
+with separate block, envelope, vote, slashing and clock counts. Successful block
+and envelope events report their complete wall time, including original-input
+authentication and clock reconstruction before native admission. Other events
+report timings at debug level, with periodic progress at info level. These fields
+explain work between block imports; they do not establish head advancement.
+Canonical head status becomes available after recovery completes.
+
+Each successful new checked import reports its original root, input type and byte
+count, elapsed milliseconds, and whether it belongs to recovery. The fields
+`preparation_ms`, `native_import_ms`, `body_observations_ms`, `recording_ms` and
+`publication_ms` separate decoding and preparation, native validation and state
+persistence, retained votes and slashings, replay recording, and publication.
+Consensus-verified classic imports, including optimistic execution and recovery,
+also report `availability_ms`,
+`transition_with_execution_ms`, `execution_wait_ms`, `native_fork_choice_ms` and
+`state_persistence_ms`. Execution wait is part of transition time, so these
+overlapping fields must not be added together. `native_phases_measured` identifies
+imports with the native breakdown; `execution_wait_measured` identifies captured
+payload API timing. These are wall-clock measurements, including awaited work.
+Already admitted blocks produce a debug signature-recheck message and separate
+duplicate counters rather than a new-block completion log. New-block counters
+and durations therefore exclude duplicate acknowledgements. Debug logs also
+show voting-source constraints when the selected head differs from the admitted
+block; an admitted retrieval cursor is not a canonical head.
+Debug logs mark the start and completion of each phase. Total elapsed time also
+includes adapter bookkeeping; receipt of an execution payload alone does not
+show completed consensus import or canonical head advancement.
+
+Retained Fulu body votes reuse one checked read-only state view. Each vote still
+checks its target, committee, domain and signature in order. A failed vote rolls
+back its prospective checkpoint change without discarding earlier valid votes;
+successful votes update their latest messages without copying the whole store.
+An exclusively borrowed group of votes for the same checkpoint checks its retained
+schema budget at its first successful commit. Later votes only update latest-message
+values and reuse that unchanged schema budget; failed first votes still roll back
+and cannot authorize later commits. Fixed fields that own no heap allocations use
+checked sequence capacity accounting without rescanning each validator or scalar.
+Variable or custom heap-owning values retain recursive accounting and error checks.
+Fixed-width SSZ decoding reserves the exact validated element count before decoding.
+Large validator vectors therefore avoid geometric capacity growth; canonical bytes,
+roots, element validation and the first decoding error remain unchanged.
+Checkpoint preparation holds an owning read guard and a prospective state entry;
+it publishes that entry only when an individual vote commits.
+Publication reuses head metadata only after pruning and confirmation changes are
+complete. It still persists the exact replay data and acknowledges the execution
+forkchoice before committing the canonical pointer.
+
+Catch-up requires average verified new-block throughput above the network's
+arrival rate. Occasional slow blocks or epoch boundaries can exceed a slot;
+duplicate acknowledgements do not count toward that throughput.
+
+Validator leaf hashing uses up to 32 available CPU workers for large registries,
+with at least 32,768 validators per worker. One nonblocking permit bounds the
+worker pool across simultaneous state roots; small inputs, busy pools and worker
+creation failures use serial hashing. Ordered leaf roots and final SSZ reductions
+remain exact. Fixed containers stream checked canonical bytes into sequence buffers,
+avoiding per-validator field allocations; variable containers retain their checked
+offset encoder. Committee partitions share round hashes within at most 1,024
+scratch entries and produce the same ordered indices as scalar shuffling.
+
+Strict imports consume one disposable parent-state copy through the same checked
+fork dispatcher and scheduled slot replay. Public mutable-state transition APIs
+still commit only after successful validation; rejected or cancelled imports
+cannot publish the disposable state. Mandatory block signatures, execution
+responses, fork schedules and post-state roots remain checked.
+
+Scheduled and Fulu/Gloas structural guards recursively check collection bounds,
+nested mutable fields and preset-specific layouts without hashing a commitment
+that they do not use. Fixed scalar and validator fields have invariant structure.
+Custom SSZ implementations retain their complete hash checks by default. Slot-ring
+commitments and the signed complete post-state-root comparison still hash the
+full state. This avoids repeated full registry hashing at unchanged guard boundaries.
+
+Native Fulu and Gloas attestation loops share active-registry preparation for at
+most two epochs. Preparation starts after slashings and ends before exits or
+registry changes. Retained body votes use one checked immutable state view while
+keeping individual vote order and rollback. Every original signature, committee,
+domain, time and index check still runs; successful votes never validate a later
+vote by association. Large aggregate key sets use at most 32 available workers,
+with at least 1,024 keys per worker and one nonblocking process-wide permit.
+Every original participant uses a public key that passed subgroup and infinity
+checks. Exact compressed keys reuse successful immutable validation results in a
+fixed, lazily allocated cache with at most 64 MiB of backing entries. Invalid keys
+and signatures are never cached. Collisions replace acceleration entries without
+changing key identity or validation. Small inputs, busy pools and worker creation
+failures use serial key preparation; participant order and multiplicity are preserved.
+
+Verified persistence inputs seed bounded decoded-state caches, and unchanged
+immutable shared fragments reuse cache allocations. Healthy, identical complete
+reference maps avoid redundant journal commits. New or changed independent pins
+still require a durable commit. Fragment publication carries its content hash with
+the exact immutable bytes, avoiding a second hash pass over that same fragment.
+File integrity, ownership, journal ordering and full SSZ commitments remain checked.
+Cold retained-state reads verify root ownership,
+all direct-child pins, component bytes and the complete typed state commitment in
+one reconstruction pass. Decoded cache hits still recheck the complete durable
+graph; an in-memory state cannot prove that recovery bytes remain available.
+One active recovery attempt keeps its already checked state lease alive within
+the existing resident budget, avoiding a second decode if idle cache ownership
+changes. Every later read still performs its durable and original-object checks.
+Checked repository reads return the lease produced by their complete validation
+instead of traversing and decoding the retained state a second time. Recovery
+does not add a mandatory third active state allocation; tighter resident limits
+can continue to evict and reconstruct checkpoint data when necessary.
+One weak memo can reuse scheduled recovery replay
+only for the exact unchanged anchor, configuration and two immutable allocations;
+every lookup rechecks durable graph pins and state identity. A reopened repository
+or changed allocation repeats full replay and canonical comparison. Weak memos
+retain no decoded state and cannot grant consensus or execution validity.
+
+Catch-up requests fetch at most 16 slots into the existing bounded ancestry queue.
+The transport response is released before individual native imports; every block
+still requires exact parent linkage, original bytes, availability and execution
+checks. Download cursors are retrieval hints, not canonical head authority. Retained
+sampling columns are reverified together in a bounded batch on each attempt,
+including every original header, commitment and KZG proof. An expired data provider
+is retired before its caller deadline, but its exact pending request remains
+reserved until actual closure resolves ownership.
+
+Control, block and payload-envelope protocols allow one inbound and one outbound
+stream to progress together; existing global and per-peer request budgets still
+apply. Connection identities and exact original request tokens isolate reconnects.
+Late callbacks from inactive connections with no remaining original are discarded,
+even after bounded retirement history expires. Active malformed replies, unknown
+failures and foreign request owners remain rejected; a callback for one peer cannot
+consume another peer's reservation.
+
+Consensus status is logged every thirty seconds and whenever `is_syncing` changes.
+It includes `is_syncing`, `is_optimistic`, `el_offline`, head slot, current slot,
+sync distance, checked consensus peers, active imports, forward retrieval slot and
+execution acknowledgement.
+These values use the same calculation as `/eth/v1/node/syncing`. Sync distance
+includes the network clock and peer retrieval hints; neither grants canonical
+authority. `el_offline` indicates that the typed execution adapter has closed.
+
+```text
+INFO [beacon] Consensus synchronization status is_syncing=true head_slot=4118624 current_slot=4119638 sync_distance=1014 peers=10 active_imports=0 retrieval_next_slot=4118628 retrieval_requests=1 execution_acknowledged=true is_optimistic=false el_offline=false
+```
+
+`retrieval_next_slot` shows forward download progress separately from the
+canonical head. A growing distance with an unchanged head remains `is_syncing=true`.
+Changes to execution status are logged even when the beacon root stays the same.
+
+Historical retrieval continues when a validated block has not yet become the
+selected head. Progress from validated range blocks survives peer retries;
+empty responses and gossip do not establish that progress. Gossip and catch-up
+work receive alternating scheduling opportunities while both are available.
+
+Info logs report admitted consensus head changes and canonical execution blocks,
+including gas limit, gas used, transactions and blob gas. Use `-vvvv` for debug
+scheduling and timing details, or the ordinary log filter flags for specific
+components. Metrics use the `embedded_beacon.consensus` and
+`embedded_beacon.execution` scopes and the ordinary Reth metrics endpoint.
+High-cardinality roots, peers and transaction identifiers are not metric labels.
+
+### Storage, network and resource dashboards
+
+Launch the optional local dashboard stack with:
+
+```sh
+bash testing/embedded-beacon/devnet/observability/run.sh up
+```
+
+The provisioned [Embedded Beacon dashboard](http://127.0.0.1:3000/d/embedded-beacon/embedded-beacon)
+scrapes the ordinary metrics endpoint at `127.0.0.1:9001`. Run the node with
+`--metrics 127.0.0.1:9001`, or configure the stack's scrape address when using a
+different local endpoint. Grafana listens at `127.0.0.1:3000`; Prometheus listens
+at `127.0.0.1:9090`.
+
+| Group | Measurements |
+| --- | --- |
+| Database and static files | Table sizes, entries, pages, transaction and commit timings, static-file segments and disk growth, pruning progress. |
+| Shared immutable storage | Committed objects and bytes, unique pinned bytes, logical bytes per independent pin, owner counts, cache capacity/hits/misses/evictions, verified disk reads, journal commits and garbage collection. |
+| Process and filesystem | Resident, anonymous, file-backed and swap memory; CPU; file descriptors; disk reads/writes and syscall rates; page faults; filesystem capacity, free space and inodes. |
+| Execution networking | Connected/inbound/outbound peers, sessions, disconnect reasons, requests, transaction traffic, downloads, in-flight work, errors and queue pressure. |
+| Beacon networking | Discovery and status exchanges, dial failures, peer rejection/closure, block/envelope/sidecar requests, returned objects and original SSZ bytes, unavailable responses and gossip outcomes. |
+| Beacon imports and availability | Accepted, rejected and execution-deferred attempts, import time, queue reservations/capacity/high-water marks, backpressure, exact recovery events and availability worker occupancy. |
+| Chain progress | Native consensus head and finality, clock lag, execution optimism and actual acknowledgement, execution stages, canonical blocks, gas limits/utilization and transaction counts. |
+
+New optional metrics have the scopes `embedded_beacon.import`,
+`embedded_beacon.network`, `embedded_beacon.shared_data`,
+`embedded_beacon.resources` and `embedded_beacon.execution_proxy`. The dashboard
+also uses existing Reth metrics. Import and journal totals explicitly use
+microseconds; the execution proxy's elapsed total uses nanoseconds. Network SSZ
+byte counters measure delivered original objects, excluding compression and
+transport framing. They are separate from native execution network traffic.
+
+Shared-writer observations take a nonblocking, constant-time snapshot every five
+seconds. They use committed reference metadata and do not scan object files or
+wait behind persistence. Logical pin bytes measure reuse across owners; they
+are not a physical disk measurement and exclude untracked orphan files.
+
+Linux process and filesystem sampling runs in a blocking worker every thirty
+seconds. Storage inspection runs every two minutes, with a shared budget of
+4,096 directory entries, eight levels and 100 milliseconds between syscalls.
+These bounds cannot preempt a filesystem syscall. Incomplete scans expose their
+age, completeness and explicitly named lower bound; storage totals remain
+unavailable. Allocated disk bytes are distinct from logical file lengths, which
+can differ for sparse database files. Filesystem capacity describes the entire
+data volume. Missing measurements, busy observers and stopped nodes remain
+visible as unavailable in the dashboard.
+
+All collectors belong to the optional embedded launcher and stop with its task
+executor. Running the executable without `--embedded-beacon` keeps the ordinary
+execution-node setup.
+
+Embedded terminal logs automatically show polar-bear ASCII converted with [Glypheeeeee](https://glypheeeeee.vercel.app/) once after
+the observer sees a canonical, execution-acknowledged Fulu-to-Gloas head transition.
+Starting at Gloas or following an optimistic head does not trigger it. The
+[polar bear is the upgrade mascot](https://ethereum-magicians.org/t/polar-bear-selected-as-mascot-for-glamsterdam-upgrade/26008).
+The banner follows `--color always|auto|never`, with `auto` detecting a terminal;
+use `always` for a visible console through Docker piping. JSON and logfmt retain
+structured logs without ASCII, and quiet logging remains quiet. The observer reports the actual imported fork;
+calendar dates and peer advertisements cannot trigger the banner.
+
+## Test the implementation
+
+Run production runtime regressions independently of fixture-only policies:
+
+```sh
+cargo test --locked -p reth-embedded-beacon-node \
+  --features beacon-api,checkpoint-http --lib -- --test-threads=2
+cargo test --locked -p reth-embedded-beacon-spec-tests \
+  --lib --bin reth-embedded-beacon-spec-tests
+bash testing/embedded-beacon/scripts/docker-build.sh
+bash testing/embedded-beacon/scripts/docker-check.sh launcher-profile
+```
+
+The consensus and execution fixture workflows run on relevant pull requests,
+merge-queue checks, main pushes and manual dispatch. An additional consensus CI
+job checks shared-pool ownership, production node features, feature-disabled
+logging, optional launcher profiles and real Engine API parity. These native jobs
+use bounded build parallelism and separate caches; they do not unlock readiness
+or run a public node. The independent devnet workflow remains manually gated.
+
+The complete consensus workflow downloads and authenticates the latest compatible
+published fixture release, then executes both original primary and compliance
+corpora. New unsupported schema releases fail explicitly. Maintained scripts
+`published-consensus-fixtures.py` and
+`check-complete-consensus-fixture-results.py` prepare inputs and check the terminal
+result. The runner's complete invocation is:
+
+```sh
+cargo run --locked --release -p reth-embedded-beacon-spec-tests -- \
+  run-authenticated-release \
+  --source-record SOURCE_RECORD --source-record-sha256 SOURCE_DIGEST \
+  --primary-fixtures PRIMARY_ROOT --primary-manifest PRIMARY_MANIFEST \
+  --primary-manifest-sha256 PRIMARY_DIGEST \
+  --compliance-fixtures COMPLIANCE_ROOT --compliance-manifest COMPLIANCE_MANIFEST \
+  --compliance-manifest-sha256 COMPLIANCE_DIGEST \
+  --json RESULTS.json --junit RESULTS.xml \
+  --authentication-workers 4 --case-workers 4
+```
+
+Supply the original preparation outputs and their independently bound digests.
+The runner accepts one through 32 workers; the example uses four for modest
+memory use. Each active case owns its state and store, and events within a case
+stay ordered. Select more workers when the host has sufficient CPU and memory. A
+passing complete result requires every required original case, no omissions and
+no unsupported handlers or failures. Expected-failure diagnostics cannot satisfy
+that gate. Fixture-only execution or signature assumptions cannot grant runtime
+validity.
+
+After complete conformance and launcher checks, the bounded Hoodi harness in
+`testing/embedded-beacon/devnet/public/hoodi_smoke.py` verifies five new authenticated
+beacon blocks against actual canonical execution advancement, then stops its
+owned process. This is a smoke test; sustained synchronization, restart/finality
+acceptance and mainnet synchronization require separate evidence.

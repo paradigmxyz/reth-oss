@@ -1,0 +1,6 @@
+preset: minimal
+fork: phase0
+runner: epoch_processing
+handler: rewards_and_penalties
+suite: pyspec_tests
+case: almost_full_attestations_with_leak

@@ -1,0 +1,49 @@
+{
+  "spec_release": "v1.7.0-beta.3",
+  "case": "minimal/gloas/networking/gossip_beacon_attestation/pyspec_tests/gossip_beacon_attestation__reject_payload_failed_el_validation",
+  "authenticated_subset_manifest": "embedded-beacon/spec-tests/work/published-attestation-gossip-failing4-manifest.json",
+  "authenticated_subset_manifest_sha256": "bd67a638d1432efd5d8622aeed243e15a607b3cb7aed6c6f2e86034e9ec881bb",
+  "authenticated_full_category_manifest_sha256": "b3a8768ea6c986548526a7dd7ca65a8d4880cd5002ba62180502265f772c7625",
+  "original_full_v7_failed_report_sha256": "3b5c5922c370fff92607184019a1ad94222f6d03de44cf621157157edc6d67bb",
+  "copied_unchanged_members": 7,
+  "total_original_bytes": 9648,
+  "real_signatures_required": true,
+  "isolation": "Status INVALIDATED and asserted signed envelope observations remain confined to SpecStore; no runtime FULL, Engine or availability authority is created",
+  "files": {
+    "block_0x2bdd11129831a9f7045c6cba57db119b16c42192f8a0abd3f248bea2f21d15b2.ssz_snappy": {
+      "original_path": "minimal/gloas/networking/gossip_beacon_attestation/pyspec_tests/gossip_beacon_attestation__reject_payload_failed_el_validation/block_0x2bdd11129831a9f7045c6cba57db119b16c42192f8a0abd3f248bea2f21d15b2.ssz_snappy",
+      "sha256": "b80dc7bb2ab1f4b6238767c4711dd9c80e14dc11365da79522d7db1cd69ca825",
+      "bytes": 445
+    },
+    "block_0x9f87a12d020fe5f111a8e388f428594715e83c39314fecf4b523dd7da27848b5.ssz_snappy": {
+      "original_path": "minimal/gloas/networking/gossip_beacon_attestation/pyspec_tests/gossip_beacon_attestation__reject_payload_failed_el_validation/block_0x9f87a12d020fe5f111a8e388f428594715e83c39314fecf4b523dd7da27848b5.ssz_snappy",
+      "sha256": "09a16c11417a3ee1046100b432a475d256e1722aa17dee75ee1492346c49bbbf",
+      "bytes": 186
+    },
+    "execution_payload_envelope_0x131ab93ae0a85b4dae8dd199874c24c136c7c8645f3a7b21bb0135cff179e47a.ssz_snappy": {
+      "original_path": "minimal/gloas/networking/gossip_beacon_attestation/pyspec_tests/gossip_beacon_attestation__reject_payload_failed_el_validation/execution_payload_envelope_0x131ab93ae0a85b4dae8dd199874c24c136c7c8645f3a7b21bb0135cff179e47a.ssz_snappy",
+      "sha256": "32ef51ae5a44440696c57bff07e234eac85ca3ebe29c7b0fbbdeccbed135b42d",
+      "bytes": 318
+    },
+    "manifest.yaml": {
+      "original_path": "minimal/gloas/networking/gossip_beacon_attestation/pyspec_tests/gossip_beacon_attestation__reject_payload_failed_el_validation/manifest.yaml",
+      "sha256": "5f3423de02ad47674819d376dc40ea2e39f6e99c06442bbf2248d8337066a520",
+      "bytes": 171
+    },
+    "meta.yaml": {
+      "original_path": "minimal/gloas/networking/gossip_beacon_attestation/pyspec_tests/gossip_beacon_attestation__reject_payload_failed_el_validation/meta.yaml",
+      "sha256": "c74493d3fcb1cfeeba2031295a2ba21d5d4778f644ffd0289cf137566461ce4d",
+      "bytes": 566
+    },
+    "single_attestation_0x1d652b262f932b0ec56fb699239c3824b4ab04597e2abfab4e840b55687bae22.ssz_snappy": {
+      "original_path": "minimal/gloas/networking/gossip_beacon_attestation/pyspec_tests/gossip_beacon_attestation__reject_payload_failed_el_validation/single_attestation_0x1d652b262f932b0ec56fb699239c3824b4ab04597e2abfab4e840b55687bae22.ssz_snappy",
+      "sha256": "b8d3909fdba31423e2bb754061bad4ad98ac07d85aee0c49b3b888118e0d043b",
+      "bytes": 186
+    },
+    "state.ssz_snappy": {
+      "original_path": "minimal/gloas/networking/gossip_beacon_attestation/pyspec_tests/gossip_beacon_attestation__reject_payload_failed_el_validation/state.ssz_snappy",
+      "sha256": "fb185ff77bfcaf4430b88f021c29804940cb889a36060d7dcf5ecb0cee9232a7",
+      "bytes": 7776
+    }
+  }
+}

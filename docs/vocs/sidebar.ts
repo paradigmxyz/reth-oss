@@ -64,6 +64,10 @@ export const sidebar: SidebarItem[] = [
                         link: "/run/overview",
                     },
                     {
+                        text: "Embedded Beacon",
+                        link: "/run/embedded-beacon",
+                    },
+                    {
                         text: "Signature Verification",
                         link: "/installation/binaries#signature-verification",
                     },

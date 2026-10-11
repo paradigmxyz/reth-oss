@@ -1,0 +1,31 @@
+{
+  "spec_release": "v1.7.0-beta.3",
+  "required_suites": [
+    "mainnet/phase0/ssz_static/BeaconBlock/ssz_random",
+    "mainnet/phase0/ssz_static/BeaconState/ssz_random",
+    "mainnet/phase0/ssz_static/SignedBeaconBlock/ssz_random",
+    "minimal/phase0/ssz_static/BeaconBlock/ssz_lengthy",
+    "minimal/phase0/ssz_static/BeaconState/ssz_lengthy",
+    "minimal/phase0/ssz_static/SignedBeaconBlock/ssz_lengthy"
+  ],
+  "files": {
+    "mainnet/phase0/ssz_static/BeaconBlock/ssz_random/case_0/manifest.yaml": "0x185f2a66ba8fc9cd84be3fc45f9869de90d9396cc2b24c9eb5572d302b54a816",
+    "mainnet/phase0/ssz_static/BeaconBlock/ssz_random/case_0/roots.yaml": "0x2277a0234d492b49c6673198c5e4491857c922b69a993e3a294b8099f231438e",
+    "mainnet/phase0/ssz_static/BeaconBlock/ssz_random/case_0/serialized.ssz_snappy": "0xbbdf34c587174feff8f3014efaafad833f82e9eec9040e048bbffc1a9026a00c",
+    "mainnet/phase0/ssz_static/BeaconState/ssz_random/case_0/manifest.yaml": "0x1b93baf192a70e5f1a99c37215e75f7fa12b13626e54868d8b7c7450d55ff952",
+    "mainnet/phase0/ssz_static/BeaconState/ssz_random/case_0/roots.yaml": "0x35d9b612f33fc9fc29ddc46ccf99becfa2a9b2a2ef93b0f96e7351c66441b44c",
+    "mainnet/phase0/ssz_static/BeaconState/ssz_random/case_0/serialized.ssz_snappy": "0x640756fb91bd746f2328e867efda25ee1f85e98ab066d3124c0e3c2e1f5f802c",
+    "mainnet/phase0/ssz_static/SignedBeaconBlock/ssz_random/case_0/manifest.yaml": "0x7e3cb6f6c7d338d5ca13bb99fed394e4325bdd28b34d8981d08dd8f0d8f42702",
+    "mainnet/phase0/ssz_static/SignedBeaconBlock/ssz_random/case_0/roots.yaml": "0x8e9467f31b607bab715b30a1f4908e6b75c4ab17767bcfc1910cc2eedf332abd",
+    "mainnet/phase0/ssz_static/SignedBeaconBlock/ssz_random/case_0/serialized.ssz_snappy": "0x4d82ddea618ef4459bb8364cd7c1bbb473f2df2f3e49726f58e24a0c368a6377",
+    "minimal/phase0/ssz_static/BeaconBlock/ssz_lengthy/case_0/manifest.yaml": "0xe6eb51d2bee5514462861e8bd3b1626a9fcec2550fade3da5f2d0098d137e1dc",
+    "minimal/phase0/ssz_static/BeaconBlock/ssz_lengthy/case_0/roots.yaml": "0xdc01c1919a21ae147562b76a7d8c5d2c62d433fc99754b364275502e54a897f9",
+    "minimal/phase0/ssz_static/BeaconBlock/ssz_lengthy/case_0/serialized.ssz_snappy": "0xcfc44770d5c179166fe73134a8faa046129595c2e151a0f73853a6e362c828f4",
+    "minimal/phase0/ssz_static/BeaconState/ssz_lengthy/case_0/manifest.yaml": "0x4d232d5ca63fb80518b03f262c368f506fd9aba482d20f8ab65e1079ad8fd5a1",
+    "minimal/phase0/ssz_static/BeaconState/ssz_lengthy/case_0/roots.yaml": "0x028d48d268a5c0b872c9f419469c93516b5cc4983d358272150748c6961d24a7",
+    "minimal/phase0/ssz_static/BeaconState/ssz_lengthy/case_0/serialized.ssz_snappy": "0x289d74aa33619a9e34ef7568548a72c953d007717df8d501d4737a5b484adc90",
+    "minimal/phase0/ssz_static/SignedBeaconBlock/ssz_lengthy/case_0/manifest.yaml": "0xb3b257d6ef30d63633e95ac94d55979a193eee0745ab919aa62439a83670229a",
+    "minimal/phase0/ssz_static/SignedBeaconBlock/ssz_lengthy/case_0/roots.yaml": "0x671cd705ee1e5d96bb63a0eadf1ec5f8dec5b392579998793901a0eeca95ca02",
+    "minimal/phase0/ssz_static/SignedBeaconBlock/ssz_lengthy/case_0/serialized.ssz_snappy": "0x0ac7464e23008327cfe118f06cad41a70947ac0bb198e1a397ad820187366a8a"
+  }
+}

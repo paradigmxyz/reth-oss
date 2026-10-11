@@ -3,13 +3,13 @@
 //! Provides a no-std compatible [`LazyTrieData`] type for lazily initialized
 //! trie-related data containing sorted hashed state and trie updates.
 
-use crate::{
-    updates::{TrieUpdates, TrieUpdatesSorted},
-    HashedPostState, HashedPostStateSorted,
-};
+use crate::{updates::TrieUpdatesSorted, HashedPostStateSorted};
 use alloc::sync::Arc;
 use core::fmt;
 use reth_primitives_traits::sync::OnceLock;
+
+#[cfg(feature = "std")]
+use crate::{updates::TrieUpdates, HashedPostState};
 
 /// Container for sorted trie data: hashed state and trie updates.
 ///
@@ -201,6 +201,7 @@ impl fmt::Debug for LazyTrieDataMode {
 }
 
 /// Producer consumed by a spawned task to compute sorted trie data for a [`LazyTrieData`] handle.
+#[cfg(feature = "std")]
 #[must_use = "LazyTrieDataProducer must be consumed with compute_and_publish to wake trie data waiters"]
 pub struct LazyTrieDataProducer {
     /// Shared result initialized exactly once by this producer.
@@ -209,12 +210,14 @@ pub struct LazyTrieDataProducer {
     inputs: PendingInputs,
 }
 
+#[cfg(feature = "std")]
 impl fmt::Debug for LazyTrieDataProducer {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("LazyTrieDataProducer").field("inputs", &self.inputs).finish_non_exhaustive()
     }
 }
 
+#[cfg(feature = "std")]
 impl LazyTrieDataProducer {
     /// Computes sorted trie data, publishes it to waiters, and returns it to the task owner.
     pub fn compute_and_publish(self) -> ComputedTrieData {
@@ -258,6 +261,7 @@ impl LazyTrieDataProducer {
 }
 
 /// Inputs kept while a deferred trie computation is pending.
+#[cfg(feature = "std")]
 #[derive(Clone, Debug)]
 struct PendingInputs {
     /// Unsorted hashed post-state from execution.

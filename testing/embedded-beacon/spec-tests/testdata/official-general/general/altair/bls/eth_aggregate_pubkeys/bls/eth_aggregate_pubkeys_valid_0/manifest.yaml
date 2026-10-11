@@ -1,0 +1,6 @@
+preset: general
+fork: altair
+runner: bls
+handler: eth_aggregate_pubkeys
+suite: bls
+case: eth_aggregate_pubkeys_valid_0

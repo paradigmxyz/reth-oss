@@ -1,0 +1,30 @@
+[package]
+name = "reth-embedded-beacon-spec-tests"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+reth-embedded-beacon-primitives.workspace = true
+reth-embedded-beacon-data-availability.workspace = true
+reth-embedded-beacon-node = { workspace = true, features = ["gossip-validation", "spec-tests"] }
+c-kzg = { version = "2.1.8", features = ["ethereum_kzg_settings"] }
+reth-embedded-beacon-network.workspace = true
+reth-embedded-beacon-crypto.workspace = true
+reth-embedded-beacon-fork-choice = { workspace = true, features = ["spec-tests"] }
+reth-embedded-beacon-state-transition = { workspace = true, features = ["spec-tests"] }
+reth-fs-util.workspace = true
+serde = { workspace = true, features = ["derive", "std"] }
+serde_json = { workspace = true, features = ["std"] }
+serde_yaml = "0.9.34"
+snap.workspace = true
+sha2.workspace = true
+clap = { workspace = true, features = ["derive"] }
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

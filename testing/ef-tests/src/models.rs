@@ -27,6 +27,7 @@ pub struct BlockchainTest {
     /// Block data.
     pub blocks: Vec<Block>,
     /// The expected post state.
+    #[serde(alias = "post")]
     pub post_state: Option<BTreeMap<Address, Account>>,
     /// The test pre-state.
     pub pre: State,
@@ -34,8 +35,13 @@ pub struct BlockchainTest {
     pub lastblockhash: B256,
     /// Network spec.
     pub network: ForkSpec,
+    /// Optional fixture-specific chain settings.
     #[serde(default)]
+    pub config: Option<FixtureConfig>,
+    /// Optional expected final state root.
+    pub post_state_hash: Option<B256>,
     /// Engine spec.
+    #[serde(default)]
     pub seal_engine: SealEngine,
 }
 
@@ -459,6 +465,110 @@ pub struct AccessListItem {
 
 /// Access list.
 pub type AccessList = Vec<AccessListItem>;
+
+/// Chain settings serialized by execution fixture releases.
+#[derive(Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FixtureConfig {
+    /// Must agree with the root-level network when present.
+    pub network: Option<ForkSpec>,
+    /// Fixture chain ID, including the lower-case fixture spelling.
+    #[serde(rename = "chainid", alias = "chainId", default = "default_fixture_chain_id")]
+    pub chain_id: U256,
+    /// Per-fork blob parameters using hex-number encoding.
+    #[serde(default)]
+    pub blob_schedule: BTreeMap<String, FixtureBlobParams>,
+}
+
+/// Three configurable blob parameters; transaction limits retain fork semantics.
+#[derive(Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FixtureBlobParams {
+    /// Target blobs per block.
+    pub target: U256,
+    /// Maximum blobs per block.
+    pub max: U256,
+    /// Blob fee update fraction.
+    pub base_fee_update_fraction: U256,
+}
+
+fn default_fixture_chain_id() -> U256 {
+    U256::from(1)
+}
+
+impl FixtureBlobParams {
+    fn apply(
+        &self,
+        mut params: BlobParams,
+        per_transaction_follows_block: bool,
+    ) -> Result<BlobParams, Error> {
+        params.target_blob_count = self
+            .target
+            .try_into()
+            .map_err(|_| Error::Assertion("fixture blob target exceeds u64".into()))?;
+        params.max_blob_count = self
+            .max
+            .try_into()
+            .map_err(|_| Error::Assertion("fixture blob maximum exceeds u64".into()))?;
+        params.update_fraction = self
+            .base_fee_update_fraction
+            .try_into()
+            .map_err(|_| Error::Assertion("fixture blob fee fraction exceeds u128".into()))?;
+        if params.target_blob_count > params.max_blob_count ||
+            params.max_blob_count == 0 ||
+            params.update_fraction == 0
+        {
+            return Err(Error::Assertion("invalid fixture blob parameters".into()));
+        }
+        if per_transaction_follows_block {
+            params.max_blobs_per_tx = params.max_blob_count;
+        }
+        Ok(params)
+    }
+}
+
+impl BlockchainTest {
+    /// Apply fixture settings without mutating the shared fork-spec cache.
+    pub fn chain_spec(&self) -> Result<Arc<ChainSpec>, Error> {
+        let mut shared = self.network.to_chain_spec();
+        let Some(config) = &self.config else { return Ok(shared) };
+        if config.network.is_some_and(|network| network != self.network) {
+            return Err(Error::Assertion("fixture config network differs from root network".into()));
+        }
+        let spec = Arc::make_mut(&mut shared);
+        let chain_id: u64 = config
+            .chain_id
+            .try_into()
+            .map_err(|_| Error::Assertion("fixture chain ID exceeds u64".into()))?;
+        spec.chain = chain_id.into();
+        for (fork, values) in &config.blob_schedule {
+            match fork.as_str() {
+                "Cancun" => spec.blob_params.cancun = values.apply(BlobParams::cancun(), true)?,
+                "Prague" => spec.blob_params.prague = values.apply(BlobParams::prague(), true)?,
+                "Osaka" => spec.blob_params.osaka = values.apply(BlobParams::osaka(), false)?,
+                "BPO1" | "BPO2" | "Amsterdam" => {
+                    let (hardfork, base) = match fork.as_str() {
+                        "BPO1" => (EthereumHardfork::Bpo1, BlobParams::bpo1()),
+                        "BPO2" => (EthereumHardfork::Bpo2, BlobParams::bpo2()),
+                        _ => (EthereumHardfork::Amsterdam, BlobParams::bpo2()),
+                    };
+                    let params = values.apply(base, false)?;
+                    if let ForkCondition::Timestamp(timestamp) = spec.hardforks.fork(hardfork) {
+                        spec.blob_params.scheduled.retain(|(existing, _)| *existing != timestamp);
+                        spec.blob_params.scheduled.push((timestamp, params));
+                    }
+                }
+                _ => {
+                    return Err(Error::Assertion(format!(
+                        "unsupported fixture blob schedule fork: {fork}"
+                    )))
+                }
+            }
+        }
+        spec.blob_params.scheduled.sort_unstable_by_key(|(timestamp, _)| *timestamp);
+        Ok(shared)
+    }
+}
 
 #[cfg(test)]
 mod tests {

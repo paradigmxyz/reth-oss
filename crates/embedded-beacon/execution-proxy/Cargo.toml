@@ -1,0 +1,76 @@
+[package]
+name = "reth-embedded-beacon-execution-proxy"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+thiserror.workspace = true
+tokio = { workspace = true, features = ["sync", "time"] }
+
+# reth
+alloy-rpc-types-engine = { workspace = true, optional = true }
+alloy-primitives = { workspace = true, optional = true }
+alloy-eips = { workspace = true, optional = true }
+reth-embedded-beacon-state-transition = { workspace = true, optional = true }
+reth-embedded-beacon-primitives = { workspace = true, optional = true }
+reth-chainspec = { workspace = true, optional = true }
+reth-engine-primitives = { workspace = true, optional = true }
+reth-payload-primitives = { workspace = true, optional = true }
+reth-rpc-engine-api = { workspace = true, optional = true }
+reth-storage-api = { workspace = true, optional = true }
+reth-transaction-pool = { workspace = true, optional = true }
+jsonrpsee-types = { workspace = true, optional = true }
+
+# integration-tests
+reth-e2e-test-utils = { workspace = true, optional = true }
+reth-node-ethereum = { workspace = true, optional = true }
+reth-payload-builder = { workspace = true, optional = true }
+reth-network-api = { workspace = true, optional = true }
+eyre = { workspace = true, optional = true }
+jsonrpsee = { workspace = true, features = ["http-client"], optional = true }
+serde_json = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
+
+[features]
+default = []
+beacon-types = [
+    "dep:alloy-rpc-types-engine",
+    "dep:alloy-primitives",
+    "dep:alloy-eips",
+    "dep:reth-embedded-beacon-state-transition",
+    "dep:reth-embedded-beacon-primitives",
+]
+reth = [
+    "dep:alloy-rpc-types-engine",
+    "dep:alloy-primitives",
+    "dep:reth-chainspec",
+    "dep:reth-engine-primitives",
+    "dep:reth-payload-primitives",
+    "dep:reth-rpc-engine-api",
+    "dep:reth-storage-api",
+    "dep:reth-transaction-pool",
+    "dep:jsonrpsee-types",
+]
+
+integration-tests = [
+    "reth",
+    "dep:reth-e2e-test-utils",
+    "dep:reth-node-ethereum",
+    "dep:reth-payload-builder",
+    "dep:reth-network-api",
+    "dep:eyre",
+    "dep:jsonrpsee",
+    "dep:serde_json",
+]
+
+[[test]]
+name = "real_engine_parity"
+path = "tests/real_engine_parity.rs"
+required-features = ["integration-tests"]

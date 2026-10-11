@@ -1,0 +1,26 @@
+--- a/src/peer_score.rs
++++ b/src/peer_score.rs
+@@ -421,8 +421,11 @@
+         peer_id: &PeerId,
+     ) {
+         for ip in peer_stats.known_ips.iter() {
+-            if let Some(peer_set) = peer_ips.get_mut(ip) {
+-                peer_set.remove(peer_id);
++            if let hash_map::Entry::Occupied(mut entry) = peer_ips.entry(*ip) {
++                entry.get_mut().remove(peer_id);
++                if entry.get().is_empty() {
++                    entry.remove();
++                }
+             }
+         }
+     }
+@@ -539,6 +542,9 @@
+             if let Some(peer_ids) = self.peer_ips.get_mut(ip) {
+                 tracing::trace!(peer=%peer_id, %ip, "Remove ip for peer");
+                 peer_ids.remove(peer_id);
++                if peer_ids.is_empty() {
++                    self.peer_ips.remove(ip);
++                }
+             } else {
+                 tracing::trace!(
+                     peer=%peer_id,

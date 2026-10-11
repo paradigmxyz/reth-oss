@@ -1,0 +1,118 @@
+{
+  "schema_version": 1,
+  "profile": "historical",
+  "preset": "mainnet",
+  "slots_per_epoch": 32,
+  "seconds_per_slot": 6,
+  "slot_duration_ms": 6000,
+  "genesis_fork": "phase0",
+  "fork_epochs": {
+    "phase0": 0,
+    "altair": 1,
+    "bellatrix": 2,
+    "capella": 3,
+    "deneb": 4,
+    "electra": 5,
+    "fulu": 6,
+    "gloas": 7
+  },
+  "fork_versions": {
+    "phase0": "0x10000038",
+    "altair": "0x20000038",
+    "bellatrix": "0x30000038",
+    "capella": "0x40000038",
+    "deneb": "0x50000038",
+    "electra": "0x60000038",
+    "fulu": "0x70000038",
+    "gloas": "0x80000038"
+  },
+  "expected_forks": [
+    "phase0",
+    "altair",
+    "bellatrix",
+    "capella",
+    "deneb",
+    "electra",
+    "fulu",
+    "gloas"
+  ],
+  "timeout_seconds": 2400,
+  "independent_embedded_acceptance": "blocked",
+  "consensus_mode": "independent_embedded",
+  "forks": [
+    {
+      "name": "phase0",
+      "epoch": 0,
+      "version": "0x10000038"
+    },
+    {
+      "name": "altair",
+      "epoch": 1,
+      "version": "0x20000038"
+    },
+    {
+      "name": "bellatrix",
+      "epoch": 2,
+      "version": "0x30000038"
+    },
+    {
+      "name": "capella",
+      "epoch": 3,
+      "version": "0x40000038"
+    },
+    {
+      "name": "deneb",
+      "epoch": 4,
+      "version": "0x50000038"
+    },
+    {
+      "name": "electra",
+      "epoch": 5,
+      "version": "0x60000038"
+    },
+    {
+      "name": "fulu",
+      "epoch": 6,
+      "version": "0x70000038"
+    },
+    {
+      "name": "gloas",
+      "epoch": 7,
+      "version": "0x80000038"
+    }
+  ],
+  "services": {
+    "reference_el": {
+      "name": "el-1-reth-lighthouse",
+      "port": "rpc"
+    },
+    "reference_beacon": {
+      "name": "cl-1-lighthouse-reth",
+      "port": "http"
+    },
+    "sut_el": {
+      "name": "embedded-beacon-sut",
+      "port": "rpc"
+    },
+    "sut_beacon": {
+      "name": "embedded-beacon-sut",
+      "port": "beacon"
+    }
+  },
+  "log_services": [
+    "el-1-reth-lighthouse",
+    "cl-1-lighthouse-reth",
+    "vc-1-reth-lighthouse",
+    "embedded-beacon-sut",
+    "spamoor"
+  ],
+  "merge_transition": {
+    "terminal_block": "execution_genesis",
+    "activation_epoch": 2
+  },
+  "logical_node_count": 2,
+  "sut_consensus_mode": "embedded_only",
+  "service_catalog_status": "required_not_deployed",
+  "deployment_status": "blocked_missing_independent_runtime",
+  "reference_merge_status": "unsupported_by_selected_reference_image"
+}

@@ -1,0 +1,15 @@
+[package]
+name = "reth-embedded-beacon-data-availability"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+c-kzg = { version = "2.1.8", features = ["ethereum_kzg_settings"] }
+thiserror.workspace = true
+reth-embedded-beacon-primitives.workspace = true
+reth-embedded-beacon-state-transition.workspace = true
+
+[lints]
+workspace = true

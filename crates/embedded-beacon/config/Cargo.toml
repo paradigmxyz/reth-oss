@@ -1,0 +1,15 @@
+[package]
+name = "reth-embedded-beacon-config"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+reth-embedded-beacon-primitives = { path = "../primitives" }
+serde = { workspace = true, features = ["derive", "std"] }
+thiserror.workspace = true
+serde_json.workspace = true
