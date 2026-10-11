@@ -60,9 +60,9 @@ The pinned baseline also has a short-chain minimal V2 restart issue before its f
 cargo test -p reth-db
 cargo test -p reth-db benchmark_blob_targets -- --ignored --nocapture --test-threads=1
 cargo test -p reth-db benchmark_singleton_allocation -- --ignored --nocapture --test-threads=1
-cargo test -p reth-trie-db --test experimental_packing
-cargo test -p reth-node-core args::database
-cargo test -p reth-node-ethereum --test e2e experimental_packing
+cargo test -p reth-trie-db --features reth-provider/jemalloc --test experimental_packing
+cargo test -p reth-node-core --features jemalloc args::database
+cargo test -p reth-node-ethereum --features reth-provider/jemalloc --test e2e experimental_packing
 
 # Explicit DB-backed synthetic benchmark; optimization matters for timing.
 cargo test -p reth-trie-db --test experimental_packing --release \
@@ -96,5 +96,11 @@ space for less reconstruction work; reconstruction remains the default.
 
 See the [trie retention strategy and implementation prompt](experimental-state-packing-trie-retention.md)
 for measured tradeoffs, full native trie retention, compatibility requirements and
-the proposed adaptive-retention design. Full-retention performance is not yet measured;
+the versioned adaptive-retention implementation. Full/adaptive performance is not yet measured;
 the recommendation does not change the current default or convert existing snapshots.
+
+`--db.experimental-adaptive-trie` selects separate database versions 10005 (dense)
+and 10006 (integer32), policy v1. Persisted per-contract cuts bound omitted regions
+to 512 leaves, merge at 256 or fewer leaves, and adopt a complete trie above 4096 cuts.
+It conflicts with full-trie retention and fixed depth, and needs a fresh directory.
+See the retention document for memory, multiproof, compatibility and repair limits.

@@ -90,6 +90,11 @@ pub struct DatabaseArgs {
         conflicts_with = "experimental_trie_depth"
     )]
     pub experimental_retain_full_trie: bool,
+    /// Pack storage with versioned, persisted regions of at most 512 leaves.
+    /// Requires a fresh directory; conflicts with full retention and fixed depth.
+    #[arg(long = "db.experimental-adaptive-trie", requires = "experimental_state_packing",
+        conflicts_with_all = ["experimental_trie_depth", "experimental_retain_full_trie"])]
+    pub experimental_adaptive_trie: bool,
 }
 
 impl DatabaseArgs {
@@ -129,6 +134,7 @@ impl DatabaseArgs {
                 usize::from(self.experimental_trie_depth.unwrap_or(3)),
             )
             .with_experimental_full_trie(self.experimental_retain_full_trie)
+            .with_experimental_adaptive_trie(self.experimental_adaptive_trie)
     }
 
     /// Returns whether built-in database metrics are enabled.
@@ -577,5 +583,44 @@ mod tests {
             "3"
         ])
         .is_err());
+    }
+
+    #[test]
+    fn adaptive_trie_is_explicit_and_conflicts_with_other_layouts() {
+        assert!(CommandParser::<DatabaseArgs>::try_parse_from([
+            "reth",
+            "--db.experimental-adaptive-trie"
+        ])
+        .is_err());
+        for mode in ["dense", "integer32"] {
+            let parsed = CommandParser::<DatabaseArgs>::try_parse_from([
+                "reth",
+                "--db.experimental-state-packing",
+                mode,
+                "--db.experimental-adaptive-trie",
+            ])
+            .unwrap();
+            assert_eq!(
+                parsed.args.database_args().experimental_trie_depth(),
+                reth_db::mdbx::packing::ADAPTIVE_TRIE_DEPTH
+            );
+            assert!(CommandParser::<DatabaseArgs>::try_parse_from([
+                "reth",
+                "--db.experimental-state-packing",
+                mode,
+                "--db.experimental-adaptive-trie",
+                "--db.experimental-retain-full-trie"
+            ])
+            .is_err());
+            assert!(CommandParser::<DatabaseArgs>::try_parse_from([
+                "reth",
+                "--db.experimental-state-packing",
+                mode,
+                "--db.experimental-adaptive-trie",
+                "--db.experimental-trie-depth",
+                "3"
+            ])
+            .is_err());
+        }
     }
 }

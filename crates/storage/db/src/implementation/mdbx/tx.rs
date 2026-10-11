@@ -540,7 +540,10 @@ impl DbTxMut for Tx<RW> {
         hashed_address: alloy_primitives::B256,
     ) -> Result<(), DatabaseError> {
         if let Some(shared) = &self.packing &&
-            shared.depth == super::packing::FULL_TRIE_DEPTH
+            matches!(
+                shared.depth,
+                super::packing::FULL_TRIE_DEPTH | super::packing::ADAPTIVE_TRIE_DEPTH
+            )
         {
             shared.mark_trie_root_written(hashed_address)?;
         }

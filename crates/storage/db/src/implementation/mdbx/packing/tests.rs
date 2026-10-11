@@ -159,10 +159,19 @@ fn fixture(n: usize) -> Vec<StorageEntry> {
 #[test]
 fn cursor_seek_exhaustion_matches_native() {
     let mut reference = None;
-    for mode in [None, Some(PackingMode::Dense), Some(PackingMode::Integer32)] {
+    for (mode, depth) in [
+        (None, 3),
+        (Some(PackingMode::Dense), 3),
+        (Some(PackingMode::Integer32), 3),
+        (Some(PackingMode::Dense), FULL_TRIE_DEPTH),
+        (Some(PackingMode::Integer32), FULL_TRIE_DEPTH),
+        (Some(PackingMode::Dense), ADAPTIVE_TRIE_DEPTH),
+        (Some(PackingMode::Integer32), ADAPTIVE_TRIE_DEPTH),
+    ] {
         let dir = tempdir().unwrap();
-        let db = init_db(dir.path(), DatabaseArguments::test().with_experimental_packing(mode, 3))
-            .unwrap();
+        let db =
+            init_db(dir.path(), DatabaseArguments::test().with_experimental_packing(mode, depth))
+                .unwrap();
         let scope = B256::repeat_byte(1);
         let beyond = B256::repeat_byte(2);
         let rows = fixture(64);
@@ -229,13 +238,23 @@ fn seek_trace<T: DupSort<Key = B256>>(
 
 #[test]
 fn cursor_multicontract_reversal_matches_native() {
-    for count in [1, 3, 64] {
+    for count in [1, 3, 64, 513] {
         let mut reference = None;
-        for mode in [None, Some(PackingMode::Dense), Some(PackingMode::Integer32)] {
+        for (mode, depth) in [
+            (None, 3),
+            (Some(PackingMode::Dense), 3),
+            (Some(PackingMode::Integer32), 3),
+            (Some(PackingMode::Dense), FULL_TRIE_DEPTH),
+            (Some(PackingMode::Integer32), FULL_TRIE_DEPTH),
+            (Some(PackingMode::Dense), ADAPTIVE_TRIE_DEPTH),
+            (Some(PackingMode::Integer32), ADAPTIVE_TRIE_DEPTH),
+        ] {
             let dir = tempdir().unwrap();
-            let db =
-                init_db(dir.path(), DatabaseArguments::test().with_experimental_packing(mode, 3))
-                    .unwrap();
+            let db = init_db(
+                dir.path(),
+                DatabaseArguments::test().with_experimental_packing(mode, depth),
+            )
+            .unwrap();
             let tx = db.tx_mut().unwrap();
             for contract in 1..=3 {
                 let scope = B256::repeat_byte(contract);
@@ -807,11 +826,17 @@ fn reconstruction_handles_long_common_prefix_and_cross_cursor_updates() {
 
 #[test]
 fn dirty_trie_writer_hashes_upper_once_per_storage_generation() {
-    for mode in [PackingMode::Dense, PackingMode::Integer32] {
+    for (mode, depth) in [PackingMode::Dense, PackingMode::Integer32]
+        .into_iter()
+        .flat_map(|mode| [3, ADAPTIVE_TRIE_DEPTH].map(|depth| (mode, depth)))
+    {
         let dir = tempdir().unwrap();
-        let db =
-            init_db(dir.path(), DatabaseArguments::test().with_experimental_packing(Some(mode), 3))
-                .unwrap();
+        let db = init_db(
+            dir.path(),
+            DatabaseArguments::test().with_experimental_packing(Some(mode), depth),
+        )
+        .unwrap();
+        let leaf_budget = if depth == ADAPTIVE_TRIE_DEPTH { 513 } else { 256 };
         let scope = B256::repeat_byte(6);
         let mut rows = fixture(8192);
         let tx = db.tx_mut().unwrap();
@@ -833,7 +858,10 @@ fn dirty_trie_writer_hashes_upper_once_per_storage_generation() {
                 .upsert(scope, &TrieEntry { nibbles: (*path).into(), node: node.clone() })
                 .unwrap();
             assert_eq!(upper_stats(&writer).0, 1);
-            assert!(upper_stats(&writer).1 < 256, "unchanged subtree hashes were not reused");
+            assert!(
+                upper_stats(&writer).1 < leaf_budget,
+                "unchanged subtree hashes were not reused"
+            );
         }
         eprintln!(
             "{mode:?}: 100 production-style trie replacements: {:?}; upper rebuilds={}, leaves={}",
@@ -854,7 +882,7 @@ fn dirty_trie_writer_hashes_upper_once_per_storage_generation() {
             writer.seek_by_key_subkey(scope, Nibbles::default().into()).unwrap().unwrap();
         assert_eq!(first_node.node, trie_nodes(&rows)[&first_node.nibbles.0]);
         assert_eq!(upper_stats(&writer).0, 2);
-        assert!(upper_stats(&writer).1 < 512);
+        assert!(upper_stats(&writer).1 < leaf_budget * 2);
     }
 }
 
@@ -910,10 +938,19 @@ fn trie_nodes(rows: &[StorageEntry]) -> BTreeMap<Nibbles, alloy_trie::BranchNode
 #[test]
 fn scoped_seek_and_duplicate_iteration_match_native() {
     let mut reference = None;
-    for mode in [None, Some(PackingMode::Dense), Some(PackingMode::Integer32)] {
+    for (mode, depth) in [
+        (None, 3),
+        (Some(PackingMode::Dense), 3),
+        (Some(PackingMode::Integer32), 3),
+        (Some(PackingMode::Dense), FULL_TRIE_DEPTH),
+        (Some(PackingMode::Integer32), FULL_TRIE_DEPTH),
+        (Some(PackingMode::Dense), ADAPTIVE_TRIE_DEPTH),
+        (Some(PackingMode::Integer32), ADAPTIVE_TRIE_DEPTH),
+    ] {
         let dir = tempdir().unwrap();
-        let db = init_db(dir.path(), DatabaseArguments::test().with_experimental_packing(mode, 3))
-            .unwrap();
+        let db =
+            init_db(dir.path(), DatabaseArguments::test().with_experimental_packing(mode, depth))
+                .unwrap();
         let rows = fixture(64);
         let nodes = trie_nodes(&rows);
         let tx = db.tx_mut().unwrap();
@@ -1307,5 +1344,302 @@ fn benchmark_blob_targets() {
                 );
             }
         }
+    }
+}
+
+#[test]
+fn full_retention_completion_and_state_only_repair_are_generation_scoped() {
+    for mode in [PackingMode::Dense, PackingMode::Integer32] {
+        let dir = tempdir().unwrap();
+        let args = DatabaseArguments::test()
+            .with_experimental_packing(Some(mode), 3)
+            .with_experimental_full_trie(true);
+        let db = init_db(dir.path(), args.clone()).unwrap();
+        let scope = B256::repeat_byte(41);
+        let other = B256::repeat_byte(42);
+        let mut rows = fixture(1024);
+        let tx = db.tx_mut().unwrap();
+        for row in &rows {
+            tx.put::<HashedStorages>(scope, *row).unwrap();
+        }
+        for row in fixture(64) {
+            tx.put::<HashedStorages>(other, row).unwrap();
+        }
+        tx.commit().unwrap();
+        for phase in 0..6 {
+            let old = db.tx().unwrap();
+            let previous = trie_nodes(&rows);
+            let tx = db.tx_mut().unwrap();
+            match phase {
+                0 => {
+                    rows[12].value = U256::from(777);
+                    tx.put::<HashedStorages>(scope, rows[12]).unwrap();
+                }
+                1 | 2 => {
+                    tx.delete::<HashedStorages>(scope, None).unwrap();
+                    rows = fixture(if phase == 1 { 64 } else { 0 });
+                    for row in &rows {
+                        tx.put::<HashedStorages>(scope, *row).unwrap();
+                    }
+                }
+                3 => {
+                    rows = fixture(128);
+                    for row in &rows {
+                        tx.put::<HashedStorages>(scope, *row).unwrap();
+                    }
+                }
+                4 => {
+                    rows[0].value = U256::from(999);
+                    tx.put::<HashedStorages>(scope, rows[0]).unwrap();
+                }
+                5 => {
+                    tx.clear::<HashedStorages>().unwrap();
+                    rows = fixture(20);
+                    for row in &rows {
+                        tx.put::<HashedStorages>(scope, *row).unwrap();
+                    }
+                }
+                _ => unreachable!(),
+            }
+            if phase != 3 {
+                write_complete_trie(&tx, scope, &rows);
+            }
+            if phase == 0 {
+                // Completing another scope must not invalidate the first scope's
+                // completion, even though both share the transaction's counter.
+                let mut others = fixture(64);
+                others[3].value = U256::from(778);
+                tx.put::<HashedStorages>(other, others[3]).unwrap();
+                write_complete_trie(&tx, other, &others);
+            }
+            if phase == 4 {
+                let last = rows.last_mut().unwrap();
+                last.value = U256::from(123456);
+                tx.put::<HashedStorages>(scope, *last).unwrap();
+            }
+            let work = tx.packing.as_ref().unwrap().clone();
+            assert_eq!(work.reconstruction_entries(), (0, 0));
+            assert_eq!(work.baseline_reads.load(std::sync::atomic::Ordering::Relaxed), 0);
+            tx.commit().unwrap();
+            let repaired = phase >= 3;
+            assert_eq!(
+                work.repaired_contracts.load(std::sync::atomic::Ordering::Relaxed),
+                u64::from(repaired),
+                "{mode:?}, phase={phase}"
+            );
+            assert_eq!(
+                work.repair_leaves.load(std::sync::atomic::Ordering::Relaxed),
+                if repaired { rows.len() as u64 } else { 0 }
+            );
+            assert_eq!(
+                work.completed_contracts.load(std::sync::atomic::Ordering::Relaxed),
+                u64::from(!repaired) + u64::from(phase == 0)
+            );
+            let tx = db.tx().unwrap();
+            assert_eq!(
+                logical_nodes(&mut tx.cursor_dup_read::<PackedStoragesTrie>().unwrap(), scope),
+                trie_nodes(&rows)
+            );
+            assert_eq!(
+                logical_nodes(&mut old.cursor_dup_read::<PackedStoragesTrie>().unwrap(), scope),
+                previous
+            );
+            if phase == 5 {
+                assert!(logical_nodes(
+                    &mut tx.cursor_dup_read::<PackedStoragesTrie>().unwrap(),
+                    other
+                )
+                .is_empty());
+            }
+        }
+        let aborted = db.tx_mut().unwrap();
+        aborted.delete::<HashedStorages>(scope, None).unwrap();
+        write_complete_trie(&aborted, scope, &[]);
+        aborted.abort();
+        assert_eq!(
+            logical_nodes(
+                &mut db.tx().unwrap().cursor_dup_read::<PackedStoragesTrie>().unwrap(),
+                scope
+            ),
+            trie_nodes(&rows)
+        );
+        drop(db);
+        let db = init_db(dir.path(), args).unwrap();
+        assert_eq!(
+            logical_nodes(
+                &mut db.tx().unwrap().cursor_dup_read::<PackedStoragesTrie>().unwrap(),
+                scope
+            ),
+            trie_nodes(&rows)
+        );
+    }
+}
+
+fn write_complete_trie(tx: &impl DbTxMut, scope: B256, rows: &[StorageEntry]) {
+    tx.delete::<PackedStoragesTrie>(scope, None).unwrap();
+    for (path, node) in trie_nodes(rows) {
+        tx.put::<PackedStoragesTrie>(scope, TrieEntry { nibbles: path.into(), node }).unwrap();
+    }
+    tx.finish_storage_trie_updates(scope).unwrap();
+}
+
+#[test]
+fn adaptive_frontiers_split_merge_reopen_and_abort_atomically() {
+    for mode in [PackingMode::Dense, PackingMode::Integer32] {
+        let dir = tempdir().unwrap();
+        let args =
+            DatabaseArguments::test().with_experimental_packing(Some(mode), ADAPTIVE_TRIE_DEPTH);
+        let db = init_db(dir.path(), args.clone()).unwrap();
+        let scope = B256::repeat_byte(90);
+        // A 60-nibble common prefix defeats any fixed depth of 1..=8.
+        let mut rows: Vec<_> = (0u32..1400)
+            .map(|i| {
+                let mut key = [1; 32];
+                key[28..].copy_from_slice(&i.to_be_bytes());
+                StorageEntry::new(B256::from(key), U256::from(i + 1))
+            })
+            .collect();
+        let tx = db.tx_mut().unwrap();
+        let mut cursor = tx.cursor_dup_read::<PackedStoragesTrie>().unwrap();
+        for (index, row) in rows.iter().enumerate() {
+            tx.put::<HashedStorages>(scope, *row).unwrap();
+            if index == 511 {
+                assert_eq!(logical_nodes(&mut cursor, scope), trie_nodes(&rows[..512]));
+            }
+        }
+        let frontier = tx.packing.as_ref().unwrap().frontier(tx.inner(), scope).unwrap();
+        assert!(frontier.cuts().count() > 1);
+        assert!(frontier.cuts().all(|prefix| prefix.len() > 8));
+        assert_eq!(logical_nodes(&mut cursor, scope), trie_nodes(&rows));
+        drop(cursor);
+        tx.commit().unwrap();
+        let old = db.tx().unwrap();
+        let original = trie_nodes(&rows);
+        let tx = db.tx_mut().unwrap();
+        let removed: Vec<_> = rows.drain(..1200).collect();
+        for row in removed {
+            tx.delete::<HashedStorages>(scope, Some(row)).unwrap();
+        }
+        let frontier = tx.packing.as_ref().unwrap().frontier(tx.inner(), scope).unwrap();
+        assert_eq!(frontier.cuts().collect::<Vec<_>>(), vec![Nibbles::default()]);
+        tx.commit().unwrap();
+        assert_eq!(
+            logical_nodes(&mut old.cursor_dup_read::<PackedStoragesTrie>().unwrap(), scope),
+            original
+        );
+        old.abort();
+        let tx = db.tx_mut().unwrap();
+        tx.clear::<HashedStorages>().unwrap();
+        tx.put::<HashedStorages>(scope, rows[0]).unwrap();
+        tx.abort();
+        assert_eq!(
+            logical_nodes(
+                &mut db.tx().unwrap().cursor_dup_read::<PackedStoragesTrie>().unwrap(),
+                scope
+            ),
+            trie_nodes(&rows)
+        );
+        drop(db);
+        assert!(init_db(dir.path(), DatabaseArguments::test()).is_err());
+        assert!(init_db(
+            dir.path(),
+            DatabaseArguments::test().with_experimental_packing(Some(mode), 3)
+        )
+        .is_err());
+        assert!(init_db(
+            dir.path(),
+            DatabaseArguments::test().with_experimental_packing(Some(mode), FULL_TRIE_DEPTH)
+        )
+        .is_err());
+        let db = init_db(dir.path(), args).unwrap();
+        let tx = db.tx().unwrap();
+        assert_eq!(
+            tx.packing.as_ref().unwrap().frontier(tx.inner(), scope).unwrap().cuts().count(),
+            1
+        );
+        assert_eq!(
+            logical_nodes(&mut tx.cursor_dup_read::<PackedStoragesTrie>().unwrap(), scope),
+            trie_nodes(&rows)
+        );
+        tx.abort();
+        let tx = db.tx_mut().unwrap();
+        tx.clear::<HashedStorages>().unwrap();
+        tx.commit().unwrap();
+        let tx = db.tx().unwrap();
+        assert_eq!(
+            tx.packing.as_ref().unwrap().frontier(tx.inner(), scope).unwrap().as_ref(),
+            &frontier::Frontier::Empty
+        );
+        assert!(tx.cursor_dup_read::<PackedStoragesTrie>().unwrap().first().unwrap().is_none());
+    }
+}
+
+#[test]
+fn adaptive_metadata_budget_adopts_full_trie_and_rolls_back() {
+    for mode in [PackingMode::Dense, PackingMode::Integer32] {
+        let dir = tempdir().unwrap();
+        let args =
+            DatabaseArguments::test().with_experimental_packing(Some(mode), ADAPTIVE_TRIE_DEPTH);
+        let db = init_db(dir.path(), args.clone()).unwrap();
+        let scope = B256::repeat_byte(91);
+        let rows = fixture(513);
+        let tx = db.tx_mut().unwrap();
+        for row in rows.iter().take(512) {
+            tx.put::<HashedStorages>(scope, *row).unwrap();
+        }
+        tx.commit().unwrap();
+        let old = db.tx().unwrap();
+        for commit in [false, true] {
+            let tx = db.tx_mut().unwrap();
+            let mut cursor = tx.cursor_dup_read::<PackedStoragesTrie>().unwrap();
+            assert_eq!(logical_nodes(&mut cursor, scope), trie_nodes(&rows[..512]));
+            tx.packing
+                .as_ref()
+                .unwrap()
+                .adaptive_limit
+                .store(1, std::sync::atomic::Ordering::Relaxed);
+            for row in rows.iter().skip(512) {
+                tx.put::<HashedStorages>(scope, *row).unwrap();
+            }
+            assert_eq!(
+                tx.packing.as_ref().unwrap().frontier(tx.inner(), scope).unwrap().as_ref(),
+                &frontier::Frontier::Full
+            );
+            assert_eq!(logical_nodes(&mut cursor, scope), trie_nodes(&rows));
+            drop(cursor);
+            if commit {
+                tx.commit().unwrap();
+            } else {
+                tx.abort();
+            }
+        }
+        assert_eq!(
+            logical_nodes(&mut old.cursor_dup_read::<PackedStoragesTrie>().unwrap(), scope),
+            trie_nodes(&rows[..512])
+        );
+        old.abort();
+        drop(db);
+        let db = init_db(dir.path(), args).unwrap();
+        let tx = db.tx().unwrap();
+        assert_eq!(
+            tx.packing.as_ref().unwrap().frontier(tx.inner(), scope).unwrap().as_ref(),
+            &frontier::Frontier::Full
+        );
+        assert_eq!(
+            logical_nodes(&mut tx.cursor_dup_read::<PackedStoragesTrie>().unwrap(), scope),
+            trie_nodes(&rows)
+        );
+        tx.abort();
+        let tx = db.tx_mut().unwrap();
+        tx.delete::<HashedStorages>(scope, None).unwrap();
+        tx.put::<HashedStorages>(scope, rows[0]).unwrap();
+        tx.commit().unwrap();
+        let tx = db.tx().unwrap();
+        assert_eq!(
+            tx.packing.as_ref().unwrap().frontier(tx.inner(), scope).unwrap().cuts().count(),
+            1
+        );
+        assert!(logical_nodes(&mut tx.cursor_dup_read::<PackedStoragesTrie>().unwrap(), scope)
+            .is_empty());
     }
 }

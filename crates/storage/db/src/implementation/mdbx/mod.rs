@@ -275,6 +275,14 @@ impl DatabaseArguments {
         }
         self
     }
+
+    /// Select the separately versioned adaptive reconstruction policy.
+    pub const fn with_experimental_adaptive_trie(mut self, retain: bool) -> Self {
+        if retain {
+            self.experimental_trie_depth = packing::ADAPTIVE_TRIE_DEPTH;
+        }
+        self
+    }
 }
 
 /// Wrapper for the libmdbx environment: [Environment]
@@ -658,6 +666,12 @@ impl DatabaseEnv {
                 .create_db(Some(packing::TABLE), DatabaseFlags::default())
                 .map_err(|e| DatabaseError::CreateTable(e.into()))?;
             dbis.insert(packing::TABLE, table.dbi());
+            if self.experimental_trie_depth == packing::ADAPTIVE_TRIE_DEPTH {
+                let table = tx
+                    .create_db(Some(packing::FRONTIER_TABLE), DatabaseFlags::default())
+                    .map_err(|e| DatabaseError::CreateTable(e.into()))?;
+                dbis.insert(packing::FRONTIER_TABLE, table.dbi());
+            }
             tx.commit().map_err(|e| DatabaseError::Commit(e.into()))?;
         }
 

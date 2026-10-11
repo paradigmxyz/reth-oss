@@ -13,8 +13,16 @@ use reth_prune::PruneSegment;
 #[tokio::test]
 async fn packed_state_execution_proof_reorg_and_restart() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
-    for mode in [None, Some(ExperimentalPacking::Dense), Some(ExperimentalPacking::Integer32)] {
-        eprintln!("checking packed-state execution and restart: {mode:?}");
+    for (mode, full, adaptive) in [
+        (None, false, false),
+        (Some(ExperimentalPacking::Dense), false, false),
+        (Some(ExperimentalPacking::Integer32), false, false),
+        (Some(ExperimentalPacking::Dense), true, false),
+        (Some(ExperimentalPacking::Integer32), true, false),
+        (Some(ExperimentalPacking::Dense), false, true),
+        (Some(ExperimentalPacking::Integer32), false, true),
+    ] {
+        eprintln!("checking packed-state execution and restart: {mode:?}, full={full}, adaptive={adaptive}");
         let (mut node, wallet) = EthereumNode::test_setup_for(EthereumHardfork::Prague)
             .with_storage_v2(true)
             .with_restartable_nodes()
@@ -25,6 +33,8 @@ async fn packed_state_execution_proof_reorg_and_restart() -> eyre::Result<()> {
                 config.pruning.block_interval = Some(1);
                 config.pruning.minimum_distance = Some(0);
                 config.db.experimental_state_packing = mode;
+                config.db.experimental_retain_full_trie = full;
+                config.db.experimental_adaptive_trie = adaptive;
                 config
             })
             .with_tree_config_modifier(|config| {
@@ -75,11 +85,11 @@ async fn packed_state_execution_proof_reorg_and_restart() -> eyre::Result<()> {
     Ok(())
 }
 
-// Initialize 512 distinct storage leaves before returning a runtime that writes the slot
-// and value supplied as two calldata words. The fixture exercises omitted trie branches.
+// Initialize 513 distinct storage leaves before returning a runtime that writes the slot
+// and value supplied as two calldata words. This also forces an adaptive boundary split.
 fn init_code() -> Bytes {
     let mut code = Vec::new();
-    for slot in 0..512u16 {
+    for slot in 0..513u16 {
         code.push(0x61);
         code.extend_from_slice(&(slot + 1).to_be_bytes());
         code.push(0x61);

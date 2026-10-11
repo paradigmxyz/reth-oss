@@ -116,6 +116,9 @@ Database:
       --db.experimental-retain-full-trie
           Pack storage values while retaining the full native storage trie. Requires a fresh directory and cannot change on reopening
 
+      --db.experimental-adaptive-trie
+          Pack storage with versioned, persisted regions of at most 512 leaves. Requires a fresh directory; conflicts with full retention and fixed depth
+
 Static Files:
       --static-files.blocks-per-file.headers <BLOCKS_PER_FILE_HEADERS>
           Number of blocks per file for the headers segment

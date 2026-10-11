@@ -11,7 +11,7 @@ recommendation or a claim that the remaining blob-update overhead disappears.
 
 The current default remains reconstruction with a fixed nibble-depth cutoff of
 3. This document records the recommended direction, explains the implemented
-alternative, and provides a detailed prompt for future work. It does not change
+alternative and the separately versioned adaptive implementation. It does not change
 defaults, migrate existing databases, or switch any running node's layout.
 
 | Strategy | Status | Storage representation | Storage trie |
@@ -19,7 +19,7 @@ defaults, migrate existing databases, or switch any running node's layout.
 | Native | Existing control | Native MDBX duplicate rows | Native complete trie |
 | Dense or integer32, cutoff depth | Existing experimental default | Packed blobs | Retained upper branches and reconstructed lower regions |
 | Dense or integer32, full retention | Implemented opt-in | Packed blobs | Native complete trie and native trie cursors |
-| Adaptive retention | Future design | Packed blobs | Persisted summaries and explicit, bounded reconstruction regions |
+| Adaptive retention v1 | Implemented opt-in; unbenchmarked | Packed blobs | Persisted cuts, bounded regions and full-trie fallback |
 
 Accounts, the account trie, bytecode, history indices, receipts and static files
 are outside this packing change. Storage V2 is required. Packing supports archive,
@@ -113,6 +113,21 @@ The important implementation boundaries are:
    under the full-retention sentinel. Contract/table wipes and aborts preserve
    their existing atomicity and visibility rules.
 
+Completed full-retention updates and contract wipes do not capture retained-node
+baselines or create per-slot reconstruction generations. State-only repair streams
+finalized canonical nodes into MDBX in batches rather than accumulating a complete
+contract node map. It still hashes every leaf of the repaired contract. A whole
+storage-table clear forces repair of newly populated scopes, even after provider
+completion, because the table clear is applied during flush.
+
+The `storage::db::packing` debug event `Packed state prepared for commit` reports
+preparation, blob encoding, blob persistence and reconstruction durations, encoded
+bytes, blobs, repaired scopes/leaves and completed scopes. These are buffered-flush
+durations before the final MDBX commit, not exclusive whole-block timings. Preparation
+includes decoding, sorted merges, bookkeeping, clears and adjacent-blob merges;
+reconstruction includes its trie/metadata writes. Adaptive boundary maintenance and
+fallback adoption happen during mutation and are outside these flush timings.
+
 The packed blob encoding is unchanged. The directory marker includes the
 retention sentinel, and reopening requires the same layout. A reconstructed
 packed directory cannot be switched to full retention by adding a flag. A
@@ -125,7 +140,98 @@ Relevant code is in `crates/storage/db/src/implementation/mdbx/packing/`,
 `crates/storage/provider/src/providers/database/provider.rs` and
 `crates/node/core/src/args/database.rs`.
 
-## Future adaptive retention design
+## Implemented adaptive retention v1
+
+Use a fresh directory with an explicit packing mode:
+
+```sh
+reth node --chain mainnet --minimal --storage.v2=true \
+  --datadir ./mainnet-packed-dense-adaptive \
+  --db.experimental-state-packing dense \
+  --db.experimental-adaptive-trie
+```
+
+Integer32, archive and full history retention are also supported. The adaptive
+flag requires packing and conflicts with fixed depth and full-trie retention.
+Internal sentinel 66 selects the policy; it is never used as a nibble length.
+Dense adaptive databases use version 10005 and integer32 adaptive databases use
+10006, with marker `<version>:adaptive:1`. Versions 10003/10004 and their existing
+cutoff/full markers keep their interpretation. Reopening with another retention
+policy is rejected before opening MDBX. No migration/converter exists: resync into
+a separate directory. Changing policy budgets requires another policy version.
+
+`ExperimentalPackedTrieFrontiersV1` contains one checksummed, contract-bound record
+per tracked scope. It stores sorted, nonoverlapping nibble prefixes and leaf counts,
+or an explicit full-trie fallback tag. Only occupied regions are represented;
+unrepresented children are empty. Cuts are loaded from the transaction's snapshot,
+not rediscovered by scanning the whole contract. Invalid versions, ordering, overlaps,
+counts, padding, checksums and oversized records are rejected by the bounded parser.
+
+The policy is:
+
+- A reconstructed region contains at most **512 leaves**, or **32 KiB** of decoded
+  key/value payload. Adding the 513th leaf scans that region and subdivides occupied
+  children recursively. Even a long common prefix terminates at unique 64-nibble keys.
+- Region branch maps have a conservative **1 MiB estimated allocation budget**.
+  At most 511 branching nodes and one active hash-builder frontier are needed for
+  512 leaves. The estimate includes map/child-hash overhead; it is not allocator RSS
+  accounting or a process-wide limit. One validated storage blob and cursor/cache
+  references are additional memory.
+- After deletion, descendant cuts merge when their combined occupancy is at most
+  **256 leaves**. This hysteresis avoids splitting and merging around 512.
+- At most **4,096 cuts** are persisted per contract. Exceeding that budget adopts
+  complete canonical trie records using a streaming storage scan inside the writer
+  transaction. Full fallback is persisted and remains until a contract wipe. This
+  can cost substantial adoption time and disk space, but valid large contracts do
+  not fail merely because a reconstruction region is oversized.
+
+Retained records are canonical branch summaries outside the cuts, with canonical
+child hashes/masks. An internal empty-path summary also links first-nibble cuts to
+reusable child hashes; public cursors omit it. Dirty scopes regenerate changed ancestors
+using immutable baseline child hashes when available. A split or merge forces final
+retained-record repair even if a provider completion was recorded. Retained records
+and the internal root summary are refreshed from current derived nodes or incremental
+repair after every sparse adaptive storage generation; provider updates alone omit
+that summary. Storage blobs, retained records and metadata publish atomically.
+Aborts, contract/table wipes and older readers
+keep their existing MDBX snapshot interpretation. Full-fallback scopes use physical
+native trie seeks; other scopes expose canonical omitted nodes through bounded
+region reconstruction. Empty root pseudo-records remain absent from the public view.
+
+Multiproofs may touch many regions. They reconstruct regions sequentially and reuse
+snapshot-local derived data through bounded cache admission; total CPU and proof
+output grow with the request. There is no arbitrary total-leaf rejection for a valid
+proof, nor a claim of constant total proof latency or memory. Upper summaries and
+temporary cursor-held maps are separate from the existing 8 MiB blob and 8 MiB trie
+cache admission budgets. Adaptive frontier metadata has its own 8 MiB/64-entry
+admission cache; active cursors can retain references beyond that budget.
+Dirty contract generations invalidate all its adaptive
+regions, conservatively; other contracts and older snapshots remain isolated.
+
+Initial trie construction, full-fallback adoption, table-clear repair and repair
+without a usable baseline can still stream the entire affected contract. The region
+limit bounds an omitted-region reconstruction, not all write/initialization work.
+No coldness heuristic or migration tool is implemented. Native/full-retention results
+are the correctness oracle. Storage savings and release/node performance of adaptive
+v1 have not been measured; the historical devnet estimates above do not establish
+its tradeoff.
+
+Adaptive size comparisons must include the frontier metadata table as well as packed
+storage blobs and retained trie pages. A full-fallback contract loses trie-omission
+savings; its storage-value packing remains enabled. Per-contract metadata adds
+overhead, so small contracts can expand relative to native storage.
+
+## Rationale and requirements
+
+Regression coverage includes native-versus-packed canonical roots and multiproofs,
+the production provider's sorted trie writer, pending overlays, sparse updates,
+completion followed by later mutation, state-only repair, contract/table wipes,
+reopen, abort, old snapshots and cursor positioning/reversal. Adaptive tests also
+exercise deep common prefixes, split/merge hysteresis, bounded malformed-metadata
+parsing, and forced full fallback. The real-node test runs native, both fixed-depth
+codecs, both full-trie codecs and both adaptive codecs through execution, persistence,
+RPC proofs, reorg and restart with a 513-slot contract. These are correctness tests,
+not release throughput or storage measurements.
 
 If trie omission remains desirable after storage-only packing, select retained
 boundaries by reconstruction work rather than by one global nibble depth.
@@ -139,7 +245,7 @@ subtrees keep more native branches. Small cold regions can be reconstructed.
 Cold regions can still be requested by validation or proofs, so coldness alone
 is not permission to discard an unbounded subtree.
 
-Requirements for that future design:
+Requirements addressed by the separate adaptive policy:
 
 - Persist explicit per-contract retained/reconstructed boundaries. Do not infer
   them from a single depth flag or rebuild the whole contract to rediscover them.
@@ -163,8 +269,8 @@ Requirements for that future design:
 - Assign an explicit layout/policy version and a migration path. Do not silently
   reinterpret depth-3, full-retention or existing marker versions.
 
-Full native trie retention is the correctness and latency baseline for this
-future work. Adaptive omission should remain an explicit experimental mode.
+Full native trie retention remains the correctness and latency baseline.
+Adaptive omission remains an explicit experimental mode.
 
 ## Detailed implementation prompt
 

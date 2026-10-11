@@ -3,9 +3,10 @@
 use super::{
     cache::{node_bytes, BlobCache, TrieCache, TrieNodes, CACHE_BYTES},
     codec::{self, Blob, OwnedBlob},
+    frontier::{self, Frontier, FrontierCache},
     PackingMode,
 };
-use crate::DatabaseError;
+use crate::{DatabaseError, DatabaseWriteOperation};
 use alloy_primitives::{B256, U256};
 use alloy_trie::{BranchNodeCompact, HashBuilder, Nibbles};
 use reth_codecs::Compact;
@@ -15,6 +16,7 @@ use reth_db_api::{
 };
 use reth_libmdbx::{ffi::MDBX_dbi, Transaction, TransactionKind, WriteFlags, RW};
 use reth_primitives_traits::StorageEntry;
+use reth_storage_errors::db::DatabaseWriteError;
 use std::{
     collections::{BTreeMap, BTreeSet},
     ops::Bound,
@@ -22,6 +24,7 @@ use std::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex,
     },
+    time::{Duration, Instant},
 };
 
 pub(crate) const TABLE: &str = "ExperimentalPackedStoragesV1";
@@ -41,9 +44,20 @@ pub(crate) struct Shared {
     writer: Option<Transaction<RW>>,
     pending: Mutex<Pending>,
     cache: Mutex<TrieCache>,
+    frontier_cache: Mutex<FrontierCache>,
     pub(crate) blobs: Arc<Mutex<BlobCache>>,
     #[cfg(test)]
     pub(crate) row_target: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    pub(crate) adaptive_limit: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    pub(crate) baseline_reads: AtomicU64,
+    #[cfg(test)]
+    pub(crate) repaired_contracts: AtomicU64,
+    #[cfg(test)]
+    pub(crate) repair_leaves: AtomicU64,
+    #[cfg(test)]
+    pub(crate) completed_contracts: AtomicU64,
 }
 
 #[derive(Debug, Default)]
@@ -60,6 +74,8 @@ struct Pending {
     trie_clear_generation: u64,
     baselines: BTreeMap<B256, Arc<TrieNodes>>,
     baseline_bytes: usize,
+    frontiers: BTreeMap<B256, Frontier>,
+    frontier_changed: BTreeSet<B256>,
 }
 
 impl Shared {
@@ -79,9 +95,20 @@ impl Shared {
             writer,
             pending: Mutex::new(Pending::default()),
             cache: Mutex::new(TrieCache::default()),
+            frontier_cache: Mutex::new(FrontierCache::default()),
             blobs: Arc::new(Mutex::new(BlobCache::default())),
             #[cfg(test)]
             row_target: std::sync::atomic::AtomicUsize::new(ROW_TARGET),
+            #[cfg(test)]
+            adaptive_limit: std::sync::atomic::AtomicUsize::new(frontier::REGION_LIMIT),
+            #[cfg(test)]
+            baseline_reads: AtomicU64::new(0),
+            #[cfg(test)]
+            repaired_contracts: AtomicU64::new(0),
+            #[cfg(test)]
+            repair_leaves: AtomicU64::new(0),
+            #[cfg(test)]
+            completed_contracts: AtomicU64::new(0),
         }
     }
 
@@ -99,7 +126,9 @@ impl Shared {
             .lock()
             .map_err(|_| DatabaseError::Other("packing delta lock poisoned".into()))?;
         self.capture_baseline(&mut p, contract)?;
+        let previous = self.adaptive_previous(&mut p, contract, entry.key)?;
         p.values.insert((contract, entry.key), Some(entry.value));
+        self.adaptive_change(&mut p, contract, entry.key, previous, true)?;
         self.changed(&mut p, contract, Some(entry.key));
         Ok(())
     }
@@ -111,7 +140,9 @@ impl Shared {
             .lock()
             .map_err(|_| DatabaseError::Other("packing delta lock poisoned".into()))?;
         self.capture_baseline(&mut p, contract)?;
+        let previous = self.adaptive_previous(&mut p, contract, slot)?;
         p.values.insert((contract, slot), None);
+        self.adaptive_change(&mut p, contract, slot, previous, false)?;
         self.changed(&mut p, contract, Some(slot));
         Ok(())
     }
@@ -123,6 +154,10 @@ impl Shared {
             .lock()
             .map_err(|_| DatabaseError::Other("packing delta lock poisoned".into()))?;
         p.cleared.insert(contract);
+        if self.depth == super::ADAPTIVE_TRIE_DEPTH {
+            p.frontiers.insert(contract, Frontier::Empty);
+            p.frontier_changed.insert(contract);
+        }
         p.values.retain(|(scope, _), _| *scope != contract);
         if let Some(nodes) = p.baselines.remove(&contract) {
             p.baseline_bytes -= node_bytes(&nodes);
@@ -167,43 +202,7 @@ impl Shared {
             .pending
             .lock()
             .map_err(|_| DatabaseError::Other("packing delta lock poisoned".into()))?;
-        let edge = bound.map_or(Bound::Unbounded, |b| {
-            if inclusive {
-                Bound::Included(b)
-            } else {
-                Bound::Excluded(b)
-            }
-        });
-        let range = p.values.range(if reverse {
-            (Bound::Unbounded, edge)
-        } else {
-            (edge, Bound::Unbounded)
-        });
-        let delta = if reverse {
-            range.rev().find_map(|(key, val)| val.map(|v| (key.0, StorageEntry::new(key.1, v))))
-        } else {
-            range
-                .into_iter()
-                .find_map(|(key, val)| val.map(|v| (key.0, StorageEntry::new(key.1, v))))
-        };
-        let mut physical = if p.clear { None } else { store.find(bound, inclusive, reverse)? };
-        while let Some((scope, entry)) = physical {
-            if !p.cleared.contains(&scope) && !p.values.contains_key(&(scope, entry.key)) {
-                break;
-            }
-            let skip = if p.cleared.contains(&scope) {
-                (scope, if reverse { B256::ZERO } else { B256::repeat_byte(0xff) })
-            } else {
-                (scope, entry.key)
-            };
-            physical = store.find(Some(skip), false, reverse)?;
-        }
-        Ok(match (physical, delta) {
-            (Some(a), Some(b)) => {
-                Some(if ((a.0, a.1.key) <= (b.0, b.1.key)) == reverse { b } else { a })
-            }
-            (a, b) => a.or(b),
-        })
+        find_overlay(&p, store, bound, inclusive, reverse)
     }
 
     pub(crate) fn mark_trie_root_written(&self, scope: B256) -> Result<(), DatabaseError> {
@@ -246,6 +245,14 @@ impl Shared {
 
     pub(crate) fn flush(&self) -> Result<(), DatabaseError> {
         let Some(tx) = &self.writer else { return Ok(()) };
+        let started = Instant::now();
+        let mut encoding_time = Duration::ZERO;
+        let mut persistence_time = Duration::ZERO;
+        let mut blobs = 0usize;
+        let mut encoded_bytes = 0usize;
+        let mut repaired_contracts = 0u64;
+        let mut repair_leaves = 0u64;
+        let mut completed_contracts = 0u64;
         let mut p = self
             .pending
             .lock()
@@ -259,17 +266,20 @@ impl Shared {
         let unchanged: BTreeMap<_, _> = dirty
             .iter()
             .copied()
-            .filter(|scope| {
-                p.clear ||
-                    p.cleared.contains(scope) ||
-                    p.trie_generation.get(scope) != p.contracts.get(scope)
-            })
+            .filter(|scope| self.needs_repair(&p, *scope))
             .map(|scope| (scope, unchanged(&p, scope)))
             .collect();
         let row_target = self.row_target();
         if p.clear {
             tx.clear_db(trie).map_err(|e| DatabaseError::Delete(e.into()))?;
             tx.clear_db(self.dbi).map_err(|e| DatabaseError::Delete(e.into()))?;
+            if self.depth == super::ADAPTIVE_TRIE_DEPTH {
+                let metadata = tx
+                    .open_db(Some(frontier::TABLE))
+                    .map_err(|e| DatabaseError::Open(e.into()))?
+                    .dbi();
+                tx.clear_db(metadata).map_err(|e| DatabaseError::Delete(e.into()))?;
+            }
         }
         for scope in &p.cleared {
             let mut c =
@@ -416,42 +426,102 @@ impl Shared {
                 }
             }
             if let Some(k) = old_key {
+                let start = Instant::now();
                 tx.del(self.dbi, k, None).map_err(|e| DatabaseError::Delete(e.into()))?;
+                persistence_time += start.elapsed();
             }
             // Balance splits so a 513-row block does not leave a one-row tail.
             let chunk_size = rows.len().div_ceil(rows.len().div_ceil(row_target).max(1)).max(1);
             for block in rows.chunks(chunk_size) {
+                let start = Instant::now();
                 let blob = codec::encode_record(block, scope, self.mode)?;
+                encoding_time += start.elapsed();
+                blobs += 1;
+                encoded_bytes += blob.len();
+                let start = Instant::now();
                 tx.put(self.dbi, key(scope, block[0].key), blob, WriteFlags::UPSERT)
                     .map_err(|e| DatabaseError::Read(e.into()))?;
+                persistence_time += start.elapsed();
             }
         }
         // State and retained trie nodes must describe the same committed snapshot, even when
         // a hashing stage commits without going through a trie writer. Rebuild only the
         // affected contracts and discard deeper updates as they are produced.
         let mut store = Store::new(tx.clone(), self.dbi, self.mode)?;
+        let reconstruction_start = Instant::now();
         for scope in dirty {
             // A root written after the last state mutation means the normal trie writer
             // already supplied this snapshot's upper updates. Otherwise repair them here.
-            if !p.clear &&
-                !p.cleared.contains(&scope) &&
-                p.trie_generation.get(&scope) == p.contracts.get(&scope)
-            {
+            if !unchanged.contains_key(&scope) {
+                completed_contracts += 1;
                 continue;
             }
             tx.del(trie, scope, None).map_err(|e| DatabaseError::Delete(e.into()))?;
+            let adaptive = (self.depth == super::ADAPTIVE_TRIE_DEPTH)
+                .then(|| p.frontiers.get(&scope).cloned().unwrap_or_default());
+            if self.depth == super::FULL_TRIE_DEPTH || adaptive == Some(Frontier::Full) {
+                repair_leaves += rebuild_full_trie(scope, &mut store, tx, trie)? as u64;
+                repaired_contracts += 1;
+                continue;
+            }
             let (base, skips) = unchanged.get(&scope).ok_or(DatabaseError::Decode)?;
-            let (nodes, _) = rebuild_upper(scope, self.depth, base, skips, |bound, inclusive| {
-                store.find(Some(bound), inclusive, false)
-            })?;
+            let derived = if adaptive.is_some() {
+                self.cached(
+                    scope,
+                    None,
+                    (p.contracts.get(&scope).copied().unwrap_or(p.clear_generation), 0),
+                )?
+            } else {
+                None
+            };
+            let (nodes, leaves) = if let Some(nodes) = derived {
+                ((*nodes).clone(), 0)
+            } else {
+                rebuild_upper(
+                    scope,
+                    self.depth,
+                    adaptive.as_ref(),
+                    base,
+                    skips,
+                    |bound, inclusive| store.find(Some(bound), inclusive, false),
+                )?
+            };
+            repaired_contracts += 1;
+            repair_leaves += leaves as u64;
             for (path, node) in nodes {
-                if self.depth == super::FULL_TRIE_DEPTH && path.is_empty() {
-                    continue;
-                }
                 let entry = TrieEntry { nibbles: path.into(), node };
                 tx.put(trie, scope, entry.compress(), WriteFlags::UPSERT)
                     .map_err(|e| DatabaseError::Read(e.into()))?;
             }
+        }
+        if self.depth == super::ADAPTIVE_TRIE_DEPTH {
+            let metadata =
+                tx.open_db(Some(frontier::TABLE)).map_err(|e| DatabaseError::Open(e.into()))?.dbi();
+            for (scope, frontier) in &p.frontiers {
+                if matches!(frontier, Frontier::Empty) {
+                    tx.del(metadata, scope, None).map_err(|e| DatabaseError::Delete(e.into()))?;
+                } else {
+                    tx.put(metadata, scope, frontier.encode(*scope), WriteFlags::UPSERT)
+                        .map_err(|e| DatabaseError::Read(e.into()))?;
+                }
+            }
+        }
+        let reconstruction_time = reconstruction_start.elapsed();
+        let preparation_time = started
+            .elapsed()
+            .saturating_sub(encoding_time + persistence_time + reconstruction_time);
+        tracing::debug!(
+            target: "storage::db::packing",
+            ?preparation_time, ?encoding_time, ?persistence_time, ?reconstruction_time,
+            blobs, encoded_bytes, repaired_contracts, repair_leaves, completed_contracts,
+            full_trie = self.depth == super::FULL_TRIE_DEPTH,
+            "Packed state prepared for commit"
+        );
+        #[cfg(test)]
+        {
+            self.repaired_contracts.store(repaired_contracts, Ordering::Relaxed);
+            self.repair_leaves.store(repair_leaves, Ordering::Relaxed);
+            self.completed_contracts.store(completed_contracts, Ordering::Relaxed);
         }
         Ok(())
     }
@@ -459,10 +529,12 @@ impl Shared {
     fn changed(&self, p: &mut Pending, scope: B256, slot: Option<B256>) {
         let generation = self.generation.fetch_add(1, Ordering::Release) + 1;
         p.contracts.insert(scope, generation);
-        if let Some(slot) = slot {
+        if let Some(slot) = slot &&
+            !matches!(self.depth, super::FULL_TRIE_DEPTH | super::ADAPTIVE_TRIE_DEPTH)
+        {
             p.regions
                 .insert((scope, Nibbles::unpack(slot).slice(..self.depth.min(64))), generation);
-        } else {
+        } else if slot.is_none() {
             p.contract_clears.insert(scope, generation);
         }
     }
@@ -470,7 +542,8 @@ impl Shared {
     /// Capture retained records before the first storage mutation, never after trie-only edits.
     /// An absent/oversized baseline safely selects the original full reconstruction path.
     fn capture_baseline(&self, p: &mut Pending, scope: B256) -> Result<(), DatabaseError> {
-        if p.clear ||
+        if self.depth == super::FULL_TRIE_DEPTH ||
+            p.clear ||
             p.contracts.contains_key(&scope) ||
             p.trie_clear_generation != 0 ||
             p.trie_contracts.contains_key(&scope) ||
@@ -479,6 +552,13 @@ impl Shared {
             return Ok(());
         }
         if let Some(tx) = &self.writer {
+            if self.depth == super::ADAPTIVE_TRIE_DEPTH &&
+                read_frontier(tx, scope)? == Frontier::Full
+            {
+                return Ok(());
+            }
+            #[cfg(test)]
+            self.baseline_reads.fetch_add(1, Ordering::Relaxed);
             let dbi = tx
                 .open_db(Some(PackedStoragesTrie::NAME))
                 .map_err(|e| DatabaseError::Open(e.into()))?
@@ -491,6 +571,25 @@ impl Shared {
             }
         }
         Ok(())
+    }
+
+    fn needs_repair(&self, p: &Pending, scope: B256) -> bool {
+        // Full retention's provider completion covers canonical updates after a
+        // contract wipe too. A whole-table clear still forces repair because the
+        // physical trie table is cleared during flush, after any earlier writes.
+        p.clear ||
+            p.frontier_changed.contains(&scope) ||
+            // Provider updates omit the internal root summary. Refresh it from this
+            // generation's cache or baseline, preserving reusable current child hashes.
+            (self.depth == super::ADAPTIVE_TRIE_DEPTH && p.frontiers.get(&scope) != Some(&Frontier::Full)) ||
+            (p.cleared.contains(&scope) && self.depth != super::FULL_TRIE_DEPTH) ||
+            p.trie_generation.get(&scope) != p.contracts.get(&scope)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn reconstruction_entries(&self) -> (usize, usize) {
+        let p = self.pending.lock().unwrap();
+        (p.baselines.len(), p.regions.len())
     }
 
     pub(crate) fn revision(&self, scope: B256) -> Result<(u64, u64, bool), DatabaseError> {
@@ -520,6 +619,9 @@ impl Shared {
             .pending
             .lock()
             .map_err(|_| DatabaseError::Other("packing delta lock poisoned".into()))?;
+        if self.depth == super::ADAPTIVE_TRIE_DEPTH {
+            return Ok(p.contracts.get(&scope).copied().unwrap_or(p.clear_generation));
+        }
         Ok(p.regions
             .get(&(scope, prefix))
             .copied()
@@ -565,6 +667,139 @@ impl Shared {
         Ok(unchanged(&p, scope))
     }
 
+    pub(crate) fn frontier<K: TransactionKind>(
+        &self,
+        tx: &Transaction<K>,
+        scope: B256,
+    ) -> Result<Arc<Frontier>, DatabaseError> {
+        let p = self
+            .pending
+            .lock()
+            .map_err(|_| DatabaseError::Other("packing delta lock poisoned".into()))?;
+        let generation = p.contracts.get(&scope).copied().unwrap_or(p.clear_generation);
+        let mut cache = self
+            .frontier_cache
+            .lock()
+            .map_err(|_| DatabaseError::Other("packing frontier cache lock poisoned".into()))?;
+        if let Some(frontier) = cache.get(scope, generation) {
+            return Ok(frontier)
+        }
+        let frontier = Arc::new(if let Some(frontier) = p.frontiers.get(&scope) {
+            frontier.clone()
+        } else if p.clear || p.cleared.contains(&scope) {
+            Frontier::Empty
+        } else {
+            read_frontier(tx, scope)?
+        });
+        cache.insert(scope, generation, Arc::clone(&frontier));
+        Ok(frontier)
+    }
+
+    fn adaptive_previous(
+        &self,
+        p: &mut Pending,
+        scope: B256,
+        slot: B256,
+    ) -> Result<bool, DatabaseError> {
+        if self.depth != super::ADAPTIVE_TRIE_DEPTH {
+            return Ok(false)
+        }
+        let tx = self.writer.as_ref().ok_or(DatabaseError::Decode)?;
+        if !p.frontiers.contains_key(&scope) {
+            let frontier = if p.clear || p.cleared.contains(&scope) {
+                Frontier::Empty
+            } else {
+                read_frontier(tx, scope)?
+            };
+            p.frontiers.insert(scope, frontier);
+        }
+        let mut store = Store::new(tx.clone(), self.dbi, self.mode)?.with_cache(self.blobs.clone());
+        Ok(find_overlay(p, &mut store, Some((scope, slot)), true, false)?
+            .is_some_and(|(contract, row)| contract == scope && row.key == slot))
+    }
+
+    fn adaptive_change(
+        &self,
+        p: &mut Pending,
+        scope: B256,
+        slot: B256,
+        previous: bool,
+        present: bool,
+    ) -> Result<(), DatabaseError> {
+        if self.depth != super::ADAPTIVE_TRIE_DEPTH || previous == present {
+            return Ok(())
+        }
+        let tx = self.writer.as_ref().ok_or(DatabaseError::Decode)?;
+        let mut frontier = p.frontiers.remove(&scope).ok_or(DatabaseError::Decode)?;
+        let was_full = matches!(frontier, Frontier::Full);
+        if was_full {
+            p.frontiers.insert(scope, frontier);
+            return Ok(());
+        }
+        let old_region = frontier.region(slot);
+        let mut boundaries_changed = present && !frontier.cuts().any(|cut| cut == old_region);
+        if let Some(prefix) = frontier.change(slot, present) {
+            boundaries_changed = true;
+            let mut store =
+                Store::new(tx.clone(), self.dbi, self.mode)?.with_cache(self.blobs.clone());
+            let mut bound = (scope, prefix_bounds(prefix).0);
+            let mut inclusive = true;
+            let mut slots = Vec::with_capacity(frontier::LEAF_LIMIT + 1);
+            while let Some((contract, row)) =
+                find_overlay(p, &mut store, Some(bound), inclusive, false)?
+            {
+                if contract != scope || !Nibbles::unpack(row.key).starts_with(&prefix) {
+                    break
+                }
+                if slots.len() > frontier::LEAF_LIMIT {
+                    return Err(DatabaseError::Decode)
+                }
+                slots.push(row.key);
+                bound = (scope, row.key);
+                inclusive = false;
+            }
+            if slots.len() != frontier::LEAF_LIMIT + 1 {
+                return Err(DatabaseError::Decode)
+            }
+            frontier.split(prefix, &slots);
+        }
+        if !present {
+            frontier.merge(slot);
+            boundaries_changed = frontier.region(slot) != old_region ||
+                !frontier.cuts().any(|cut| cut == old_region);
+        }
+        if frontier.exceeds(self.frontier_limit()) {
+            frontier = Frontier::Full;
+            let trie = tx
+                .open_db(Some(PackedStoragesTrie::NAME))
+                .map_err(|e| DatabaseError::Open(e.into()))?
+                .dbi();
+            tx.del(trie, scope, None).map_err(|e| DatabaseError::Delete(e.into()))?;
+            let mut store =
+                Store::new(tx.clone(), self.dbi, self.mode)?.with_cache(self.blobs.clone());
+            // Seed complete native records before exposing the new interpretation to a cursor.
+            // The pending overlay participates; MDBX rollback makes adoption atomic on abort.
+            rebuild_full_from(scope, tx, trie, |bound, inclusive| {
+                find_overlay(p, &mut store, Some(bound), inclusive, false)
+            })?;
+        }
+        if boundaries_changed || matches!(frontier, Frontier::Full) {
+            p.frontier_changed.insert(scope);
+        }
+        p.frontiers.insert(scope, frontier);
+        Ok(())
+    }
+
+    #[cfg(not(test))]
+    const fn frontier_limit(&self) -> usize {
+        frontier::REGION_LIMIT
+    }
+
+    #[cfg(test)]
+    fn frontier_limit(&self) -> usize {
+        self.adaptive_limit.load(Ordering::Relaxed)
+    }
+
     #[cfg(not(test))]
     const fn row_target(&self) -> usize {
         ROW_TARGET
@@ -574,6 +809,16 @@ impl Shared {
     fn row_target(&self) -> usize {
         self.row_target.load(Ordering::Relaxed)
     }
+}
+
+fn read_frontier<K: TransactionKind>(
+    tx: &Transaction<K>,
+    scope: B256,
+) -> Result<Frontier, DatabaseError> {
+    let dbi = tx.open_db(Some(frontier::TABLE)).map_err(|e| DatabaseError::Open(e.into()))?.dbi();
+    tx.get::<Vec<u8>>(dbi, scope.as_slice())
+        .map_err(|e| DatabaseError::Read(e.into()))?
+        .map_or(Ok(Frontier::Empty), |bytes| Frontier::decode(scope, &bytes))
 }
 
 /// A physical blob cursor with one bounded validated-blob cache.
@@ -794,13 +1039,15 @@ fn prefix_bounds(prefix: Nibbles) -> (B256, B256) {
 pub(crate) fn rebuild_upper(
     scope: B256,
     depth: usize,
+    frontier: Option<&Frontier>,
     base: &TrieNodes,
     skips: &[Subtree],
     mut find: impl FnMut((B256, B256), bool) -> Result<Option<(B256, StorageEntry)>, DatabaseError>,
 ) -> Result<(TrieNodes, usize), DatabaseError> {
+    let retained = |path: &Nibbles| frontier.map_or(path.len() < depth, |f| f.retains(path));
     let mut nodes: TrieNodes = base
         .iter()
-        .filter(|(path, _)| skips.iter().any(|s| path.starts_with(&s.path)))
+        .filter(|(path, _)| retained(path) && skips.iter().any(|s| path.starts_with(&s.path)))
         .map(|(path, node)| (*path, node.clone()))
         .collect();
     let mut builder = HashBuilder::default().with_updates(true);
@@ -829,12 +1076,12 @@ pub(crate) fn rebuild_upper(
             break;
         }
         if let Some(updates) = builder.updated_branch_nodes.as_mut() {
-            nodes.extend(updates.drain().filter(|(path, _)| path.len() < depth));
+            nodes.extend(updates.drain().filter(|(path, _)| retained(path)));
         }
     }
     builder.root();
     if let Some(updates) = builder.updated_branch_nodes.as_mut() {
-        nodes.extend(updates.drain().filter(|(path, _)| path.len() < depth));
+        nodes.extend(updates.drain().filter(|(path, _)| retained(path)));
     }
     Ok((nodes, leaves))
 }
@@ -861,6 +1108,78 @@ fn merge_blob(
     Ok(true)
 }
 
+/// State-only full-retention repair streams finalized branch updates into MDBX rather
+/// than accumulating a contract-sized map. `HashBuilder`'s active frontier and one blob
+/// remain live; cache admission budgets are not a bound on those temporary allocations.
+fn rebuild_full_trie(
+    scope: B256,
+    store: &mut Store<RW>,
+    tx: &Transaction<RW>,
+    trie: MDBX_dbi,
+) -> Result<usize, DatabaseError> {
+    rebuild_full_from(scope, tx, trie, |bound, inclusive| store.find(Some(bound), inclusive, false))
+}
+
+fn rebuild_full_from(
+    scope: B256,
+    tx: &Transaction<RW>,
+    trie: MDBX_dbi,
+    mut find: impl FnMut((B256, B256), bool) -> Result<Option<(B256, StorageEntry)>, DatabaseError>,
+) -> Result<usize, DatabaseError> {
+    let mut builder = HashBuilder::default().with_updates(true);
+    let mut cursor = tx.cursor_with_dbi(trie).map_err(|e| DatabaseError::InitCursor(e.into()))?;
+    let mut bound = (scope, B256::ZERO);
+    let mut inclusive = true;
+    let mut leaves = 0;
+    while let Some((found, row)) = find(bound, inclusive)? {
+        if found != scope {
+            break;
+        }
+        builder
+            .add_leaf(Nibbles::unpack(row.key), alloy_rlp::encode_fixed_size(&row.value).as_ref());
+        leaves += 1;
+        if leaves % 256 == 0 {
+            persist_full_trie_updates(scope, &mut builder, &mut cursor)?;
+        }
+        bound = (scope, row.key);
+        inclusive = false;
+    }
+    builder.root();
+    persist_full_trie_updates(scope, &mut builder, &mut cursor)?;
+    Ok(leaves)
+}
+
+fn persist_full_trie_updates(
+    scope: B256,
+    builder: &mut HashBuilder,
+    cursor: &mut reth_libmdbx::Cursor<RW>,
+) -> Result<(), DatabaseError> {
+    if let Some(updates) = builder.updated_branch_nodes.as_mut() {
+        for (path, node) in updates.drain().filter(|(path, _)| !path.is_empty()) {
+            let entry = TrieEntry { nibbles: path.into(), node };
+            let key = entry.nibbles.clone().encode();
+            // Match typed native upsert semantics even if a later batch revises a
+            // previously emitted path: replace its duplicate value, not just its key.
+            if cursor
+                .get_both_range::<Vec<u8>>(scope.as_slice(), key.as_ref())
+                .map_err(|e| DatabaseError::Read(e.into()))?
+                .is_some_and(|value| value.get(..33) == Some(key.as_ref()))
+            {
+                cursor.del(WriteFlags::CURRENT).map_err(|e| DatabaseError::Delete(e.into()))?;
+            }
+            cursor.put(scope.as_slice(), &entry.compress(), WriteFlags::UPSERT).map_err(|e| {
+                DatabaseError::from(DatabaseWriteError {
+                    info: e.into(),
+                    operation: DatabaseWriteOperation::CursorUpsert,
+                    table_name: PackedStoragesTrie::NAME,
+                    key: scope.to_vec(),
+                })
+            })?;
+        }
+    }
+    Ok(())
+}
+
 /// Both inputs are ordered; pending mutations replace or remove the matching physical row.
 fn merge_rows(
     existing: &[StorageEntry],
@@ -882,4 +1201,45 @@ fn merge_rows(
         }
     }
     output.extend(rows.copied());
+}
+
+fn find_overlay<K: TransactionKind>(
+    p: &Pending,
+    store: &mut Store<K>,
+    bound: Option<(B256, B256)>,
+    inclusive: bool,
+    reverse: bool,
+) -> Result<Option<(B256, StorageEntry)>, DatabaseError> {
+    let edge = bound.map_or(Bound::Unbounded, |b| {
+        if inclusive {
+            Bound::Included(b)
+        } else {
+            Bound::Excluded(b)
+        }
+    });
+    let range =
+        p.values.range(if reverse { (Bound::Unbounded, edge) } else { (edge, Bound::Unbounded) });
+    let delta = if reverse {
+        range.rev().find_map(|(key, val)| val.map(|v| (key.0, StorageEntry::new(key.1, v))))
+    } else {
+        range.into_iter().find_map(|(key, val)| val.map(|v| (key.0, StorageEntry::new(key.1, v))))
+    };
+    let mut physical = if p.clear { None } else { store.find(bound, inclusive, reverse)? };
+    while let Some((scope, entry)) = physical {
+        if !p.cleared.contains(&scope) && !p.values.contains_key(&(scope, entry.key)) {
+            break;
+        }
+        let skip = if p.cleared.contains(&scope) {
+            (scope, if reverse { B256::ZERO } else { B256::repeat_byte(0xff) })
+        } else {
+            (scope, entry.key)
+        };
+        physical = store.find(Some(skip), false, reverse)?;
+    }
+    Ok(match (physical, delta) {
+        (Some(a), Some(b)) => {
+            Some(if ((a.0, a.1.key) <= (b.0, b.1.key)) == reverse { b } else { a })
+        }
+        (a, b) => a.or(b),
+    })
 }

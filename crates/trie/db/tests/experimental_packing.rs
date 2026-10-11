@@ -13,6 +13,10 @@ use reth_db_api::{
     transaction::{DbTx, DbTxMut},
 };
 use reth_primitives_traits::StorageEntry;
+use reth_provider::{
+    test_utils::create_test_provider_factory_with_chain_spec_and_db_args, StorageSettings,
+    StorageSettingsCache, StorageTrieWriter,
+};
 use reth_trie::{
     hashed_cursor::HashedPostStateCursorFactory, prefix_set::PrefixSetMut, proof::StorageProof,
     trie_cursor::InMemoryTrieCursorFactory, updates::TrieUpdates, HashBuilder, HashedPostState,
@@ -21,10 +25,14 @@ use reth_trie::{
 use reth_trie_db::{
     DatabaseHashedCursorFactory, DatabaseStorageRoot, DatabaseTrieCursorFactory, PackedKeyAdapter,
 };
-use std::{hint::black_box, time::Instant};
+use std::{collections::BTreeMap, hint::black_box, time::Instant};
 use tempfile::tempdir;
 
 type TrieEntry = <PackedStoragesTrie as Table>::Value;
+type DbStorageRoot<'a, TX> = StorageRoot<
+    DatabaseTrieCursorFactory<&'a TX, PackedKeyAdapter>,
+    DatabaseHashedCursorFactory<&'a TX>,
+>;
 const TABLE: &str = "ExperimentalPackedStoragesV1";
 
 fn fixture(n: usize) -> Vec<StorageEntry> {
@@ -50,10 +58,13 @@ fn roots_and_proofs_match_native_before_after_update_and_reopen() {
     let native = init_db(native_dir.path(), DatabaseArguments::test()).unwrap();
     let scope = B256::repeat_byte(7);
     for count in [1, 4, 4096] {
-        for mode in [PackingMode::Dense, PackingMode::Integer32] {
+        for (mode, depth) in [PackingMode::Dense, PackingMode::Integer32]
+            .into_iter()
+            .flat_map(|mode| [3, 65, 66].map(|depth| (mode, depth)))
+        {
             let mut rows = fixture(count);
             let dir = tempdir().unwrap();
-            let args = DatabaseArguments::test().with_experimental_packing(Some(mode), 3);
+            let args = DatabaseArguments::test().with_experimental_packing(Some(mode), depth);
             let packed = init_db(dir.path(), args.clone()).unwrap();
             for round in 0..3 {
                 if round == 1 {
@@ -234,13 +245,15 @@ fn storage_root<TX: DbTx>(tx: &TX, scope: B256) -> B256 {
 
 #[test]
 fn sparse_incremental_updates_preserve_roots_and_multiproofs() {
-    for mode in [PackingMode::Dense, PackingMode::Integer32] {
+    for (mode, depth) in [PackingMode::Dense, PackingMode::Integer32].into_iter().flat_map(|mode| {
+        [3, reth_db::mdbx::packing::ADAPTIVE_TRIE_DEPTH].map(|depth| (mode, depth))
+    }) {
         let native_dir = tempdir().unwrap();
         let packed_dir = tempdir().unwrap();
         let native = init_db(native_dir.path(), DatabaseArguments::test()).unwrap();
         let packed = init_db(
             packed_dir.path(),
-            DatabaseArguments::test().with_experimental_packing(Some(mode), 3),
+            DatabaseArguments::test().with_experimental_packing(Some(mode), depth),
         )
         .unwrap();
         let scope = B256::repeat_byte(19);
@@ -341,20 +354,18 @@ fn system_contract_overlays_match_full_storage_roots() {
                 .into_sorted();
                 let sorted_nodes = nodes.clone().into_sorted();
                 let tx = db.tx().unwrap();
-                let (root, _, updates) = StorageRoot::new_hashed(
-                    InMemoryTrieCursorFactory::new(
+                let (root, _, updates) = DbStorageRoot::from_tx_hashed(&tx, scope)
+                    .with_trie_cursor_factory(InMemoryTrieCursorFactory::new(
                         DatabaseTrieCursorFactory::<_, PackedKeyAdapter>::new(&tx),
                         &sorted_nodes,
-                    ),
-                    HashedPostStateCursorFactory::new(
+                    ))
+                    .with_hashed_cursor_factory(HashedPostStateCursorFactory::new(
                         DatabaseHashedCursorFactory::new(&tx),
                         &state,
-                    ),
-                    scope,
-                    prefix_set.freeze(),
-                )
-                .root_with_updates()
-                .unwrap();
+                    ))
+                    .with_prefix_set(prefix_set.freeze())
+                    .root_with_updates()
+                    .unwrap();
                 let mut builder = HashBuilder::default();
                 for (key, value) in &storage {
                     builder.add_leaf(
@@ -405,14 +416,14 @@ fn persisted_system_contract_incremental_roots_match_full_storage() {
                 HashedStorage::from_iter(changed.clone()),
             )
             .into_sorted();
-            let (root, _, _) = StorageRoot::new_hashed(
-                DatabaseTrieCursorFactory::<_, PackedKeyAdapter>::new(&tx),
-                HashedPostStateCursorFactory::new(DatabaseHashedCursorFactory::new(&tx), &state),
-                scope,
-                prefixes.freeze(),
-            )
-            .root_with_updates()
-            .unwrap();
+            let (root, _, _) = DbStorageRoot::from_tx_hashed(&tx, scope)
+                .with_hashed_cursor_factory(HashedPostStateCursorFactory::new(
+                    DatabaseHashedCursorFactory::new(&tx),
+                    &state,
+                ))
+                .with_prefix_set(prefixes.freeze())
+                .root_with_updates()
+                .unwrap();
             let mut builder = HashBuilder::default().with_updates(true);
             for (key, value) in &storage {
                 builder
@@ -440,10 +451,24 @@ fn persisted_system_contract_incremental_roots_match_full_storage() {
 
 #[test]
 fn pending_storage_trie_overlays_match_native_roots() {
-    for mode in [None, Some(PackingMode::Dense), Some(PackingMode::Integer32)] {
+    for (mode, full, adaptive) in [
+        (None, false, false),
+        (Some(PackingMode::Dense), false, false),
+        (Some(PackingMode::Integer32), false, false),
+        (Some(PackingMode::Dense), true, false),
+        (Some(PackingMode::Integer32), true, false),
+        (Some(PackingMode::Dense), false, true),
+        (Some(PackingMode::Integer32), false, true),
+    ] {
         let dir = tempdir().unwrap();
-        let db = init_db(dir.path(), DatabaseArguments::test().with_experimental_packing(mode, 3))
-            .unwrap();
+        let db = init_db(
+            dir.path(),
+            DatabaseArguments::test()
+                .with_experimental_packing(mode, 3)
+                .with_experimental_full_trie(full)
+                .with_experimental_adaptive_trie(adaptive),
+        )
+        .unwrap();
         let scope = B256::repeat_byte(33);
         let mut rows = fixture(31);
         let tx = db.tx_mut().unwrap();
@@ -473,14 +498,14 @@ fn pending_storage_trie_overlays_match_native_roots() {
         let mut prefixes = PrefixSetMut::default();
         prefixes.insert(Nibbles::unpack(rows[0].key));
         let tx = db.tx().unwrap();
-        let (expected, _, updates) = StorageRoot::new_hashed(
-            DatabaseTrieCursorFactory::<_, PackedKeyAdapter>::new(&tx),
-            HashedPostStateCursorFactory::new(DatabaseHashedCursorFactory::new(&tx), &state),
-            scope,
-            prefixes.freeze(),
-        )
-        .root_with_updates()
-        .unwrap();
+        let (expected, _, updates) = DbStorageRoot::from_tx_hashed(&tx, scope)
+            .with_hashed_cursor_factory(HashedPostStateCursorFactory::new(
+                DatabaseHashedCursorFactory::new(&tx),
+                &state,
+            ))
+            .with_prefix_set(prefixes.freeze())
+            .root_with_updates()
+            .unwrap();
         let mut nodes = TrieUpdates::default();
         nodes.storage_tries.insert(scope, updates);
         let nodes = nodes.into_sorted();
@@ -506,17 +531,18 @@ fn pending_storage_trie_overlays_match_native_roots() {
                 HashedStorage::from_iter(rows.iter().map(|row| (row.key, row.value))),
             )
             .into_sorted();
-            let actual = StorageRoot::new_hashed(
-                InMemoryTrieCursorFactory::new(
+            let actual = DbStorageRoot::from_tx_hashed(&tx, scope)
+                .with_trie_cursor_factory(InMemoryTrieCursorFactory::new(
                     DatabaseTrieCursorFactory::<_, PackedKeyAdapter>::new(&tx),
                     &nodes,
-                ),
-                HashedPostStateCursorFactory::new(DatabaseHashedCursorFactory::new(&tx), &state),
-                scope,
-                prefixes.freeze(),
-            )
-            .root()
-            .unwrap();
+                ))
+                .with_hashed_cursor_factory(HashedPostStateCursorFactory::new(
+                    DatabaseHashedCursorFactory::new(&tx),
+                    &state,
+                ))
+                .with_prefix_set(prefixes.freeze())
+                .root()
+                .unwrap();
             let mut builder = HashBuilder::default();
             for row in &rows {
                 builder.add_leaf(
@@ -531,4 +557,146 @@ fn pending_storage_trie_overlays_match_native_roots() {
             );
         }
     }
+}
+
+#[test]
+fn retention_production_writer_preserves_roots_proofs_and_wipes() {
+    let mut reference = None;
+    for (mode, adaptive) in [
+        (None, false),
+        (Some(PackingMode::Dense), false),
+        (Some(PackingMode::Integer32), false),
+        (Some(PackingMode::Dense), true),
+        (Some(PackingMode::Integer32), true),
+    ] {
+        let factory = create_test_provider_factory_with_chain_spec_and_db_args(
+            reth_chainspec::MAINNET.clone(),
+            DatabaseArguments::test()
+                .with_experimental_packing(mode, 3)
+                .with_experimental_full_trie(mode.is_some())
+                .with_experimental_adaptive_trie(adaptive),
+        );
+        factory.set_storage_settings_cache(StorageSettings::v2());
+        let scope = B256::repeat_byte(51);
+        let mut storage = BTreeMap::new();
+        let mut results = Vec::new();
+        for phase in 0..6 {
+            let old = factory.provider().unwrap();
+            let previous_root = storage_root(old.tx_ref(), scope);
+            let provider = factory.provider_rw().unwrap();
+            let tx = provider.tx_ref();
+            let mut prefixes = PrefixSetMut::default();
+            if matches!(phase, 2 | 3) {
+                for key in storage.keys() {
+                    prefixes.insert(Nibbles::unpack(*key));
+                }
+                storage.clear();
+                tx.delete::<HashedStorages>(scope, None).unwrap();
+                tx.delete::<PackedStoragesTrie>(scope, None).unwrap();
+            }
+            if matches!(phase, 0 | 2 | 4) {
+                for row in fixture(if phase == 0 { 1024 } else { 64 }) {
+                    storage.insert(row.key, row.value);
+                    prefixes.insert(Nibbles::unpack(row.key));
+                    tx.put::<HashedStorages>(scope, row).unwrap();
+                }
+            }
+            if matches!(phase, 1 | 5) {
+                let first = *storage.first_key_value().unwrap().0;
+                let value = U256::from(9999 + phase);
+                let previous = storage.insert(first, value).unwrap();
+                tx.delete::<HashedStorages>(scope, Some(StorageEntry::new(first, previous)))
+                    .unwrap();
+                prefixes.insert(Nibbles::unpack(first));
+                tx.put::<HashedStorages>(scope, StorageEntry::new(first, value)).unwrap();
+                if phase == 1 {
+                    let removed = *storage.last_key_value().unwrap().0;
+                    let value = storage.remove(&removed).unwrap();
+                    prefixes.insert(Nibbles::unpack(removed));
+                    tx.delete::<HashedStorages>(scope, Some(StorageEntry::new(removed, value)))
+                        .unwrap();
+                }
+            }
+            let (root, _, updates) = DbStorageRoot::from_tx_hashed(tx, scope)
+                .with_prefix_set(prefixes.freeze())
+                .root_with_updates()
+                .unwrap();
+            assert_eq!(root, canonical_storage(&storage).0, "{mode:?}, phase={phase}");
+            if phase != 4 || mode.is_none() {
+                let sorted = updates.into_sorted();
+                provider
+                    .write_storage_trie_updates_sorted(std::iter::once((&scope, &sorted)))
+                    .unwrap();
+            }
+            if phase == 5 {
+                let last = *storage.last_key_value().unwrap().0;
+                let value = U256::from(987654);
+                let previous = storage.insert(last, value).unwrap();
+                tx.delete::<HashedStorages>(scope, Some(StorageEntry::new(last, previous)))
+                    .unwrap();
+                tx.put::<HashedStorages>(scope, StorageEntry::new(last, value)).unwrap();
+                if mode.is_none() {
+                    // Native has no state-only commit repair: supply the additional
+                    // canonical update explicitly so it remains the correct oracle.
+                    let mut prefixes = PrefixSetMut::default();
+                    prefixes.insert(Nibbles::unpack(last));
+                    let (_, _, updates) = DbStorageRoot::from_tx_hashed(tx, scope)
+                        .with_prefix_set(prefixes.freeze())
+                        .root_with_updates()
+                        .unwrap();
+                    let sorted = updates.into_sorted();
+                    provider
+                        .write_storage_trie_updates_sorted(std::iter::once((&scope, &sorted)))
+                        .unwrap();
+                }
+            }
+            provider.commit().unwrap();
+            assert_eq!(storage_root(old.tx_ref(), scope), previous_root, "old snapshot changed");
+            let provider = factory.provider().unwrap();
+            let tx = provider.tx_ref();
+            let expected = canonical_storage(&storage);
+            let actual: BTreeMap<_, _> = tx
+                .cursor_dup_read::<PackedStoragesTrie>()
+                .unwrap()
+                .walk_dup(Some(scope), None)
+                .unwrap()
+                .map(|row| {
+                    let (_, row) = row.unwrap();
+                    (row.nibbles.0, row.node)
+                })
+                .collect();
+            assert_eq!(actual, expected.1, "{mode:?}, phase={phase}");
+            assert_eq!(storage_root(tx, scope), expected.0);
+            let targets = storage
+                .keys()
+                .copied()
+                .step_by(31)
+                .chain([B256::ZERO, B256::repeat_byte(255)])
+                .collect();
+            let proof = StorageProof::new_hashed(
+                DatabaseTrieCursorFactory::<_, PackedKeyAdapter>::new(tx),
+                DatabaseHashedCursorFactory::new(tx),
+                scope,
+            )
+            .storage_multiproof(targets)
+            .unwrap();
+            results.push((expected.0, proof));
+        }
+        if let Some(expected) = &reference {
+            assert_eq!(&results, expected, "{mode:?}");
+        } else {
+            reference = Some(results);
+        }
+    }
+}
+
+fn canonical_storage(
+    storage: &BTreeMap<B256, U256>,
+) -> (B256, BTreeMap<Nibbles, reth_trie::BranchNodeCompact>) {
+    let mut builder = HashBuilder::default().with_updates(true);
+    for (key, value) in storage {
+        builder.add_leaf(Nibbles::unpack(*key), alloy_rlp::encode_fixed_size(value).as_ref());
+    }
+    let root = builder.root();
+    (root, builder.split().1.into_iter().filter(|(path, _)| !path.is_empty()).collect())
 }

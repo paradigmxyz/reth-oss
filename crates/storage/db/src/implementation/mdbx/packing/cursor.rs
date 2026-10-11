@@ -1,6 +1,11 @@
 //! Logical storage and trie rows backed by packed blobs in the caller's MDBX snapshot.
 
-use super::{cache::TrieNodes, store::rebuild_upper, Shared, Store};
+use super::{
+    cache::{node_bytes, TrieNodes},
+    frontier::{self, Frontier},
+    store::rebuild_upper,
+    Shared, Store,
+};
 use crate::DatabaseError;
 use alloy_primitives::B256;
 use alloy_trie::{BranchNodeCompact, HashBuilder, Nibbles};
@@ -332,10 +337,19 @@ impl<K: TransactionKind> Logical<K> {
     ) -> Result<BTreeMap<Nibbles, BranchNodeCompact>, DatabaseError> {
         if upper {
             let (base, skips) = self.shared.unchanged(scope)?;
-            let (nodes, leaves) =
-                rebuild_upper(scope, self.shared.depth, &base, &skips, |bound, inclusive| {
-                    self.shared.find(&mut self.store, Some(bound), inclusive, false)
-                })?;
+            let adaptive = if self.shared.depth == super::ADAPTIVE_TRIE_DEPTH {
+                Some(self.shared.frontier(&self.tx, scope)?)
+            } else {
+                None
+            };
+            let (nodes, leaves) = rebuild_upper(
+                scope,
+                self.shared.depth,
+                adaptive.as_deref(),
+                &base,
+                &skips,
+                |bound, inclusive| self.shared.find(&mut self.store, Some(bound), inclusive, false),
+            )?;
             #[cfg(test)]
             {
                 self.upper_rebuilds += 1;
@@ -366,18 +380,45 @@ impl<K: TransactionKind> Logical<K> {
                 break;
             }
             count += 1;
+            if self.shared.depth == super::ADAPTIVE_TRIE_DEPTH &&
+                count * 64 > frontier::DECODED_LIMIT
+            {
+                return Err(DatabaseError::Decode);
+            }
             if count > MAX_REBUILD_LEAVES {
                 return Err(DatabaseError::Other("experimental trie region exceeds 262144 leaves; use a larger --db.experimental-trie-depth".into()));
             }
             builder.add_leaf(path, alloy_rlp::encode_fixed_size(&row.value).as_ref());
             if count % 256 == 0 {
-                Self::drain(&mut builder, &mut nodes, self.shared.depth, upper);
+                Self::drain(
+                    &mut builder,
+                    &mut nodes,
+                    if self.shared.depth == super::ADAPTIVE_TRIE_DEPTH {
+                        0
+                    } else {
+                        self.shared.depth
+                    },
+                    upper,
+                );
             }
             bound = Some((scope, row.key));
             include = false;
         }
         builder.root();
-        Self::drain(&mut builder, &mut nodes, self.shared.depth, upper);
+        Self::drain(
+            &mut builder,
+            &mut nodes,
+            if self.shared.depth == super::ADAPTIVE_TRIE_DEPTH { 0 } else { self.shared.depth },
+            upper,
+        );
+        if self.shared.depth == super::ADAPTIVE_TRIE_DEPTH {
+            nodes.retain(|path, _| path.starts_with(prefix) && !path.is_empty());
+        }
+        if self.shared.depth == super::ADAPTIVE_TRIE_DEPTH &&
+            node_bytes(&nodes) > frontier::TEMPORARY_LIMIT
+        {
+            return Err(DatabaseError::Decode);
+        }
         Ok(nodes)
     }
 
@@ -399,6 +440,14 @@ impl<K: TransactionKind> Logical<K> {
         inclusive: bool,
         reverse: bool,
     ) -> Result<Option<(Nibbles, BranchNodeCompact)>, DatabaseError> {
+        let adaptive = if self.shared.depth == super::ADAPTIVE_TRIE_DEPTH {
+            Some(self.shared.frontier(&self.tx, scope)?)
+        } else {
+            None
+        };
+        if adaptive.as_deref() == Some(&Frontier::Full) {
+            return self.find_native_trie(scope, query, inclusive, reverse);
+        }
         let (generation, physical_epoch, dirty) = self.shared.revision(scope)?;
         let trie_epoch = if dirty { 0 } else { physical_epoch };
         // Dirty-contract nodes are derived from storage, so trie persistence cannot change them.
@@ -406,37 +455,44 @@ impl<K: TransactionKind> Logical<K> {
         if self.upper.as_ref().is_none_or(|(s, g, t, _)| {
             *s != scope || *g != generation || (!dirty && *t != trie_epoch)
         }) {
-            let nodes =
-                if let Some(nodes) = self.shared.cached(scope, None, (generation, trie_epoch))? {
-                    nodes
-                } else if dirty {
-                    Arc::new(self.rebuild(scope, &Nibbles::default(), true)?)
-                } else {
-                    let mut nodes = BTreeMap::new();
-                    let start = TrieKey::from(Nibbles::default()).encode();
-                    let mut row = self
+            let nodes = if let Some(nodes) =
+                self.shared.cached(scope, None, (generation, trie_epoch))?
+            {
+                nodes
+            } else if dirty {
+                Arc::new(self.rebuild(scope, &Nibbles::default(), true)?)
+            } else {
+                let mut nodes = BTreeMap::new();
+                let start = TrieKey::from(Nibbles::default()).encode();
+                let mut row = self
+                    .physical
+                    .get_both_range::<Vec<u8>>(scope.as_slice(), start.as_ref())
+                    .map_err(|e| DatabaseError::Read(e.into()))?;
+                while let Some(bytes) = row {
+                    if bytes.len() < 33 {
+                        return Err(DatabaseError::Decode);
+                    }
+                    let entry = TrieEntry::from_compact(&bytes, bytes.len()).0;
+                    if adaptive.as_ref().map_or(entry.nibbles.0.len() < self.shared.depth, |f| {
+                        f.retains(&entry.nibbles.0)
+                    }) {
+                        nodes.insert(entry.nibbles.0, entry.node);
+                    }
+                    row = self
                         .physical
-                        .get_both_range::<Vec<u8>>(scope.as_slice(), start.as_ref())
-                        .map_err(|e| DatabaseError::Read(e.into()))?;
-                    while let Some(bytes) = row {
-                        if bytes.len() < 33 {
-                            return Err(DatabaseError::Decode);
-                        }
-                        let entry = TrieEntry::from_compact(&bytes, bytes.len()).0;
-                        if entry.nibbles.0.len() < self.shared.depth {
-                            nodes.insert(entry.nibbles.0, entry.node);
-                        }
-                        row = self
-                            .physical
-                            .next_dup::<Vec<u8>, Vec<u8>>()
-                            .map_err(|e| DatabaseError::Read(e.into()))?
-                            .map(|(_, v)| v);
-                    }
-                    if nodes.is_empty() {
-                        nodes = self.rebuild(scope, &Nibbles::default(), true)?;
-                    }
-                    Arc::new(nodes)
-                };
+                        .next_dup::<Vec<u8>, Vec<u8>>()
+                        .map_err(|e| DatabaseError::Read(e.into()))?
+                        .map(|(_, v)| v);
+                }
+                if nodes.is_empty() &&
+                    adaptive
+                        .as_ref()
+                        .is_none_or(|frontier| frontier.cuts().any(|cut| !cut.is_empty()))
+                {
+                    nodes = self.rebuild(scope, &Nibbles::default(), true)?;
+                }
+                Arc::new(nodes)
+            };
             self.shared.cache(scope, None, (generation, trie_epoch), Arc::clone(&nodes))?;
             self.upper = Some((scope, generation, trie_epoch, nodes));
         }
@@ -451,6 +507,10 @@ impl<K: TransactionKind> Logical<K> {
         }
         if reverse && query.is_empty() {
             return Ok(candidate);
+        }
+        if let Some(frontier) = adaptive {
+            return self
+                .find_adaptive_regions(scope, query, inclusive, reverse, candidate, &frontier);
         }
         let mut digits = query.iter().take(self.shared.depth).collect::<Vec<_>>();
         digits.resize(self.shared.depth, if reverse { 15 } else { 0 });
@@ -531,6 +591,125 @@ impl<K: TransactionKind> Logical<K> {
     }
 }
 
+impl<K: TransactionKind> Logical<K> {
+    fn find_adaptive_regions(
+        &mut self,
+        scope: B256,
+        query: &Nibbles,
+        inclusive: bool,
+        reverse: bool,
+        mut candidate: Option<(Nibbles, BranchNodeCompact)>,
+        frontier: &Frontier,
+    ) -> Result<Option<(Nibbles, BranchNodeCompact)>, DatabaseError> {
+        let cuts: Vec<_> =
+            if reverse { frontier.cuts().rev().collect() } else { frontier.cuts().collect() };
+        for prefix in cuts {
+            if if reverse {
+                prefix > *query
+            } else {
+                prefix < *query && !query.starts_with(&prefix)
+            } {
+                continue
+            }
+            if candidate.as_ref().is_some_and(|(path, _)| {
+                if reverse {
+                    prefix < *path && !path.starts_with(&prefix)
+                } else {
+                    prefix >= *path
+                }
+            }) {
+                break;
+            }
+            let generation = self.shared.region_generation(scope, prefix)?;
+            if self
+                .region
+                .as_ref()
+                .is_none_or(|(s, p, g, _)| *s != scope || *p != prefix || *g != generation)
+            {
+                let nodes = if let Some(nodes) =
+                    self.shared.cached(scope, Some(prefix), (generation, 0))?
+                {
+                    nodes
+                } else {
+                    let nodes = Arc::new(self.rebuild(scope, &prefix, false)?);
+                    self.shared.cache(scope, Some(prefix), (generation, 0), Arc::clone(&nodes))?;
+                    nodes
+                };
+                self.region = Some((scope, prefix, generation, nodes));
+            }
+            if let Some(hit) = seek_node(
+                &self.region.as_ref().ok_or(DatabaseError::Decode)?.3,
+                *query,
+                inclusive,
+                reverse,
+                true,
+            ) {
+                if candidate
+                    .as_ref()
+                    .is_none_or(|(p, _)| if reverse { hit.0 > *p } else { hit.0 < *p })
+                {
+                    candidate = Some(hit);
+                }
+                break;
+            }
+        }
+        Ok(candidate)
+    }
+
+    fn find_native_trie(
+        &mut self,
+        scope: B256,
+        query: &Nibbles,
+        inclusive: bool,
+        reverse: bool,
+    ) -> Result<Option<(Nibbles, BranchNodeCompact)>, DatabaseError> {
+        let encoded = TrieKey::from(*query).encode();
+        let mut row = self
+            .physical
+            .get_both_range::<Vec<u8>>(scope.as_slice(), encoded.as_ref())
+            .map_err(|e| DatabaseError::Read(e.into()))?;
+        if reverse {
+            if row.as_ref().is_some_and(|bytes| {
+                bytes.get(..33).is_some_and(|key| {
+                    key > encoded.as_ref() || !inclusive && key == encoded.as_ref()
+                })
+            }) {
+                row = self
+                    .physical
+                    .prev_dup::<Vec<u8>, Vec<u8>>()
+                    .map_err(|e| DatabaseError::Read(e.into()))?
+                    .map(|(_, bytes)| bytes);
+            } else if row.is_none() &&
+                self.physical
+                    .set::<Vec<u8>>(scope.as_slice())
+                    .map_err(|e| DatabaseError::Read(e.into()))?
+                    .is_some()
+            {
+                row = self
+                    .physical
+                    .last_dup::<Vec<u8>>()
+                    .map_err(|e| DatabaseError::Read(e.into()))?;
+            }
+        } else if !inclusive &&
+            row.as_ref().is_some_and(|bytes| bytes.get(..33) == Some(encoded.as_ref()))
+        {
+            row = self
+                .physical
+                .next_dup::<Vec<u8>, Vec<u8>>()
+                .map_err(|e| DatabaseError::Read(e.into()))?
+                .map(|(_, bytes)| bytes);
+        }
+        row.map(|bytes| {
+            if bytes.len() < 33 {
+                return Err(DatabaseError::Decode)
+            }
+            let entry = TrieEntry::from_compact(&bytes, bytes.len()).0;
+            Ok((entry.nibbles.0, entry.node))
+        })
+        .transpose()
+    }
+}
+
 fn seek_node(
     nodes: &TrieNodes,
     query: Nibbles,
@@ -587,7 +766,12 @@ impl Logical<RW> {
         }
         if self.trie {
             let entry = TrieEntry::from_compact(value, value.len()).0;
-            if entry.nibbles.0.len() < self.shared.depth {
+            let retain = if self.shared.depth == super::ADAPTIVE_TRIE_DEPTH {
+                self.shared.frontier(&self.tx, s)?.retains(&entry.nibbles.0)
+            } else {
+                entry.nibbles.0.len() < self.shared.depth
+            };
+            if retain {
                 let encoded = entry.nibbles.clone().encode();
                 if self
                     .physical
