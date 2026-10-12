@@ -166,8 +166,8 @@ const DEFAULT_AUTO_COMMIT_THRESHOLD: usize = 512 * 1024 * 1024;
 /// Smaller BALs stay inline. Larger payloads avoid regular LSM value compaction.
 const DEFAULT_BAL_MIN_BLOB_SIZE: u64 = 4 * 1024;
 
-/// Target BAL blob file size.
-const DEFAULT_BAL_BLOB_FILE_SIZE: u64 = 256 * 1024 * 1024;
+/// Smaller sealed files bound partially live payloads after BAL retention expires.
+const DEFAULT_BAL_BLOB_FILE_SIZE: u64 = 64 * 1024 * 1024;
 
 /// Builder for [`RocksDBProvider`].
 pub struct RocksDBBuilder {
@@ -292,6 +292,11 @@ impl RocksDBBuilder {
         cf_options.set_min_blob_size(DEFAULT_BAL_MIN_BLOB_SIZE);
         cf_options.set_blob_file_size(DEFAULT_BAL_BLOB_FILE_SIZE);
         cf_options.set_blob_compression_type(DBCompressionType::Lz4);
+        // Relocate live payloads from old garbage-heavy files during background compaction.
+        // Keep recent files untouched and preserve the protocol-level retention window.
+        cf_options.set_enable_blob_gc(true);
+        cf_options.set_blob_gc_age_cutoff(0.25);
+        cf_options.set_blob_gc_force_threshold(0.75);
         cf_options
     }
 

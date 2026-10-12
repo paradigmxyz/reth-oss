@@ -735,10 +735,10 @@ impl<TX: DbTx + DbTxMut + 'static, N: NodeTypesForProvider> DatabaseProvider<TX,
             // This reduces cursor open/close overhead from N calls to 1.
             if save_mode.with_state() && !state_trie_blocks.is_empty() {
                 let start = Instant::now();
-                let batch = ExecutedBlock::hashed_state_refs(state_trie_blocks);
-                let mask = ExecutedBlock::hashed_state_refs(state_trie_masking_blocks);
+                let hashed_batch = ExecutedBlock::hashed_state_refs(state_trie_blocks);
+                let hashed_mask = ExecutedBlock::hashed_state_refs(state_trie_masking_blocks);
                 let merged_hashed_state =
-                    HashedPostStateSorted::disjointed_merge_batch(&batch, &mask);
+                    HashedPostStateSorted::disjointed_merge_batch(&hashed_batch, &hashed_mask);
                 if !merged_hashed_state.is_empty() {
                     self.write_hashed_state(&merged_hashed_state)?;
                 }
@@ -747,8 +747,17 @@ impl<TX: DbTx + DbTxMut + 'static, N: NodeTypesForProvider> DatabaseProvider<TX,
                 let start = Instant::now();
                 let batch = ExecutedBlock::trie_updates_refs(state_trie_blocks);
                 let mask = ExecutedBlock::trie_updates_refs(state_trie_masking_blocks);
-                let merged_trie =
-                    Arc::new(TrieUpdatesSorted::disjointed_merge_batch(&batch, &mask));
+                let merged_trie = Arc::new(if self.tx.requires_storage_trie_root_summary() {
+                    TrieUpdatesSorted::disjointed_merge_batch_with_hashed_state(
+                        &batch,
+                        &mask,
+                        &hashed_batch,
+                        &hashed_mask,
+                        &merged_hashed_state,
+                    )
+                } else {
+                    TrieUpdatesSorted::disjointed_merge_batch(&batch, &mask)
+                });
                 if !merged_trie.is_empty() {
                     self.write_trie_updates_sorted(&merged_trie)?;
                 }
@@ -2852,6 +2861,13 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypesForProvider> StateWriter
         for (hashed_address, storage) in sorted_storages {
             for (hashed_slot, value) in storage.storage_slots_ref() {
                 let entry = StorageEntry { key: *hashed_slot, value: *value };
+                if hashed_storage_cursor.replace_by_subkey(
+                    *hashed_address,
+                    entry.key,
+                    (!entry.value.is_zero()).then_some(&entry),
+                )? {
+                    continue;
+                }
 
                 if let Some(db_entry) =
                     hashed_storage_cursor.seek_by_key_subkey(*hashed_address, entry.key)? &&
@@ -2947,6 +2963,13 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypesForProvider> StateWriter
                     let hashed_storage_key = keccak256(storage_key);
                     let storage_entry =
                         StorageEntry { key: hashed_storage_key, value: *old_storage_value };
+                    if hashed_storage_cursor.replace_by_subkey(
+                        hashed_address,
+                        hashed_storage_key,
+                        (!old_storage_value.is_zero()).then_some(&storage_entry),
+                    )? {
+                        continue;
+                    }
                     if hashed_storage_cursor
                         .seek_by_key_subkey(hashed_address, hashed_storage_key)?
                         .is_some_and(|s| s.key == hashed_storage_key)
@@ -3110,6 +3133,13 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypesForProvider> StateWriter
                     let hashed_storage_key = keccak256(storage_key);
                     let storage_entry =
                         StorageEntry { key: hashed_storage_key, value: *old_storage_value };
+                    if hashed_storage_cursor.replace_by_subkey(
+                        hashed_address,
+                        hashed_storage_key,
+                        (!old_storage_value.is_zero()).then_some(&storage_entry),
+                    )? {
+                        continue;
+                    }
                     if hashed_storage_cursor
                         .seek_by_key_subkey(hashed_address, hashed_storage_key)?
                         .is_some_and(|s| s.key == hashed_storage_key)
@@ -3262,6 +3292,7 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypes> DatabaseProvider<TX, N> {
                 DatabaseStorageTrieCursor::new(cursor, *hashed_address);
             *num_entries +=
                 db_storage_trie_cursor.write_storage_trie_updates_sorted(storage_trie_updates)?;
+            tx.finish_storage_trie_updates(*hashed_address)?;
             cursor = db_storage_trie_cursor.cursor;
         }
         Ok(())
@@ -3387,6 +3418,14 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypes> HashingWriter for DatabaseProvi
         let mut hashed_storage = self.tx.cursor_dup_write::<tables::HashedStorages>()?;
         for (hashed_address, key, value) in hashed_storages.into_iter().rev() {
             hashed_storage_keys.entry(hashed_address).or_default().insert(key);
+            let entry = StorageEntry { key, value };
+            if hashed_storage.replace_by_subkey(
+                hashed_address,
+                key,
+                (!value.is_zero()).then_some(&entry),
+            )? {
+                continue;
+            }
 
             if hashed_storage
                 .seek_by_key_subkey(hashed_address, key)?
@@ -3435,6 +3474,14 @@ impl<TX: DbTxMut + DbTx + 'static, N: NodeTypes> HashingWriter for DatabaseProvi
         // just remove it);
         hashed_storages.into_iter().try_for_each(|(hashed_address, storage)| {
             storage.into_iter().try_for_each(|(key, value)| -> ProviderResult<()> {
+                let entry = StorageEntry { key, value };
+                if hashed_storage_cursor.replace_by_subkey(
+                    hashed_address,
+                    key,
+                    (!value.is_zero()).then_some(&entry),
+                )? {
+                    return Ok(());
+                }
                 if hashed_storage_cursor
                     .seek_by_key_subkey(hashed_address, key)?
                     .is_some_and(|entry| entry.key == key)
@@ -4672,6 +4719,7 @@ mod tests {
                 ),
                 (Nibbles::from_nibbles([0x2, 0x0]), None), // Deletion of existing node
             ],
+            ..Default::default()
         };
 
         let storage_trie2 = StorageTrieUpdatesSorted {
@@ -4679,6 +4727,7 @@ mod tests {
                 (Nibbles::from_nibbles([0xa, 0xb]), None),
                 (Nibbles::from_nibbles([0xc, 0xd]), None),
             ],
+            ..Default::default()
         };
 
         let mut storage_tries = B256Map::default();
@@ -4769,6 +4818,8 @@ mod tests {
         let blocks: Vec<_> = test_block_builder.get_executed_blocks(1..3).collect();
 
         let provider_rw = factory.provider_rw().unwrap();
+        // Native persistence takes the original trie-only merge without summary proof work.
+        assert!(!provider_rw.tx_ref().requires_storage_trie_root_summary());
         save_genesis(&provider_rw, &genesis).unwrap();
         provider_rw.commit().unwrap();
 
@@ -4808,12 +4859,14 @@ mod tests {
                     kept_storage,
                     StorageTrieUpdatesSorted {
                         storage_nodes: vec![(kept_storage_node, Some(branch(0b1010)))],
+                        ..Default::default()
                     },
                 ),
                 (
                     masked_storage,
                     StorageTrieUpdatesSorted {
                         storage_nodes: vec![(masked_storage_node, Some(branch(0b0101)))],
+                        ..Default::default()
                     },
                 ),
             ]),
@@ -4841,6 +4894,7 @@ mod tests {
                 masked_storage,
                 StorageTrieUpdatesSorted {
                     storage_nodes: vec![(masked_storage_node, Some(branch(0b1100)))],
+                    ..Default::default()
                 },
             )]),
         );

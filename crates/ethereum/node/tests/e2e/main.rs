@@ -6,6 +6,7 @@ mod dev;
 mod eip6780;
 mod eth;
 mod exex;
+mod experimental_packing;
 mod finality;
 mod forkchoice;
 mod invalid_payload;

@@ -67,7 +67,10 @@ where
         if !storage_changesets.is_empty() {
             storage_tries.insert(
                 *hashed_address,
-                StorageTrieUpdatesSorted { storage_nodes: storage_changesets },
+                StorageTrieUpdatesSorted {
+                    storage_nodes: storage_changesets,
+                    ..Default::default()
+                },
             );
         }
     }
@@ -229,6 +232,7 @@ mod tests {
             hashed_address,
             StorageTrieUpdatesSorted {
                 storage_nodes: vec![(path1, Some(new_node1)), (path3, Some(new_node3))],
+                ..Default::default()
             },
         );
 

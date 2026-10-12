@@ -9,10 +9,14 @@
 
 #[cfg(test)]
 mod tests {
-    use alloy_primitives::{Address, U256};
-    use reth_db::{models::AccountBeforeTx, test_utils::create_test_static_files_dir};
-    use reth_primitives_traits::Account;
+    use alloy_primitives::{Address, B256, U256};
+    use reth_db::{
+        models::{AccountBeforeTx, StorageBeforeTx},
+        test_utils::create_test_static_files_dir,
+    };
+    use reth_primitives_traits::{Account, StorageEntry};
     use reth_static_file_types::{ChangesetOffset, ChangesetOffsetReader, StaticFileSegment};
+    use reth_storage_api::StorageChangeSetReader;
     use std::{fs::OpenOptions, io::Write as _, path::PathBuf};
 
     use crate::{
@@ -1154,5 +1158,90 @@ mod tests {
         assert_eq!(get_nippy_row_count(&provider, 10), 2);
         assert_eq!(provider.account_block_changeset(11).unwrap(), generate_test_changeset(11, 2));
         assert!(provider.account_block_changeset(12).unwrap().is_empty());
+    }
+
+    #[test]
+    fn storage_compression_keeps_point_reads_rotation_reopen_and_unwind() {
+        for streamed in [false, true] {
+            let (static_dir, _) = create_test_static_files_dir();
+            let provider = setup_test_provider(&static_dir, 2);
+            let segment = StaticFileSegment::StorageChangeSets;
+            let address =
+                Address::from(std::array::from_fn(|i| (i as u8).wrapping_mul(13).wrapping_add(7)));
+            let initial: Vec<_> = (0..16)
+                .map(|i| StorageBeforeTx {
+                    address,
+                    key: B256::from(U256::from(i).to_be_bytes::<32>()),
+                    value: U256::from(i),
+                })
+                .collect();
+            {
+                let mut writer = provider.latest_writer(segment).unwrap();
+                if streamed {
+                    writer.begin_storage_changeset(0).unwrap();
+                    for change in &initial {
+                        writer.append_storage_changeset_entry(*change).unwrap();
+                    }
+                } else {
+                    writer.append_storage_changeset(initial.clone(), 0).unwrap();
+                }
+                writer.commit().unwrap();
+            }
+            let path =
+                static_dir.path().join(segment.filename(&provider.find_fixed_range(segment, 0)));
+            assert!(reth_nippy_jar::NippyJar::<reth_static_file_types::SegmentHeader>::load(&path)
+                .unwrap()
+                .compressor()
+                .is_some());
+            drop(provider);
+
+            let provider = setup_test_provider(&static_dir, 2);
+            let entropy = StorageBeforeTx {
+                address,
+                key: B256::from(std::array::from_fn(|i| {
+                    (i as u8).wrapping_mul(31).wrapping_add(11)
+                })),
+                value: U256::from_be_bytes(std::array::from_fn::<_, 32, _>(|i| {
+                    (i as u8).wrapping_mul(47).wrapping_add(23)
+                })),
+            };
+            {
+                let mut writer = provider.latest_writer(segment).unwrap();
+                writer.append_storage_changeset(vec![entropy], 1).unwrap();
+                writer.append_storage_changeset(vec![entropy], 2).unwrap();
+                writer.commit().unwrap();
+            }
+            for change in &initial {
+                assert_eq!(
+                    provider.get_storage_before_block(0, change.address, change.key).unwrap(),
+                    Some(StorageEntry::new(change.key, change.value))
+                );
+            }
+            for block in [1, 2] {
+                assert_eq!(
+                    provider.get_storage_before_block(block, entropy.address, entropy.key).unwrap(),
+                    Some(StorageEntry::new(entropy.key, entropy.value))
+                );
+            }
+            let rotated =
+                static_dir.path().join(segment.filename(&provider.find_fixed_range(segment, 2)));
+            assert!(reth_nippy_jar::NippyJar::<reth_static_file_types::SegmentHeader>::load(
+                &rotated
+            )
+            .unwrap()
+            .compressor()
+            .is_none());
+            drop(provider);
+
+            let provider = setup_test_provider(&static_dir, 2);
+            {
+                let mut writer = provider.latest_writer(segment).unwrap();
+                writer.prune_storage_changesets(0).unwrap();
+                writer.commit().unwrap();
+            }
+            assert_eq!(provider.storage_changeset(0).unwrap().len(), initial.len());
+            assert!(provider.storage_changeset(1).unwrap().is_empty());
+            assert!(provider.storage_changeset(2).unwrap().is_empty());
+        }
     }
 }

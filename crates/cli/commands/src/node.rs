@@ -159,6 +159,7 @@ where
         L: Launcher<C, Ext>,
     {
         tracing::info!(target: "reth::cli", version = ?version::version_metadata().short_version, "Starting {}",  version::version_metadata().name_client);
+        self.validate_database()?;
 
         let Self {
             datadir,
@@ -223,6 +224,14 @@ where
             .with_launch_context(ctx.task_executor);
 
         launcher.entrypoint(builder, ext).await
+    }
+
+    fn validate_database(&self) -> eyre::Result<()> {
+        eyre::ensure!(
+            self.db.experimental_state_packing.is_none() || self.storage.v2,
+            "--db.experimental-state-packing requires storage V2; use a fresh dedicated data directory"
+        );
+        Ok(())
     }
 }
 
@@ -458,5 +467,34 @@ mod tests {
 
         // make sure the ipc path is not the default
         assert_ne!(cmd.rpc.ipcpath, String::from("/tmp/reth.ipc"));
+    }
+
+    #[test]
+    fn experimental_packing_accepts_all_retention_modes_with_storage_v2() {
+        for mode in ["dense", "integer32"] {
+            for retention in [None, Some("--full"), Some("--minimal")] {
+                for storage_v2 in ["--storage.v2=true", "--storage.v2=false"] {
+                    let mut args =
+                        vec!["reth", "--db.experimental-state-packing", mode, storage_v2];
+                    if let Some(retention) = retention {
+                        args.push(retention);
+                    }
+                    let cmd: NodeCommand<EthereumChainSpecParser> =
+                        NodeCommand::try_parse_args_from(args).unwrap();
+                    let result = cmd.validate_database();
+                    if cmd.storage.v2 {
+                        result.unwrap();
+                    } else {
+                        assert_eq!(
+                            result.unwrap_err().to_string(),
+                            "--db.experimental-state-packing requires storage V2; use a fresh dedicated data directory"
+                        );
+                    }
+                }
+            }
+        }
+        let native: NodeCommand<EthereumChainSpecParser> =
+            NodeCommand::try_parse_args_from(["reth", "--storage.v2=false"]).unwrap();
+        native.validate_database().unwrap();
     }
 }

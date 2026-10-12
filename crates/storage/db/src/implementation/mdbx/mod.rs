@@ -26,7 +26,7 @@ use rustc_hash::FxHashMap;
 use std::{
     ops::{Deref, Range},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
 use tx::Tx;
@@ -35,6 +35,10 @@ pub mod cursor;
 pub mod tx;
 
 mod utils;
+
+pub mod native_cursor;
+pub mod packing;
+mod routing_cursor;
 
 /// 1 KB in bytes
 pub const KILOBYTE: usize = 1024;
@@ -119,6 +123,8 @@ pub struct DatabaseArguments {
     /// environments). Choose `SafeNoSync` if performance is more important and occasional data
     /// loss is acceptable (e.g., testing or ephemeral data).
     sync_mode: SyncMode,
+    experimental_packing: Option<packing::PackingMode>,
+    experimental_trie_depth: usize,
 }
 
 impl Default for DatabaseArguments {
@@ -143,6 +149,8 @@ impl DatabaseArguments {
             exclusive: None,
             max_readers: None,
             sync_mode: SyncMode::Durable,
+            experimental_packing: None,
+            experimental_trie_depth: 3,
         }
     }
 
@@ -237,6 +245,44 @@ impl DatabaseArguments {
     pub const fn client_version(&self) -> &ClientVersion {
         &self.client_version
     }
+
+    /// Selects an experimental layout for a fresh, dedicated database directory.
+    pub const fn with_experimental_packing(
+        mut self,
+        mode: Option<packing::PackingMode>,
+        depth: usize,
+    ) -> Self {
+        self.experimental_packing = mode;
+        self.experimental_trie_depth = depth;
+        self
+    }
+
+    /// Returns the explicitly requested experimental layout.
+    pub const fn experimental_packing(&self) -> Option<packing::PackingMode> {
+        self.experimental_packing
+    }
+
+    /// Returns the retained trie depth for the experimental layout.
+    pub const fn experimental_trie_depth(&self) -> usize {
+        self.experimental_trie_depth
+    }
+
+    /// Retain native storage trie records while packing only storage values.
+    /// The persisted marker prevents reopening a reconstructed layout with this option.
+    pub const fn with_experimental_full_trie(mut self, retain: bool) -> Self {
+        if retain {
+            self.experimental_trie_depth = packing::FULL_TRIE_DEPTH;
+        }
+        self
+    }
+
+    /// Select the separately versioned adaptive reconstruction policy.
+    pub const fn with_experimental_adaptive_trie(mut self, retain: bool) -> Self {
+        if retain {
+            self.experimental_trie_depth = packing::ADAPTIVE_TRIE_DEPTH;
+        }
+        self
+    }
 }
 
 /// Wrapper for the libmdbx environment: [Environment]
@@ -256,6 +302,11 @@ pub struct DatabaseEnv {
     metrics: Option<Arc<DatabaseEnvMetrics>>,
     /// Write lock for when dealing with a read-write environment.
     _lock_file: Option<StorageLock>,
+    experimental_packing: Option<packing::PackingMode>,
+    experimental_trie_depth: usize,
+    /// Immutable reconstructed trie records shared only by readers of this opened environment.
+    /// A new environment gets a new cache, even if its path or transaction IDs match an old one.
+    reconstructed_trie_cache: Arc<Mutex<packing::SnapshotTrieCache>>,
 }
 
 impl Database for DatabaseEnv {
@@ -263,21 +314,49 @@ impl Database for DatabaseEnv {
     type TXMut = tx::Tx<RW>;
 
     fn tx(&self) -> Result<Self::TX, DatabaseError> {
-        Tx::new(
-            self.inner.begin_ro_txn().map_err(|e| DatabaseError::InitTx(e.into()))?,
-            self.dbis.clone(),
-            self.metrics.clone(),
-        )
-        .map_err(|e| DatabaseError::InitTx(e.into()))
+        let inner = self.inner.begin_ro_txn().map_err(|e| DatabaseError::InitTx(e.into()))?;
+        let shared = self
+            .experimental_packing
+            .map(|mode| {
+                let dbi = inner
+                    .open_db(Some(packing::TABLE))
+                    .map_err(|e| DatabaseError::Open(e.into()))?
+                    .dbi();
+                let snapshot = inner.id().map_err(|e| DatabaseError::InitTx(e.into()))?;
+                Ok::<_, DatabaseError>(Arc::new(
+                    packing::Shared::new(mode, self.experimental_trie_depth, dbi, None)
+                        .with_snapshot_cache(snapshot, Arc::clone(&self.reconstructed_trie_cache)),
+                ))
+            })
+            .transpose()?;
+        Tx::new(inner, self.dbis.clone(), self.metrics.clone(), shared)
+            .map_err(|e| DatabaseError::InitTx(e.into()))
     }
 
     fn tx_mut(&self) -> Result<Self::TXMut, DatabaseError> {
-        Tx::new(
-            self.inner.begin_rw_txn().map_err(|e| DatabaseError::InitTx(e.into()))?,
-            self.dbis.clone(),
-            self.metrics.clone(),
-        )
-        .map_err(|e| DatabaseError::InitTx(e.into()))
+        let inner = self.inner.begin_rw_txn().map_err(|e| DatabaseError::InitTx(e.into()))?;
+        let shared = self
+            .experimental_packing
+            .map(|mode| {
+                let dbi = inner
+                    .open_db(Some(packing::TABLE))
+                    .map_err(|e| DatabaseError::Open(e.into()))?
+                    .dbi();
+                Ok::<_, DatabaseError>(Arc::new(
+                    packing::Shared::new(
+                        mode,
+                        self.experimental_trie_depth,
+                        dbi,
+                        Some(inner.clone()),
+                    )
+                    .with_metrics(self.metrics.as_ref().map(|metrics| {
+                        metrics.packing_flush_metrics(mode, self.experimental_trie_depth)
+                    })),
+                ))
+            })
+            .transpose()?;
+        Tx::new(inner, self.dbis.clone(), self.metrics.clone(), shared)
+            .map_err(|e| DatabaseError::InitTx(e.into()))
     }
 
     fn path(&self) -> PathBuf {
@@ -317,7 +396,7 @@ impl DatabaseMetrics for DatabaseEnv {
 
         let _ = self
             .view(|tx| {
-                for table in Tables::ALL.iter().map(Tables::name) {
+                for table in self.physical_table_names() {
                     let table_db =
                         tx.inner().open_db(Some(table)).wrap_err("Could not open db.")?;
 
@@ -386,6 +465,31 @@ impl DatabaseMetrics for DatabaseEnv {
 }
 
 impl DatabaseEnv {
+    /// Experimental layout selected when this database was opened.
+    pub const fn experimental_packing(&self) -> Option<packing::PackingMode> {
+        self.experimental_packing
+    }
+
+    /// Persisted reconstruction cutoff for the experimental layout.
+    pub const fn experimental_trie_depth(&self) -> usize {
+        self.experimental_trie_depth
+    }
+
+    /// Physical tables in this database, including opt-in packed state metadata.
+    ///
+    /// Physical entries count blobs or frontier records, not logical storage slots.
+    pub fn physical_table_names(&self) -> impl Iterator<Item = &'static str> + '_ {
+        Tables::ALL
+            .iter()
+            .map(Tables::name)
+            .chain(self.experimental_packing.map(|_| packing::TABLE))
+            .chain(
+                (self.experimental_packing.is_some() &&
+                    self.experimental_trie_depth == packing::ADAPTIVE_TRIE_DEPTH)
+                    .then_some(packing::FRONTIER_TABLE),
+            )
+    }
+
     /// Opens the database at the specified path with the given `EnvKind`.
     ///
     /// It does not create the tables, for that call [`DatabaseEnv::create_tables`].
@@ -394,6 +498,7 @@ impl DatabaseEnv {
         kind: DatabaseEnvKind,
         args: DatabaseArguments,
     ) -> Result<Self, DatabaseError> {
+        packing::check_directory(path, args.experimental_packing, args.experimental_trie_depth)?;
         let _lock_file = if kind.is_rw() {
             StorageLock::try_acquire(path)
                 .map_err(|err| DatabaseError::Other(err.to_string()))?
@@ -524,7 +629,7 @@ impl DatabaseEnv {
                     LogLevel::Extra => 7,
                 });
             } else {
-                return Err(DatabaseError::LogLevelUnavailable(log_level))
+                return Err(DatabaseError::LogLevelUnavailable(log_level));
             }
         }
 
@@ -538,6 +643,9 @@ impl DatabaseEnv {
             dbis: Arc::default(),
             metrics: None,
             _lock_file,
+            experimental_packing: args.experimental_packing,
+            experimental_trie_depth: args.experimental_trie_depth,
+            reconstructed_trie_cache: Arc::default(),
         };
 
         Ok(env)
@@ -574,6 +682,21 @@ impl DatabaseEnv {
         // before it can be shared.
         let dbis = Arc::make_mut(&mut self.dbis);
         dbis.extend(handles);
+
+        if self.experimental_packing.is_some() {
+            let tx = self.inner.begin_rw_txn().map_err(|e| DatabaseError::InitTx(e.into()))?;
+            let table = tx
+                .create_db(Some(packing::TABLE), DatabaseFlags::default())
+                .map_err(|e| DatabaseError::CreateTable(e.into()))?;
+            dbis.insert(packing::TABLE, table.dbi());
+            if self.experimental_trie_depth == packing::ADAPTIVE_TRIE_DEPTH {
+                let table = tx
+                    .create_db(Some(packing::FRONTIER_TABLE), DatabaseFlags::default())
+                    .map_err(|e| DatabaseError::CreateTable(e.into()))?;
+                dbis.insert(packing::FRONTIER_TABLE, table.dbi());
+            }
+            tx.commit().map_err(|e| DatabaseError::Commit(e.into()))?;
+        }
 
         Ok(())
     }
@@ -647,7 +770,7 @@ impl DatabaseEnv {
     /// Records version that accesses the database with write privileges.
     pub fn record_client_version(&self, version: ClientVersion) -> Result<(), DatabaseError> {
         if version.is_empty() {
-            return Ok(())
+            return Ok(());
         }
 
         let tx = self.tx_mut()?;
@@ -680,13 +803,15 @@ mod tests {
     use super::*;
     use crate::{
         tables::{
-            AccountsHistory, CanonicalHeaders, Headers, PlainAccountState, PlainStorageState,
+            AccountsHistory, CanonicalHeaders, HashedStorages, Headers, PackedStoragesTrie,
+            PlainAccountState, PlainStorageState,
         },
         test_utils::*,
         AccountChangeSets,
     };
     use alloy_consensus::Header;
-    use alloy_primitives::{address, Address, B256, U256};
+    use alloy_primitives::{address, keccak256, Address, B256, U256};
+    use alloy_trie::{BranchNodeCompact, Nibbles};
     use reth_db_api::{
         cursor::{DbDupCursorRO, DbDupCursorRW, ReverseWalker, Walker},
         models::{AccountBeforeTx, IntegerList, ShardedKey},
@@ -695,6 +820,7 @@ mod tests {
     use reth_libmdbx::Error;
     use reth_primitives_traits::{Account, StorageEntry};
     use reth_storage_errors::db::{DatabaseWriteError, DatabaseWriteOperation};
+    use std::collections::BTreeMap;
     use tempfile::TempDir;
 
     /// Create database for testing. Returns the `TempDir` to prevent cleanup until test ends.
@@ -1655,5 +1781,120 @@ mod tests {
             let list400 = IntegerList::new_pre_sorted([400u64]);
             assert_eq!(list400, list);
         }
+    }
+
+    #[test]
+    fn packed_readers_share_only_their_exact_mdbx_snapshot() {
+        for mode in [packing::PackingMode::Dense, packing::PackingMode::Integer32] {
+            for depth in [3, packing::ADAPTIVE_TRIE_DEPTH] {
+                let dir = tempfile::tempdir().unwrap();
+                let db = crate::init_db(
+                    dir.path(),
+                    DatabaseArguments::test().with_experimental_packing(Some(mode), depth),
+                )
+                .unwrap();
+                let scope = B256::repeat_byte(7);
+                let tx = db.tx_mut().unwrap();
+                for index in 0..500u64 {
+                    tx.put::<HashedStorages>(
+                        scope,
+                        StorageEntry::new(keccak256(index.to_be_bytes()), U256::from(index + 1)),
+                    )
+                    .unwrap();
+                }
+                tx.commit().unwrap();
+
+                let old = db.tx().unwrap();
+                let expected = read_packed_storage_nodes(&old, scope);
+                let old_nodes =
+                    old.packing.as_ref().unwrap().cached(scope, None, (0, 0)).unwrap().unwrap();
+                let clone = db.clone();
+                let same = clone.tx().unwrap();
+                assert_eq!(same.id().unwrap(), old.id().unwrap());
+                let same_nodes =
+                    same.packing.as_ref().unwrap().cached(scope, None, (0, 0)).unwrap().unwrap();
+                assert!(Arc::ptr_eq(&old_nodes, &same_nodes));
+                assert_eq!(read_packed_storage_nodes(&same, scope), expected);
+
+                let writer = db.tx_mut().unwrap();
+                assert!(writer
+                    .packing
+                    .as_ref()
+                    .unwrap()
+                    .cached(scope, None, (0, 0))
+                    .unwrap()
+                    .is_none());
+                writer
+                    .put::<HashedStorages>(
+                        scope,
+                        StorageEntry::new(keccak256(0u64.to_be_bytes()), U256::MAX),
+                    )
+                    .unwrap();
+                let changed: BTreeMap<_, _> = writer
+                    .cursor_dup_read::<PackedStoragesTrie>()
+                    .unwrap()
+                    .walk_dup(Some(scope), None)
+                    .unwrap()
+                    .map(|row| {
+                        let (_, row) = row.unwrap();
+                        (row.nibbles.0, row.node)
+                    })
+                    .collect();
+                assert_ne!(changed, expected);
+                writer.commit().unwrap();
+
+                let new = db.tx().unwrap();
+                assert_ne!(new.id().unwrap(), old.id().unwrap());
+                assert!(new
+                    .packing
+                    .as_ref()
+                    .unwrap()
+                    .cached(scope, None, (0, 0))
+                    .unwrap()
+                    .is_none());
+                assert_eq!(read_packed_storage_nodes(&new, scope), changed);
+                let new_nodes =
+                    new.packing.as_ref().unwrap().cached(scope, None, (0, 0)).unwrap().unwrap();
+                assert!(!Arc::ptr_eq(&old_nodes, &new_nodes));
+                assert_eq!(read_packed_storage_nodes(&old, scope), expected);
+                assert!(Arc::ptr_eq(
+                    &old_nodes,
+                    &old.packing.as_ref().unwrap().cached(scope, None, (0, 0)).unwrap().unwrap(),
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn reopening_environment_does_not_reuse_snapshot_cache_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let args = DatabaseArguments::test()
+            .with_experimental_packing(Some(packing::PackingMode::Dense), 3);
+        let db = crate::init_db(dir.path(), args.clone()).unwrap();
+        let scope = B256::repeat_byte(7);
+        let reader = db.tx().unwrap();
+        let id = reader.id().unwrap();
+        let nodes = Arc::new(BTreeMap::default());
+        reader.packing.as_ref().unwrap().cache(scope, None, (0, 0), Arc::clone(&nodes)).unwrap();
+        let original_cache = Arc::clone(&db.reconstructed_trie_cache);
+        drop(reader);
+        drop(db);
+        let reopened = DatabaseEnv::open(dir.path(), DatabaseEnvKind::RO, args).unwrap();
+        assert!(!Arc::ptr_eq(&original_cache, &reopened.reconstructed_trie_cache));
+        let reader = reopened.tx().unwrap();
+        assert_eq!(reader.id().unwrap(), id);
+        assert!(reader.packing.as_ref().unwrap().cached(scope, None, (0, 0)).unwrap().is_none());
+    }
+
+    fn read_packed_storage_nodes(tx: &Tx<RO>, scope: B256) -> BTreeMap<Nibbles, BranchNodeCompact> {
+        tx.cursor_dup_read::<PackedStoragesTrie>()
+            .unwrap()
+            .walk_dup(Some(scope), None)
+            .unwrap()
+            .map(|row| {
+                let (_, row) = row.unwrap();
+                (row.nibbles.0, row.node)
+            })
+            .collect()
     }
 }

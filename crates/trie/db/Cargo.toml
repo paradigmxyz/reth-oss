@@ -48,6 +48,7 @@ triehash.workspace = true
 proptest.workspace = true
 proptest-arbitrary-interop.workspace = true
 serde_json.workspace = true
+tempfile.workspace = true
 similar-asserts.workspace = true
 
 [features]

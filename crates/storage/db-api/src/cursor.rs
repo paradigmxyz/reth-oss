@@ -134,6 +134,20 @@ pub trait DbDupCursorRW<T: DupSort> {
     ///
     /// This is efficient for pre-sorted data. If the data is not pre-sorted, use `insert`.
     fn append_dup(&mut self, key: T::Key, value: T::Value) -> Result<(), DatabaseError>;
+
+    /// Applies a logical duplicate-key replacement without positioning a read cursor.
+    /// Returns `false` when the backend requires the caller's ordinary seek/delete/upsert path.
+    /// A handled replacement must remove the exact old subkey, including for a deletion.
+    /// The cursor position is unspecified after a handled replacement; seek before reading
+    /// or moving the cursor again.
+    fn replace_by_subkey(
+        &mut self,
+        _key: T::Key,
+        _subkey: T::SubKey,
+        _value: Option<&T::Value>,
+    ) -> Result<bool, DatabaseError> {
+        Ok(false)
+    }
 }
 
 /// Provides an iterator to `Cursor` when handling `Table`.

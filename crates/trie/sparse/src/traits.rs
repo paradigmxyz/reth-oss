@@ -141,6 +141,18 @@ pub trait SparseTrie: Sized + Debug + Send + Sync {
     /// Returns the root's modification epoch when it is clean, or `None` when it is dirty.
     fn root_epoch(&self) -> Option<TrieNodeEpoch>;
 
+    /// Returns a canonical empty-path branch summary only after hashing the current root.
+    /// Missing, dirty or extension roots return `None`, requiring a backend repair fallback.
+    fn root_branch_summary(&self) -> Option<BranchNodeCompact> {
+        None
+    }
+
+    /// Takes a newly hashed root summary once, including changes with no non-root deltas.
+    /// Repeated drains without another root modification return `None`.
+    fn take_root_branch_summary(&mut self) -> Option<BranchNodeCompact> {
+        None
+    }
+
     /// Recalculates and updates the RLP hashes of subtries deeper than a certain level. The level
     /// is defined in the implementation.
     ///

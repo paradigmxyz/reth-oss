@@ -1138,6 +1138,16 @@ impl<N: NodePrimitives> StaticFileProviderRW<N> {
         self.buf.clear();
         column.to_compact(&mut self.buf);
 
+        if self.writer.user_header().segment() == StaticFileSegment::StorageChangeSets &&
+            self.writer.rows() == 0
+        {
+            // Streaming writers have one row available. Batch writers make the same immutable
+            // choice from their first bounded batch before reaching this fallback.
+            self.writer
+                .select_lz4_for_sample(std::iter::once(&self.buf))
+                .map_err(ProviderError::other)?;
+        }
+
         self.writer.append_column(Some(Ok(&self.buf))).map_err(ProviderError::other)?;
         Ok(())
     }
@@ -1485,6 +1495,21 @@ impl<N: NodePrimitives> StaticFileProviderRW<N> {
 
         // sort by address + storage key
         changeset.sort_by_key(|change| (change.address, change.key));
+
+        if self.writer.rows() == 0 && !changeset.is_empty() {
+            // Raw storage keys retain structural zero prefixes, unlike hashed state keys.
+            // Only enable per-row LZ4 when the first block supplies actual byte savings.
+            let samples: Vec<_> = changeset
+                .iter()
+                .take(32)
+                .map(|change| {
+                    let mut encoded = Vec::with_capacity(84);
+                    change.to_compact(&mut encoded);
+                    encoded
+                })
+                .collect();
+            self.writer.select_lz4_for_sample(samples).map_err(ProviderError::other)?;
+        }
 
         let mut count: u64 = 0;
         for change in changeset {

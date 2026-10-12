@@ -666,7 +666,14 @@ fn launch_node<N: NodeBuilderHelper>(
     mines: bool,
 ) -> BoxFuture<'static, eyre::Result<NodeHelperType<N>>> {
     Box::pin(async move {
-        let database = open_test_database(&args.datadir)?;
+        let configured = args.node_config.db.database_args();
+        let database = open_test_database_with_args(
+            &args.datadir,
+            DatabaseArguments::test().with_experimental_packing(
+                configured.experimental_packing(),
+                configured.experimental_trie_depth(),
+            ),
+        )?;
         let relaunch_args = restartable.then(|| args.clone());
         let mut node = launch(args, database.clone()).await?;
         if let Some(args) = relaunch_args {
@@ -731,8 +738,12 @@ async fn restate_forkchoice<N: NodeBuilderHelper>(node: &NodeHelperType<N>) -> e
 ///
 /// [`create_test_rw_db_with_datadir`]: reth_db::test_utils::create_test_rw_db_with_datadir
 pub(crate) fn open_test_database(datadir: &Path) -> eyre::Result<TmpDB> {
+    open_test_database_with_args(datadir, DatabaseArguments::test())
+}
+
+fn open_test_database_with_args(datadir: &Path, args: DatabaseArguments) -> eyre::Result<TmpDB> {
     let path = datadir.join("db");
-    let database = init_db(&path, DatabaseArguments::test())
+    let database = init_db(&path, args)
         .wrap_err_with(|| format!("failed to open the database at {}", path.display()))?;
     Ok(Arc::new(TempDatabase::new(database, datadir.to_path_buf())))
 }

@@ -284,6 +284,16 @@ where
         {
             num_entries += 1;
             let nibbles = A::StorageSubKey::from(*nibbles);
+            let value = maybe_updated
+                .as_ref()
+                .map(|node| A::StorageValue::new(nibbles.clone(), node.clone()));
+            if self.cursor.replace_by_subkey(
+                self.hashed_address,
+                nibbles.clone(),
+                value.as_ref(),
+            )? {
+                continue;
+            }
             // Delete the old entry if it exists.
             if self
                 .cursor
@@ -295,12 +305,18 @@ where
             }
 
             // There is an updated version of this node, insert new entry.
-            if let Some(node) = maybe_updated {
-                self.cursor
-                    .upsert(self.hashed_address, &A::StorageValue::new(nibbles, node.clone()))?;
+            if let Some(value) = value {
+                self.cursor.upsert(self.hashed_address, &value)?;
             }
         }
 
+        if let Some(summary) = &updates.root_summary {
+            let root = A::StorageSubKey::from(Nibbles::default());
+            let value = A::StorageValue::new(root.clone(), summary.clone());
+            // Native tables deliberately omit empty-path roots. Experimental backends
+            // accept the canonical summary through the direct physical-write hook only.
+            self.cursor.replace_by_subkey(self.hashed_address, root, Some(&value))?;
+        }
         Ok(num_entries)
     }
 }

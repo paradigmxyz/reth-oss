@@ -1,3 +1,5 @@
+#[cfg(feature = "mdbx")]
+use crate::implementation::mdbx::packing::{PackingMode, ADAPTIVE_TRIE_DEPTH, FULL_TRIE_DEPTH};
 use crate::Tables;
 use metrics::Histogram;
 use reth_metrics::{metrics::Counter, Metrics};
@@ -24,6 +26,9 @@ pub(crate) struct DatabaseEnvMetrics {
     /// outcome. Can only be updated at tx close, as outcome is only known at that point.
     transaction_outcomes:
         FxHashMap<(TransactionMode, TransactionOutcome), TransactionOutcomeMetrics>,
+    /// Pre-bound handles for each packed storage and trie retention layout.
+    #[cfg(feature = "mdbx")]
+    packing_flush: FxHashMap<(&'static str, &'static str), PackingFlushMetrics>,
 }
 
 /// Per-table operation metric handles cached for hot cursor paths.
@@ -37,6 +42,8 @@ impl DatabaseEnvMetrics {
             operations: Self::generate_operation_handles(),
             transactions: Self::generate_transaction_handles(),
             transaction_outcomes: Self::generate_transaction_outcome_handles(),
+            #[cfg(feature = "mdbx")]
+            packing_flush: Self::generate_packing_flush_handles(),
         }
     }
 
@@ -119,6 +126,47 @@ impl DatabaseEnvMetrics {
         self.operations.get(table).expect("table operation metric handles not found").clone()
     }
 
+    #[cfg(feature = "mdbx")]
+    fn generate_packing_flush_handles(
+    ) -> FxHashMap<(&'static str, &'static str), PackingFlushMetrics> {
+        ["dense", "integer32"]
+            .into_iter()
+            .flat_map(|mode| {
+                ["cutoff", "full", "adaptive"].into_iter().map(move |retention| {
+                    (
+                        (mode, retention),
+                        PackingFlushMetrics::new_with_labels(&[
+                            ("packing_mode", mode),
+                            ("retention", retention),
+                        ]),
+                    )
+                })
+            })
+            .collect()
+    }
+
+    /// Returns cached flush handles without registering metrics in the transaction path.
+    #[cfg(feature = "mdbx")]
+    pub(crate) fn packing_flush_metrics(
+        &self,
+        mode: PackingMode,
+        depth: usize,
+    ) -> PackingFlushMetrics {
+        let mode = match mode {
+            PackingMode::Dense => "dense",
+            PackingMode::Integer32 => "integer32",
+        };
+        let retention = match depth {
+            FULL_TRIE_DEPTH => "full",
+            ADAPTIVE_TRIE_DEPTH => "adaptive",
+            _ => "cutoff",
+        };
+        self.packing_flush
+            .get(&(mode, retention))
+            .expect("packing metric handles not found")
+            .clone()
+    }
+
     /// Record metrics for opening a database transaction.
     pub(crate) fn record_opened_transaction(&self, mode: TransactionMode) {
         self.transactions
@@ -146,6 +194,61 @@ impl DatabaseEnvMetrics {
             .get(&(mode, outcome))
             .expect("transaction outcome metric handle not found")
             .record(open_duration, close_duration, commit_latency);
+    }
+}
+
+/// Physical packed work completed by one database transaction.
+#[cfg(feature = "mdbx")]
+#[derive(Debug)]
+pub(crate) struct PackingFlushStats {
+    pub(crate) total_duration: Duration,
+    pub(crate) encoding_duration: Duration,
+    pub(crate) persistence_duration: Duration,
+    pub(crate) reconstruction_duration: Duration,
+    pub(crate) blobs: u64,
+    pub(crate) encoded_bytes: u64,
+    pub(crate) repaired_contracts: u64,
+    pub(crate) repair_leaves: u64,
+    pub(crate) completed_contracts: u64,
+}
+
+/// Cached metrics recorded once per successful packed flush.
+#[cfg(feature = "mdbx")]
+#[derive(Metrics, Clone)]
+#[metrics(scope = "database.packing")]
+pub(crate) struct PackingFlushMetrics {
+    /// Total packed flush time, including preparation.
+    flush_duration_seconds: Histogram,
+    /// Time encoding changed blobs.
+    encoding_duration_seconds: Histogram,
+    /// Time writing changed blobs.
+    persistence_duration_seconds: Histogram,
+    /// Time repairing retained trie nodes and persisting frontier metadata.
+    reconstruction_duration_seconds: Histogram,
+    /// Number of encoded blobs.
+    blobs_total: Counter,
+    /// Encoded blob bytes submitted to MDBX.
+    encoded_bytes_total: Counter,
+    /// Contracts that required trie repair.
+    repaired_contracts_total: Counter,
+    /// Storage leaves visited by trie repair.
+    repair_leaves_total: Counter,
+    /// Contracts that completed without trie repair.
+    completed_contracts_total: Counter,
+}
+
+#[cfg(feature = "mdbx")]
+impl PackingFlushMetrics {
+    pub(crate) fn record(&self, stats: PackingFlushStats) {
+        self.flush_duration_seconds.record(stats.total_duration);
+        self.encoding_duration_seconds.record(stats.encoding_duration);
+        self.persistence_duration_seconds.record(stats.persistence_duration);
+        self.reconstruction_duration_seconds.record(stats.reconstruction_duration);
+        self.blobs_total.increment(stats.blobs);
+        self.encoded_bytes_total.increment(stats.encoded_bytes);
+        self.repaired_contracts_total.increment(stats.repaired_contracts);
+        self.repair_leaves_total.increment(stats.repair_leaves);
+        self.completed_contracts_total.increment(stats.completed_contracts);
     }
 }
 

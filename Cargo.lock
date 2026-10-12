@@ -8201,6 +8201,8 @@ version = "2.7.0"
 dependencies = [
  "alloy-consensus",
  "alloy-primitives",
+ "alloy-rlp",
+ "alloy-trie",
  "arbitrary",
  "assert_matches",
  "derive_more",
@@ -8210,6 +8212,7 @@ dependencies = [
  "page_size",
  "parking_lot",
  "proptest",
+ "reth-codecs",
  "reth-db-api",
  "reth-fs-util",
  "reth-libmdbx",
@@ -10927,6 +10930,7 @@ dependencies = [
  "revm",
  "serde_json",
  "similar-asserts",
+ "tempfile",
  "tracing",
  "triehash",
 ]

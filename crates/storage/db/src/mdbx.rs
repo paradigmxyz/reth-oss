@@ -81,6 +81,15 @@ pub fn create_db<P: AsRef<Path>>(path: P, args: DatabaseArguments) -> eyre::Resu
     let rpath = path.as_ref();
     warn_if_zfs(rpath);
 
+    if let Some(mode) = args.experimental_packing() {
+        crate::implementation::mdbx::packing::prepare_directory(
+            rpath,
+            mode,
+            args.experimental_trie_depth(),
+        )?;
+        return Ok(DatabaseEnv::open(rpath, DatabaseEnvKind::RW, args)?);
+    }
+
     if is_database_empty(rpath) {
         reth_fs_util::create_dir_all(rpath)
             .wrap_err_with(|| format!("Could not create database directory {}", rpath.display()))?;

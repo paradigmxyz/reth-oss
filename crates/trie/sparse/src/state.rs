@@ -416,10 +416,12 @@ where
             .iter_mut()
             .map(|(address, trie)| {
                 let trie = trie.as_revealed_mut().unwrap();
+                let root_summary = trie.take_root_branch_summary();
                 let updates = trie.take_updates();
                 let updates = StorageTrieUpdates {
                     storage_nodes: updates.updated_nodes,
                     removed_nodes: updates.removed_nodes,
+                    root_summary,
                 };
                 (*address, updates)
             })
@@ -614,6 +616,30 @@ mod tests {
 
     const fn epoch(value: u64) -> TrieNodeEpoch {
         TrieNodeEpoch::new(value)
+    }
+
+    #[test]
+    fn storage_root_only_updates_are_emitted_once_after_hashing() {
+        let address = B256::repeat_byte(0x55);
+        let mut storage = RevealableSparseTrie::<ArenaParallelSparseTrie>::revealed_empty();
+        let trie = storage.as_revealed_mut().unwrap();
+        trie.set_updates(true);
+        let mut leaves = B256Map::from_iter([
+            (B256::repeat_byte(0x11), LeafUpdate::Changed(vec![1])),
+            (B256::repeat_byte(0x22), LeafUpdate::Changed(vec![2])),
+        ]);
+        trie.update_leaves(&mut leaves, |_, _| panic!("empty trie needs no proofs")).unwrap();
+        trie.root(epoch(1));
+        assert!(trie.updates_ref().updated_nodes.is_empty());
+        let mut state = SparseStateTrie::<ArenaParallelSparseTrie>::default();
+        state.insert_storage_trie(address, storage);
+        let updates = state.storage_trie_updates();
+        assert!(updates[&address].root_summary.is_some());
+        assert!(updates[&address].storage_nodes.is_empty());
+        assert!(updates[&address].removed_nodes.is_empty());
+        assert!(state.storage_trie_updates().is_empty());
+        state.storage_root(&address, epoch(1)).unwrap();
+        assert!(state.storage_trie_updates().is_empty());
     }
 
     /// Create a leaf key (suffix) with given nibbles padded with zeros to reach `total_len`.
@@ -1132,6 +1158,7 @@ mod tests {
 
         sparse.root(epoch(0)).unwrap();
 
+        let root_summary = sparse.storage_trie_ref(&address_1).unwrap().root_branch_summary();
         let sparse_updates = sparse.take_trie_updates().unwrap();
         // TODO(alexey): assert against real state root calculation updates
         pretty_assertions::assert_eq!(
@@ -1142,7 +1169,9 @@ mod tests {
                     b256!("0x1000000000000000000000000000000000000000000000000000000000000000"),
                     StorageTrieUpdates {
                         storage_nodes: HashMap::default(),
-                        removed_nodes: HashSet::from_iter([Nibbles::from_nibbles([0x1])])
+                        removed_nodes: HashSet::from_iter([Nibbles::from_nibbles([0x1])]),
+                        root_summary,
+                        ..Default::default()
                     }
                 )]),
                 removed_nodes: HashSet::default()

@@ -1,12 +1,17 @@
 //! Transaction wrapper for libmdbx-sys.
 
-use super::{cursor::Cursor, utils::*};
+use super::{
+    cursor::Cursor,
+    packing::{Logical, Shared},
+    utils::*,
+};
 use crate::{
     metrics::{DatabaseEnvMetrics, Operation, TransactionMode, TransactionOutcome},
     DatabaseError,
 };
 use reth_db_api::{
-    table::{Compress, DupSort, Encode, IntoVec, Table, TableImporter},
+    cursor::{DbCursorRO, DbCursorRW},
+    table::{Compress, Decode, DupSort, Encode, IntoVec, Table, TableImporter},
     transaction::{DbTx, DbTxMut},
 };
 use reth_libmdbx::{ffi::MDBX_dbi, CommitLatency, Transaction, TransactionKind, WriteFlags, RW};
@@ -41,6 +46,7 @@ pub struct Tx<K: TransactionKind> {
     ///
     /// If [Some], then metrics are reported.
     metrics_handler: Option<MetricsHandler<K>>,
+    pub(crate) packing: Option<Arc<Shared>>,
 }
 
 impl<K: TransactionKind> Tx<K> {
@@ -51,6 +57,7 @@ impl<K: TransactionKind> Tx<K> {
         inner: Transaction<K>,
         dbis: Arc<FxHashMap<&'static str, MDBX_dbi>>,
         env_metrics: Option<Arc<DatabaseEnvMetrics>>,
+        packing: Option<Arc<Shared>>,
     ) -> reth_libmdbx::Result<Self> {
         let metrics_handler = env_metrics
             .map(|env_metrics| {
@@ -60,7 +67,7 @@ impl<K: TransactionKind> Tx<K> {
                 Ok(handler)
             })
             .transpose()?;
-        Ok(Self { inner, dbis, metrics_handler })
+        Ok(Self { inner, dbis, metrics_handler, packing })
     }
 
     /// Returns a reference to the inner libmdbx transaction.
@@ -98,6 +105,32 @@ impl<K: TransactionKind> Tx<K> {
             .inner
             .cursor_with_dbi(self.get_dbi::<T>()?)
             .map_err(|e| DatabaseError::InitCursor(e.into()))?;
+
+        if let Some(shared) = &self.packing &&
+            matches!(T::NAME, "HashedStorages" | "StoragesTrie")
+        {
+            if T::NAME == "StoragesTrie" &&
+                std::any::TypeId::of::<T>() !=
+                    std::any::TypeId::of::<reth_db_api::tables::PackedStoragesTrie>()
+            {
+                return Err(DatabaseError::Other(
+                    "experimental packing requires the V2 PackedStoragesTrie adapter".into(),
+                ));
+            }
+            if T::NAME != "StoragesTrie" || shared.depth != super::packing::FULL_TRIE_DEPTH {
+                return Ok(Cursor::new_packed_with_metrics(
+                    Logical::new(
+                        self.inner.clone(),
+                        shared.clone(),
+                        inner,
+                        T::NAME == "StoragesTrie",
+                    )?,
+                    self.metrics_handler
+                        .as_ref()
+                        .map(|h| h.env_metrics.table_operation_metrics(T::NAME)),
+                ));
+            }
+        }
 
         Ok(Cursor::new_with_metrics(
             inner,
@@ -300,6 +333,12 @@ impl<K: TransactionKind> DbTx for Tx<K> {
         &self,
         key: &<T::Key as Encode>::Encoded,
     ) -> Result<Option<T::Value>, DatabaseError> {
+        if self.packing.is_some() && matches!(T::NAME, "HashedStorages" | "StoragesTrie") {
+            return Ok(self
+                .new_cursor::<T>()?
+                .seek_exact(T::Key::decode(key.as_ref())?)?
+                .map(|(_, v)| v));
+        }
         self.execute_with_operation_metric::<T, _>(Operation::Get, None, |tx| {
             tx.get(self.get_dbi::<T>()?, key.as_ref())
                 .map_err(|e| DatabaseError::Read(e.into()))?
@@ -311,6 +350,13 @@ impl<K: TransactionKind> DbTx for Tx<K> {
     #[instrument(name = "Tx::commit", level = "debug", target = "providers::db", skip_all)]
     fn commit(self) -> Result<(), DatabaseError> {
         self.execute_with_close_transaction_metric(TransactionOutcome::Commit, |this| {
+            if let Some(shared) = &this.packing {
+                let flushed = shared.flush();
+                shared.closed.store(true, Ordering::Release);
+                if let Err(error) = flushed {
+                    return (Err(error), None)
+                }
+            }
             match this.inner.commit().map_err(|e| DatabaseError::Commit(e.into())) {
                 Ok(latency) => (Ok(()), Some(latency)),
                 Err(e) => (Err(e), None),
@@ -319,6 +365,9 @@ impl<K: TransactionKind> DbTx for Tx<K> {
     }
 
     fn abort(self) {
+        if let Some(shared) = &self.packing {
+            shared.closed.store(true, Ordering::Release);
+        }
         self.execute_with_close_transaction_metric(TransactionOutcome::Abort, |this| {
             (drop(this.inner), None)
         })
@@ -334,8 +383,19 @@ impl<K: TransactionKind> DbTx for Tx<K> {
         self.new_cursor()
     }
 
-    /// Returns number of entries in the table using cheap DB stats invocation.
+    /// Returns logical entries, using physical stats where the layout permits it.
     fn entries<T: Table>(&self) -> Result<usize, DatabaseError> {
+        if let Some(shared) = &self.packing {
+            if T::NAME == "HashedStorages" {
+                return shared.storage_entries(&self.inner)
+            }
+            if T::NAME == "StoragesTrie" && shared.depth != super::packing::FULL_TRIE_DEPTH {
+                // Omitted logical trie nodes still need reconstruction for an exact count.
+                // Physical db stats are available separately without traversing these nodes.
+                let mut cursor = self.new_cursor::<T>()?;
+                return cursor.walk(None)?.try_fold(0, |n, row| row.map(|_| n + 1));
+            }
+        }
         Ok(self
             .inner
             .db_stat_with_dbi(self.get_dbi::<T>()?)
@@ -385,6 +445,13 @@ impl Tx<RW> {
         key: T::Key,
         value: T::Value,
     ) -> Result<(), DatabaseError> {
+        if self.packing.is_some() && matches!(T::NAME, "HashedStorages" | "StoragesTrie") {
+            let mut cursor = self.new_cursor::<T>()?;
+            return match kind {
+                PutKind::Upsert => cursor.upsert(key, &value),
+                PutKind::Append => cursor.append(key, &value),
+            };
+        }
         let key = key.encode();
         let value = value.compress();
         let (operation, write_operation, flags) = kind.into_operation_and_flags();
@@ -419,6 +486,33 @@ impl DbTxMut for Tx<RW> {
         key: T::Key,
         value: Option<T::Value>,
     ) -> Result<bool, DatabaseError> {
+        if self.packing.is_some() && matches!(T::NAME, "HashedStorages" | "StoragesTrie") {
+            let mut cursor = self.new_cursor::<T>()?;
+            if let Cursor::Packed(logical) = &mut cursor {
+                let encoded = key.encode();
+                let bytes = value.as_ref().map(|v| {
+                    let mut bytes = Vec::new();
+                    v.compress_to_buf(&mut bytes);
+                    bytes
+                });
+                let width = if T::NAME == "StoragesTrie" { 33 } else { 32 };
+                if bytes.as_ref().is_some_and(|v| v.len() < width) {
+                    return Err(DatabaseError::Decode);
+                }
+                return self.execute_with_operation_metric::<T, _>(Operation::Delete, None, |_| {
+                    let found = logical.seek(
+                        encoded.as_ref(),
+                        bytes.as_ref().map(|v| &v[..width]),
+                        true,
+                    )?;
+                    if found.as_ref().is_some_and(|(_, v)| bytes.as_ref().is_none_or(|b| b == v)) {
+                        logical.delete(bytes.is_none())?;
+                        return Ok(true);
+                    }
+                    Ok(false)
+                });
+            }
+        }
         let mut data = None;
 
         let value = value.map(Compress::compress);
@@ -433,7 +527,22 @@ impl DbTxMut for Tx<RW> {
     }
 
     fn clear<T: Table>(&self) -> Result<(), DatabaseError> {
+        if let Some(shared) = &self.packing &&
+            T::NAME == "HashedStorages"
+        {
+            return shared.clear();
+        }
+        if let Some(shared) = &self.packing &&
+            T::NAME == "StoragesTrie"
+        {
+            shared.invalidate_trie_root(None)?;
+        }
         self.inner.clear_db(self.get_dbi::<T>()?).map_err(|e| DatabaseError::Delete(e.into()))?;
+        if let Some(shared) = &self.packing &&
+            T::NAME == "StoragesTrie"
+        {
+            shared.trie_changed(None)?;
+        }
 
         Ok(())
     }
@@ -445,10 +554,30 @@ impl DbTxMut for Tx<RW> {
     fn cursor_dup_write<T: DupSort>(&self) -> Result<Self::DupCursorMut<T>, DatabaseError> {
         self.new_cursor()
     }
+
+    fn finish_storage_trie_updates(
+        &self,
+        hashed_address: alloy_primitives::B256,
+    ) -> Result<(), DatabaseError> {
+        if let Some(shared) = &self.packing &&
+            matches!(
+                shared.depth,
+                super::packing::FULL_TRIE_DEPTH | super::packing::ADAPTIVE_TRIE_DEPTH
+            )
+        {
+            shared.mark_trie_updates_completed(hashed_address)?;
+        }
+        Ok(())
+    }
+
+    fn requires_storage_trie_root_summary(&self) -> bool {
+        self.packing.as_ref().is_some_and(|shared| shared.depth != super::packing::FULL_TRIE_DEPTH)
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::{mdbx::DatabaseArguments, tables, DatabaseEnv, DatabaseEnvKind};
     use reth_db_api::{database::Database, models::ClientVersion, transaction::DbTx};
     use reth_libmdbx::MaxReadTransactionDuration;
@@ -503,5 +632,31 @@ mod tests {
             DatabaseError::Open(err) if err == reth_libmdbx::Error::ReadTransactionTimeout.into()));
         // Backtrace is recorded.
         assert!(tx.metrics_handler.unwrap().backtrace_recorded.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn root_summary_capability_is_limited_to_sparse_packing() {
+        for mode in [
+            None,
+            Some(super::super::packing::PackingMode::Dense),
+            Some(super::super::packing::PackingMode::Integer32),
+        ] {
+            for depth in [
+                3,
+                super::super::packing::ADAPTIVE_TRIE_DEPTH,
+                super::super::packing::FULL_TRIE_DEPTH,
+            ] {
+                let dir = tempdir().unwrap();
+                let db = crate::init_db(
+                    dir.path(),
+                    DatabaseArguments::test().with_experimental_packing(mode, depth),
+                )
+                .unwrap();
+                assert_eq!(
+                    db.tx_mut().unwrap().requires_storage_trie_root_summary(),
+                    mode.is_some() && depth != super::super::packing::FULL_TRIE_DEPTH,
+                );
+            }
+        }
     }
 }
