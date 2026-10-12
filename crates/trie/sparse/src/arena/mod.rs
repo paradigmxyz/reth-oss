@@ -2334,6 +2334,11 @@ impl SparseTrie for ArenaParallelSparseTrie {
             return;
         }
 
+        // Dirty state propagates to the root, so a cached root has no dirty subtries.
+        if self.upper_arena[self.root].is_cached() {
+            return;
+        }
+
         // Count total dirty leaves across all subtries to make one global parallelism decision.
         let mut total_dirty_leaves: u64 = 0;
         let mut taken: Vec<(Index, Box<ArenaSparseSubtrie>)> = Vec::new();
@@ -2371,12 +2376,6 @@ impl SparseTrie for ArenaParallelSparseTrie {
                     })
                     .collect();
             }
-        }
-
-        // If the root branch is already cached and nothing was taken for parallel
-        // hashing, there are no dirty subtries to process.
-        if taken.is_empty() && self.upper_arena[self.root].is_cached() {
-            return;
         }
 
         // Walk the upper trie depth-first, restoring hashed subtries and inline-hashing
