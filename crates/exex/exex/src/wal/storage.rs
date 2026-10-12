@@ -303,6 +303,7 @@ mod tests {
                         BranchNodeCompact::default(),
                     )]),
                     removed_nodes: Default::default(),
+                    ..Default::default()
                 },
             )]),
         };

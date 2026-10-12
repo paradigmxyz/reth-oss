@@ -83,4 +83,10 @@ pub trait DbTxMut: Send {
     fn finish_storage_trie_updates(&self, _hashed_address: B256) -> Result<(), DatabaseError> {
         Ok(())
     }
+
+    /// Whether this backend uses canonical storage root summaries to repair an omitted trie.
+    /// Native and full-trie backends leave this disabled to avoid masked-summary proof work.
+    fn requires_storage_trie_root_summary(&self) -> bool {
+        false
+    }
 }

@@ -1,9 +1,14 @@
 //! Version-one persisted adaptive reconstruction boundaries.
 
+use super::cache::Recency;
 use crate::DatabaseError;
 use alloy_primitives::B256;
 use alloy_trie::Nibbles;
-use std::{collections::BTreeMap, ops::Bound, sync::Arc};
+use std::{
+    collections::{btree_map, BTreeMap},
+    ops::Bound,
+    sync::Arc,
+};
 
 pub(crate) const TABLE: &str = "ExperimentalPackedTrieFrontiersV1";
 pub(crate) const POLICY_VERSION: u8 = 1;
@@ -137,7 +142,16 @@ impl Frontier {
                 break
             }
             if count != 0 {
-                cuts.retain(|cut, _| !cut.starts_with(&parent));
+                // Only visit this subtree. Scanning every other contract boundary at each
+                // ancestor makes an otherwise bounded merge depend on the entire frontier.
+                while let Some(cut) = cuts
+                    .range(parent..)
+                    .next()
+                    .map(|(cut, _)| *cut)
+                    .filter(|cut| cut.starts_with(&parent))
+                {
+                    cuts.remove(&cut);
+                }
                 cuts.insert(parent, count as u16);
             }
         }
@@ -223,6 +237,47 @@ impl Frontier {
         }
         Ok(Self::Cuts(cuts))
     }
+
+    pub(crate) fn contains_cut(&self, path: &Nibbles) -> bool {
+        matches!(self, Self::Cuts(cuts) if cuts.contains_key(path))
+    }
+
+    /// Visit only cuts that can contain a logical row on the requested side of the query.
+    /// Forward seeks include the covering predecessor, since its reconstructed rows may
+    /// follow the query. Reverse seeks begin with the last cut at or before the query.
+    pub(crate) fn cuts_for_query(&self, query: Nibbles, reverse: bool) -> FrontierCuts<'_> {
+        let range = if let Self::Cuts(cuts) = self {
+            if reverse {
+                Some(cuts.range((Bound::Unbounded, Bound::Included(query))))
+            } else {
+                let start = cuts
+                    .range(..=query)
+                    .next_back()
+                    .map(|(cut, _)| *cut)
+                    .filter(|cut| query.starts_with(cut))
+                    .unwrap_or(query);
+                Some(cuts.range(start..))
+            }
+        } else {
+            None
+        };
+        FrontierCuts { range, reverse }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct FrontierCuts<'a> {
+    range: Option<btree_map::Range<'a, Nibbles, u16>>,
+    reverse: bool,
+}
+
+impl Iterator for FrontierCuts<'_> {
+    type Item = Nibbles;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let range = self.range.as_mut()?;
+        if self.reverse { range.next_back() } else { range.next() }.map(|(path, _)| *path)
+    }
 }
 
 fn checksum(scope: B256, bytes: &[u8]) -> u64 {
@@ -234,37 +289,44 @@ fn checksum(scope: B256, bytes: &[u8]) -> u64 {
 /// Snapshot-local metadata admission, separate from blob and derived-node budgets.
 #[derive(Debug, Default)]
 pub(crate) struct FrontierCache {
-    entries: BTreeMap<B256, (u64, Arc<Frontier>)>,
+    entries: BTreeMap<B256, (u64, Arc<Frontier>, usize)>,
+    recency: Recency<B256>,
     bytes: usize,
 }
 
 impl FrontierCache {
-    pub(crate) fn get(&self, scope: B256, generation: u64) -> Option<Arc<Frontier>> {
-        self.entries.get(&scope).filter(|(g, _)| *g == generation).map(|(_, f)| Arc::clone(f))
+    pub(crate) fn get(&mut self, scope: B256, generation: u64) -> Option<Arc<Frontier>> {
+        let (_, frontier, slot) = self.entries.get(&scope).filter(|(g, _, _)| *g == generation)?;
+        self.recency.touch(*slot);
+        Some(Arc::clone(frontier))
     }
 
     pub(crate) fn insert(&mut self, scope: B256, generation: u64, frontier: Arc<Frontier>) {
-        if let Some((_, old)) = self.entries.remove(&scope) {
+        if let Some((_, old, slot)) = self.entries.remove(&scope) {
             self.bytes -= frontier_bytes(&old);
+            self.recency.remove(slot);
         }
         let bytes = frontier_bytes(&frontier);
         if bytes > super::cache::CACHE_BYTES {
             return
         }
         while self.entries.len() >= 64 || self.bytes + bytes > super::cache::CACHE_BYTES {
-            if let Some((_, (_, old))) = self.entries.pop_first() {
-                self.bytes -= frontier_bytes(&old);
+            if let Some(oldest) = self.recency.pop_oldest() {
+                if let Some((_, old, _)) = self.entries.remove(&oldest) {
+                    self.bytes -= frontier_bytes(&old);
+                }
             } else {
                 break
             }
         }
         self.bytes += bytes;
-        self.entries.insert(scope, (generation, frontier));
+        let slot = self.recency.insert(scope);
+        self.entries.insert(scope, (generation, frontier, slot));
     }
 }
 
 fn frontier_bytes(frontier: &Frontier) -> usize {
-    128 + frontier.cuts().count() * (std::mem::size_of::<(Nibbles, u16)>() + 96)
+    320 + frontier.cuts().count() * (std::mem::size_of::<(Nibbles, u16)>() + 96)
 }
 
 #[cfg(test)]
@@ -291,6 +353,21 @@ mod tests {
             let frontier = Frontier::Cuts(cuts);
             prop_assert_eq!(frontier.region(B256::from(key)), expected);
             prop_assert_eq!(Frontier::decode(B256::ZERO, &frontier.encode(B256::ZERO)).unwrap(), frontier);
+        }
+
+        #[test]
+        fn query_ranges_match_full_scan(indices in proptest::collection::btree_set(0u16..4096, 1..80), key in any::<[u8; 32]>(), length in 0usize..=64) {
+            let cuts: BTreeMap<_, _> = indices.into_iter().map(|index| {
+                let mut slot = [0; 32];
+                slot[..2].copy_from_slice(&(index << 4).to_be_bytes());
+                (Nibbles::unpack(slot).slice(..3), 1)
+            }).collect();
+            let frontier = Frontier::Cuts(cuts);
+            let query = Nibbles::unpack(key).slice(..length);
+            let forward: Vec<_> = frontier.cuts().filter(|cut| *cut >= query || query.starts_with(cut)).collect();
+            let reverse: Vec<_> = frontier.cuts().rev().filter(|cut| *cut <= query).collect();
+            prop_assert_eq!(frontier.cuts_for_query(query, false).collect::<Vec<_>>(), forward);
+            prop_assert_eq!(frontier.cuts_for_query(query, true).collect::<Vec<_>>(), reverse);
         }
     }
 
@@ -323,5 +400,78 @@ mod tests {
                 assert!(Frontier::decode(B256::ZERO, &corrupt).is_err());
             }
         }
+    }
+
+    #[test]
+    fn query_ranges_include_covering_cut_and_handle_gaps() {
+        let prefix = |digits: &[u8]| Nibbles::from_nibbles_unchecked(digits);
+        let cuts =
+            BTreeMap::from([(prefix(&[1]), 100), (prefix(&[3, 4]), 100), (prefix(&[8]), 100)]);
+        let frontier = Frontier::Cuts(cuts);
+        assert_eq!(
+            frontier.cuts_for_query(prefix(&[3, 4, 9]), false).collect::<Vec<_>>(),
+            vec![prefix(&[3, 4]), prefix(&[8])]
+        );
+        assert_eq!(
+            frontier.cuts_for_query(prefix(&[3, 5]), false).collect::<Vec<_>>(),
+            vec![prefix(&[8])]
+        );
+        assert_eq!(
+            frontier.cuts_for_query(prefix(&[3, 5]), true).collect::<Vec<_>>(),
+            vec![prefix(&[3, 4]), prefix(&[1])]
+        );
+        assert_eq!(
+            frontier.cuts_for_query(prefix(&[3]), false).collect::<Vec<_>>(),
+            vec![prefix(&[3, 4]), prefix(&[8])]
+        );
+        assert_eq!(
+            frontier.cuts_for_query(prefix(&[3]), true).collect::<Vec<_>>(),
+            vec![prefix(&[1])]
+        );
+        assert!(frontier.cuts_for_query(Nibbles::default(), true).next().is_none());
+        assert!(Frontier::Full.cuts_for_query(prefix(&[3]), false).next().is_none());
+        assert!(frontier.contains_cut(&prefix(&[3, 4])));
+        assert!(!frontier.contains_cut(&prefix(&[3])));
+    }
+
+    #[test]
+    fn merge_preserves_unrelated_boundaries() {
+        let prefix = |digits: &[u8]| Nibbles::from_nibbles_unchecked(digits);
+        let mut frontier = Frontier::Cuts(BTreeMap::from([
+            (prefix(&[1]), 300),
+            (prefix(&[3, 4]), 100),
+            (prefix(&[3, 5]), 100),
+            (prefix(&[8]), 300),
+        ]));
+        let mut slot = [0; 32];
+        slot[0] = 0x34;
+        frontier.merge(B256::from(slot));
+        assert_eq!(
+            frontier,
+            Frontier::Cuts(BTreeMap::from([
+                (prefix(&[1]), 300),
+                (prefix(&[3]), 200),
+                (prefix(&[8]), 300)
+            ]))
+        );
+    }
+
+    #[test]
+    fn frontier_cache_evicts_recently_unused_scope() {
+        let mut cache = FrontierCache::default();
+        for index in 0..64u8 {
+            cache.insert(B256::repeat_byte(index), 1, Arc::new(Frontier::Full));
+        }
+        assert!(cache.get(B256::ZERO, 1).is_some());
+        cache.insert(B256::repeat_byte(64), 1, Arc::new(Frontier::Full));
+        assert!(cache.get(B256::repeat_byte(1), 1).is_none());
+        assert!(cache.get(B256::ZERO, 1).is_some());
+        assert!(cache.get(B256::ZERO, 2).is_none());
+        assert_eq!(cache.entries.len(), 64);
+        assert_eq!(cache.recency.len(), 64);
+        cache.insert(B256::ZERO, 2, Arc::new(Frontier::Empty));
+        assert!(cache.get(B256::ZERO, 1).is_none());
+        assert_eq!(cache.get(B256::ZERO, 2).as_deref(), Some(&Frontier::Empty));
+        assert_eq!(cache.entries.len(), cache.recency.len());
     }
 }

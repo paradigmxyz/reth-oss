@@ -80,7 +80,7 @@ impl Command {
         table.load_preset(comfy_table::presets::ASCII_MARKDOWN);
         table.set_header([
             "Table Name",
-            "# Entries",
+            "# Physical Entries",
             "Branch Pages",
             "Leaf Pages",
             "Overflow Pages",
@@ -88,10 +88,8 @@ impl Command {
         ]);
 
         tool.provider_factory.db_ref().view(|tx| {
-            let mut db_tables = Tables::ALL.iter().map(|table| table.name()).collect::<Vec<_>>();
-            if tool.provider_factory.db_ref().experimental_packing().is_some() {
-                db_tables.push(mdbx::packing::TABLE_NAME);
-            }
+            let mut db_tables =
+                tool.provider_factory.db_ref().physical_table_names().collect::<Vec<_>>();
             db_tables.sort_unstable();
             let mut total_size = 0;
             for db_table in db_tables {

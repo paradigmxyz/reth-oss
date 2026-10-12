@@ -118,12 +118,17 @@ impl<K: TransactionKind> Tx<K> {
                 ));
             }
             if T::NAME != "StoragesTrie" || shared.depth != super::packing::FULL_TRIE_DEPTH {
-                return Ok(Cursor::Packed(Box::new(Logical::new(
-                    self.inner.clone(),
-                    shared.clone(),
-                    inner,
-                    T::NAME == "StoragesTrie",
-                )?)));
+                return Ok(Cursor::new_packed_with_metrics(
+                    Logical::new(
+                        self.inner.clone(),
+                        shared.clone(),
+                        inner,
+                        T::NAME == "StoragesTrie",
+                    )?,
+                    self.metrics_handler
+                        .as_ref()
+                        .map(|h| h.env_metrics.table_operation_metrics(T::NAME)),
+                ));
             }
         }
 
@@ -344,11 +349,14 @@ impl<K: TransactionKind> DbTx for Tx<K> {
 
     #[instrument(name = "Tx::commit", level = "debug", target = "providers::db", skip_all)]
     fn commit(self) -> Result<(), DatabaseError> {
-        if let Some(shared) = &self.packing {
-            shared.flush()?;
-            shared.closed.store(true, Ordering::Release);
-        }
         self.execute_with_close_transaction_metric(TransactionOutcome::Commit, |this| {
+            if let Some(shared) = &this.packing {
+                let flushed = shared.flush();
+                shared.closed.store(true, Ordering::Release);
+                if let Err(error) = flushed {
+                    return (Err(error), None)
+                }
+            }
             match this.inner.commit().map_err(|e| DatabaseError::Commit(e.into())) {
                 Ok(latency) => (Ok(()), Some(latency)),
                 Err(e) => (Err(e), None),
@@ -375,11 +383,18 @@ impl<K: TransactionKind> DbTx for Tx<K> {
         self.new_cursor()
     }
 
-    /// Returns number of entries in the table using cheap DB stats invocation.
+    /// Returns logical entries, using physical stats where the layout permits it.
     fn entries<T: Table>(&self) -> Result<usize, DatabaseError> {
-        if self.packing.is_some() && matches!(T::NAME, "HashedStorages" | "StoragesTrie") {
-            let mut cursor = self.new_cursor::<T>()?;
-            return cursor.walk(None)?.try_fold(0, |n, row| row.map(|_| n + 1));
+        if let Some(shared) = &self.packing {
+            if T::NAME == "HashedStorages" {
+                return shared.storage_entries(&self.inner)
+            }
+            if T::NAME == "StoragesTrie" && shared.depth != super::packing::FULL_TRIE_DEPTH {
+                // Omitted logical trie nodes still need reconstruction for an exact count.
+                // Physical db stats are available separately without traversing these nodes.
+                let mut cursor = self.new_cursor::<T>()?;
+                return cursor.walk(None)?.try_fold(0, |n, row| row.map(|_| n + 1));
+            }
         }
         Ok(self
             .inner
@@ -484,13 +499,18 @@ impl DbTxMut for Tx<RW> {
                 if bytes.as_ref().is_some_and(|v| v.len() < width) {
                     return Err(DatabaseError::Decode);
                 }
-                let found =
-                    logical.seek(encoded.as_ref(), bytes.as_ref().map(|v| &v[..width]), true)?;
-                if found.as_ref().is_some_and(|(_, v)| bytes.as_ref().is_none_or(|b| b == v)) {
-                    logical.delete(bytes.is_none())?;
-                    return Ok(true);
-                }
-                return Ok(false);
+                return self.execute_with_operation_metric::<T, _>(Operation::Delete, None, |_| {
+                    let found = logical.seek(
+                        encoded.as_ref(),
+                        bytes.as_ref().map(|v| &v[..width]),
+                        true,
+                    )?;
+                    if found.as_ref().is_some_and(|(_, v)| bytes.as_ref().is_none_or(|b| b == v)) {
+                        logical.delete(bytes.is_none())?;
+                        return Ok(true);
+                    }
+                    Ok(false)
+                });
             }
         }
         let mut data = None;
@@ -545,14 +565,19 @@ impl DbTxMut for Tx<RW> {
                 super::packing::FULL_TRIE_DEPTH | super::packing::ADAPTIVE_TRIE_DEPTH
             )
         {
-            shared.mark_trie_root_written(hashed_address)?;
+            shared.mark_trie_updates_completed(hashed_address)?;
         }
         Ok(())
+    }
+
+    fn requires_storage_trie_root_summary(&self) -> bool {
+        self.packing.as_ref().is_some_and(|shared| shared.depth != super::packing::FULL_TRIE_DEPTH)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::{mdbx::DatabaseArguments, tables, DatabaseEnv, DatabaseEnvKind};
     use reth_db_api::{database::Database, models::ClientVersion, transaction::DbTx};
     use reth_libmdbx::MaxReadTransactionDuration;
@@ -607,5 +632,31 @@ mod tests {
             DatabaseError::Open(err) if err == reth_libmdbx::Error::ReadTransactionTimeout.into()));
         // Backtrace is recorded.
         assert!(tx.metrics_handler.unwrap().backtrace_recorded.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn root_summary_capability_is_limited_to_sparse_packing() {
+        for mode in [
+            None,
+            Some(super::super::packing::PackingMode::Dense),
+            Some(super::super::packing::PackingMode::Integer32),
+        ] {
+            for depth in [
+                3,
+                super::super::packing::ADAPTIVE_TRIE_DEPTH,
+                super::super::packing::FULL_TRIE_DEPTH,
+            ] {
+                let dir = tempdir().unwrap();
+                let db = crate::init_db(
+                    dir.path(),
+                    DatabaseArguments::test().with_experimental_packing(mode, depth),
+                )
+                .unwrap();
+                assert_eq!(
+                    db.tx_mut().unwrap().requires_storage_trie_root_summary(),
+                    mode.is_some() && depth != super::super::packing::FULL_TRIE_DEPTH,
+                );
+            }
+        }
     }
 }

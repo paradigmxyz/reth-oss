@@ -5,7 +5,10 @@ use super::{
     packing::{Logical, Move},
     utils::decoder,
 };
-use crate::{metrics::TableOperationMetrics, DatabaseError};
+use crate::{
+    metrics::{Operation, TableOperationMetrics},
+    DatabaseError,
+};
 use reth_db_api::{
     common::{PairResult, ValueOnlyResult},
     cursor::{
@@ -17,7 +20,7 @@ use reth_db_api::{
 use reth_libmdbx::{TransactionKind, RO, RW};
 use std::{
     borrow::Cow,
-    ops::{Bound, RangeBounds},
+    ops::{Bound, Deref, DerefMut, RangeBounds},
 };
 
 /// Read-only cursor over the selected database layout.
@@ -32,7 +35,7 @@ pub enum Cursor<K: TransactionKind, T: Table> {
     Native(NativeCursor<K, T>),
     /// Experimental logical state/trie access.
     #[allow(private_interfaces)]
-    Packed(Box<Logical<K>>),
+    Packed(Box<MeasuredLogical<K>>),
 }
 
 impl<K: TransactionKind, T: Table> Cursor<K, T> {
@@ -41,6 +44,13 @@ impl<K: TransactionKind, T: Table> Cursor<K, T> {
         metrics: Option<TableOperationMetrics>,
     ) -> Self {
         Self::Native(NativeCursor::new_with_metrics(inner, metrics))
+    }
+
+    pub(crate) fn new_packed_with_metrics(
+        logical: Logical<K>,
+        metrics: Option<TableOperationMetrics>,
+    ) -> Self {
+        Self::Packed(Box::new(MeasuredLogical { logical, metrics }))
     }
 
     fn decode(row: Option<(Vec<u8>, Vec<u8>)>) -> PairResult<T> {
@@ -187,7 +197,10 @@ impl<T: Table> DbCursorRW<T> for Cursor<RW, T> {
         match self {
             Self::Native(c) => c.upsert(key, value),
             Self::Packed(c) => {
-                c.write(key.encode().as_ref(), encoded_value::<T>(value).as_slice(), false, false)
+                let value = encoded_value::<T>(value);
+                c.record(Operation::CursorUpsert, Some(value.len()), |c| {
+                    c.write(key.encode().as_ref(), &value, false, false)
+                })
             }
         }
     }
@@ -195,7 +208,10 @@ impl<T: Table> DbCursorRW<T> for Cursor<RW, T> {
         match self {
             Self::Native(c) => c.insert(key, value),
             Self::Packed(c) => {
-                c.write(key.encode().as_ref(), encoded_value::<T>(value).as_slice(), true, false)
+                let value = encoded_value::<T>(value);
+                c.record(Operation::CursorInsert, Some(value.len()), |c| {
+                    c.write(key.encode().as_ref(), &value, true, false)
+                })
             }
         }
     }
@@ -203,14 +219,17 @@ impl<T: Table> DbCursorRW<T> for Cursor<RW, T> {
         match self {
             Self::Native(c) => c.append(key, value),
             Self::Packed(c) => {
-                c.write(key.encode().as_ref(), encoded_value::<T>(value).as_slice(), false, true)
+                let value = encoded_value::<T>(value);
+                c.record(Operation::CursorAppend, Some(value.len()), |c| {
+                    c.write(key.encode().as_ref(), &value, false, true)
+                })
             }
         }
     }
     fn delete_current(&mut self) -> Result<(), DatabaseError> {
         match self {
             Self::Native(c) => c.delete_current(),
-            Self::Packed(c) => c.delete(false),
+            Self::Packed(c) => c.record(Operation::CursorDeleteCurrent, None, |c| c.delete(false)),
         }
     }
 }
@@ -219,14 +238,46 @@ impl<T: DupSort> DbDupCursorRW<T> for Cursor<RW, T> {
     fn delete_current_duplicates(&mut self) -> Result<(), DatabaseError> {
         match self {
             Self::Native(c) => c.delete_current_duplicates(),
-            Self::Packed(c) => c.delete(true),
+            Self::Packed(c) => {
+                c.record(Operation::CursorDeleteCurrentDuplicates, None, |c| c.delete(true))
+            }
         }
     }
     fn append_dup(&mut self, key: T::Key, value: T::Value) -> Result<(), DatabaseError> {
         match self {
             Self::Native(c) => c.append_dup(key, value),
             Self::Packed(c) => {
-                c.write(key.encode().as_ref(), encoded_value::<T>(&value).as_slice(), false, true)
+                let value = encoded_value::<T>(&value);
+                c.record(Operation::CursorAppendDup, Some(value.len()), |c| {
+                    c.write(key.encode().as_ref(), &value, false, true)
+                })
+            }
+        }
+    }
+
+    fn replace_by_subkey(
+        &mut self,
+        key: T::Key,
+        subkey: T::SubKey,
+        value: Option<&T::Value>,
+    ) -> Result<bool, DatabaseError> {
+        match self {
+            Self::Native(_) => Ok(false),
+            Self::Packed(c) => {
+                let value = value.map(encoded_value::<T>);
+                let operation = if value.is_some() {
+                    Operation::CursorUpsert
+                } else {
+                    Operation::CursorDeleteCurrent
+                };
+                c.record(operation, value.as_ref().map(Vec::len), |c| {
+                    c.replace_by_subkey(
+                        key.encode().as_ref(),
+                        subkey.encode().as_ref(),
+                        value.as_deref(),
+                    )
+                })?;
+                Ok(true)
             }
         }
     }
@@ -236,4 +287,40 @@ fn encoded_value<T: Table>(value: &T::Value) -> Vec<u8> {
     let mut bytes = Vec::new();
     value.compress_to_buf(&mut bytes);
     bytes
+}
+
+/// Packed operations use the same cached metric handles as native cursor writes.
+#[derive(Debug)]
+pub(crate) struct MeasuredLogical<K: TransactionKind> {
+    logical: Logical<K>,
+    metrics: Option<TableOperationMetrics>,
+}
+
+impl<K: TransactionKind> Deref for MeasuredLogical<K> {
+    type Target = Logical<K>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.logical
+    }
+}
+
+impl<K: TransactionKind> DerefMut for MeasuredLogical<K> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.logical
+    }
+}
+
+impl<K: TransactionKind> MeasuredLogical<K> {
+    fn record<R>(
+        &mut self,
+        operation: Operation,
+        value_size: Option<usize>,
+        f: impl FnOnce(&mut Logical<K>) -> R,
+    ) -> R {
+        if let Some(metrics) = &self.metrics {
+            metrics[operation.index()].record(value_size, || f(&mut self.logical))
+        } else {
+            f(&mut self.logical)
+        }
+    }
 }

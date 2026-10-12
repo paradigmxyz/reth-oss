@@ -1484,6 +1484,580 @@ fn write_complete_trie(tx: &impl DbTxMut, scope: B256, rows: &[StorageEntry]) {
 }
 
 #[test]
+fn commit_repair_reuses_exact_generation_upper_nodes_without_hashing_leaves() {
+    for mode in [PackingMode::Dense, PackingMode::Integer32] {
+        for depth in [3, ADAPTIVE_TRIE_DEPTH] {
+            let dir = tempdir().unwrap();
+            let db = init_db(
+                dir.path(),
+                DatabaseArguments::test().with_experimental_packing(Some(mode), depth),
+            )
+            .unwrap();
+            let scope = B256::repeat_byte(47);
+            let mut rows = fixture(1400);
+            let tx = db.tx_mut().unwrap();
+            for row in &rows {
+                tx.put::<HashedStorages>(scope, *row).unwrap();
+            }
+            tx.commit().unwrap();
+            let old = db.tx().unwrap();
+            let old_nodes = trie_nodes(&rows);
+
+            let tx = db.tx_mut().unwrap();
+            rows[3].value = U256::from(4747);
+            tx.put::<HashedStorages>(scope, rows[3]).unwrap();
+            let shared = tx.packing.as_ref().unwrap().clone();
+            // A dirty logical trie read reconstructs and caches the final upper map.
+            assert_eq!(
+                logical_nodes(&mut tx.cursor_dup_read::<PackedStoragesTrie>().unwrap(), scope),
+                trie_nodes(&rows)
+            );
+            // Walking all regions can legitimately evict the upper map from the bounded LRU.
+            // A new cursor refreshes that final-generation map immediately before commit.
+            let refreshed = tx
+                .cursor_dup_read::<PackedStoragesTrie>()
+                .unwrap()
+                .seek_by_key_subkey(scope, Nibbles::default().into())
+                .unwrap()
+                .unwrap();
+            assert_eq!(refreshed.node, trie_nodes(&rows)[&refreshed.nibbles.0]);
+            let generation = shared.revision(scope).unwrap().0;
+            assert!(shared.cached(scope, None, (generation, 0)).unwrap().is_some());
+            // No completion marker is supplied: commit must still reconcile physical rows.
+            tx.commit().unwrap();
+            assert_eq!(shared.repaired_contracts.load(std::sync::atomic::Ordering::Relaxed), 1);
+            assert_eq!(shared.repair_leaves.load(std::sync::atomic::Ordering::Relaxed), 0);
+            assert_eq!(shared.completed_contracts.load(std::sync::atomic::Ordering::Relaxed), 0);
+            assert_eq!(
+                logical_nodes(
+                    &mut db.tx().unwrap().cursor_dup_read::<PackedStoragesTrie>().unwrap(),
+                    scope
+                ),
+                trie_nodes(&rows)
+            );
+            assert_eq!(
+                logical_nodes(&mut old.cursor_dup_read::<PackedStoragesTrie>().unwrap(), scope),
+                old_nodes
+            );
+        }
+    }
+}
+
+#[test]
+fn commit_repair_rejects_cached_upper_nodes_after_mutations_and_clears() {
+    for depth in [3, ADAPTIVE_TRIE_DEPTH] {
+        for change in 0..3 {
+            let dir = tempdir().unwrap();
+            let db = init_db(
+                dir.path(),
+                DatabaseArguments::test()
+                    .with_experimental_packing(Some(PackingMode::Dense), depth),
+            )
+            .unwrap();
+            let scope = B256::repeat_byte(48);
+            let mut rows = fixture(1400);
+            let tx = db.tx_mut().unwrap();
+            for row in &rows {
+                tx.put::<HashedStorages>(scope, *row).unwrap();
+            }
+            tx.commit().unwrap();
+
+            let tx = db.tx_mut().unwrap();
+            rows[3].value = U256::from(4848);
+            tx.put::<HashedStorages>(scope, rows[3]).unwrap();
+            assert_eq!(
+                logical_nodes(&mut tx.cursor_dup_read::<PackedStoragesTrie>().unwrap(), scope),
+                trie_nodes(&rows)
+            );
+            // The full logical scan may evict the upper map while loading region maps.
+            // Refresh through a new cursor so the invalidation assertions start with a cache hit.
+            let refreshed = tx
+                .cursor_dup_read::<PackedStoragesTrie>()
+                .unwrap()
+                .seek_by_key_subkey(scope, Nibbles::default().into())
+                .unwrap()
+                .unwrap();
+            assert_eq!(refreshed.node, trie_nodes(&rows)[&refreshed.nibbles.0]);
+            let shared = tx.packing.as_ref().unwrap().clone();
+            let cached_generation = shared.revision(scope).unwrap().0;
+            assert!(shared.cached(scope, None, (cached_generation, 0)).unwrap().is_some());
+
+            match change {
+                0 => {
+                    rows[4].value = U256::from(4949);
+                    tx.put::<HashedStorages>(scope, rows[4]).unwrap();
+                }
+                1 | 2 => {
+                    if change == 1 {
+                        tx.delete::<HashedStorages>(scope, None).unwrap();
+                    } else {
+                        tx.clear::<HashedStorages>().unwrap();
+                    }
+                    rows = rows[500..900].to_vec();
+                    for row in &rows {
+                        tx.put::<HashedStorages>(scope, *row).unwrap();
+                    }
+                }
+                _ => unreachable!(),
+            }
+            let generation = shared.revision(scope).unwrap().0;
+            assert_ne!(generation, cached_generation);
+            assert!(shared.cached(scope, None, (generation, 0)).unwrap().is_none());
+            tx.commit().unwrap();
+            assert_eq!(shared.repaired_contracts.load(std::sync::atomic::Ordering::Relaxed), 1);
+            assert!(shared.repair_leaves.load(std::sync::atomic::Ordering::Relaxed) > 0);
+            assert_eq!(
+                logical_nodes(
+                    &mut db.tx().unwrap().cursor_dup_read::<PackedStoragesTrie>().unwrap(),
+                    scope
+                ),
+                trie_nodes(&rows)
+            );
+        }
+    }
+}
+
+#[test]
+fn adaptive_replacement_preserves_boundaries_and_unrelated_region_cache() {
+    let dir = tempdir().unwrap();
+    let db = init_db(
+        dir.path(),
+        DatabaseArguments::test()
+            .with_experimental_packing(Some(PackingMode::Dense), ADAPTIVE_TRIE_DEPTH),
+    )
+    .unwrap();
+    let scope = B256::repeat_byte(41);
+    let mut rows = fixture(1400);
+    let tx = db.tx_mut().unwrap();
+    for row in &rows {
+        tx.put::<HashedStorages>(scope, *row).unwrap();
+    }
+    tx.commit().unwrap();
+    let tx = db.tx_mut().unwrap();
+    let shared = tx.packing.as_ref().unwrap().clone();
+    let before = shared.frontier(tx.inner(), scope).unwrap();
+    let layout = shared.layout_frontier(tx.inner(), scope).unwrap();
+    let touched = before.region(rows[0].key);
+    let other = rows.iter().find(|row| before.region(row.key) != touched).unwrap();
+    let other_prefix = before.region(other.key);
+    let other_generation = shared.region_generation(scope, other_prefix).unwrap();
+    rows[0].value = U256::from(99999);
+    let mut cursor = tx.cursor_dup_write::<HashedStorages>().unwrap();
+    assert!(cursor.replace_by_subkey(scope, rows[0].key, Some(&rows[0])).unwrap());
+    assert_eq!(*shared.frontier(tx.inner(), scope).unwrap(), *before);
+    assert!(std::sync::Arc::ptr_eq(&layout, &shared.layout_frontier(tx.inner(), scope).unwrap()));
+    assert_eq!(shared.region_generation(scope, other_prefix).unwrap(), other_generation);
+    assert_ne!(shared.region_generation(scope, touched).unwrap(), other_generation);
+    let generation = shared.revision(scope).unwrap().0;
+    assert!(cursor.replace_by_subkey(scope, rows[0].key, Some(&rows[0])).unwrap());
+    assert_eq!(shared.revision(scope).unwrap().0, generation);
+    drop(cursor);
+    tx.commit().unwrap();
+    assert_eq!(
+        logical_nodes(
+            &mut db.tx().unwrap().cursor_dup_read::<PackedStoragesTrie>().unwrap(),
+            scope
+        ),
+        trie_nodes(&rows)
+    );
+}
+
+#[test]
+fn adaptive_completed_updates_reuse_current_root_summary() {
+    let dir = tempdir().unwrap();
+    let db = init_db(
+        dir.path(),
+        DatabaseArguments::test()
+            .with_experimental_packing(Some(PackingMode::Dense), ADAPTIVE_TRIE_DEPTH),
+    )
+    .unwrap();
+    let scope = B256::repeat_byte(42);
+    let mut rows = fixture(1400);
+    let tx = db.tx_mut().unwrap();
+    for row in &rows {
+        tx.put::<HashedStorages>(scope, *row).unwrap();
+    }
+    tx.commit().unwrap();
+    let old = db.tx().unwrap();
+    let old_nodes = trie_nodes(&rows);
+    let tx = db.tx_mut().unwrap();
+    rows[3].value = U256::from(4242);
+    tx.put::<HashedStorages>(scope, rows[3]).unwrap();
+    let shared = tx.packing.as_ref().unwrap().clone();
+    assert_eq!(
+        logical_nodes(&mut tx.cursor_dup_read::<PackedStoragesTrie>().unwrap(), scope),
+        trie_nodes(&rows)
+    );
+    for (path, node) in trie_nodes(&rows) {
+        if !path.is_empty() {
+            tx.put::<PackedStoragesTrie>(scope, TrieEntry { nibbles: path.into(), node }).unwrap();
+        }
+    }
+    tx.finish_storage_trie_updates(scope).unwrap();
+    tx.commit().unwrap();
+    assert_eq!(shared.repaired_contracts.load(std::sync::atomic::Ordering::Relaxed), 0);
+    assert_eq!(shared.completed_contracts.load(std::sync::atomic::Ordering::Relaxed), 1);
+    assert_eq!(
+        logical_nodes(
+            &mut db.tx().unwrap().cursor_dup_read::<PackedStoragesTrie>().unwrap(),
+            scope
+        ),
+        trie_nodes(&rows)
+    );
+    assert_eq!(
+        logical_nodes(&mut old.cursor_dup_read::<PackedStoragesTrie>().unwrap(), scope),
+        old_nodes
+    );
+}
+
+#[test]
+fn adaptive_completion_rejects_summary_from_earlier_storage_generation() {
+    let dir = tempdir().unwrap();
+    let db = init_db(
+        dir.path(),
+        DatabaseArguments::test()
+            .with_experimental_packing(Some(PackingMode::Dense), ADAPTIVE_TRIE_DEPTH),
+    )
+    .unwrap();
+    let scope = B256::repeat_byte(43);
+    let mut rows = fixture(1400);
+    let tx = db.tx_mut().unwrap();
+    for row in &rows {
+        tx.put::<HashedStorages>(scope, *row).unwrap();
+    }
+    tx.commit().unwrap();
+    let tx = db.tx_mut().unwrap();
+    rows[3].value = U256::from(4242);
+    tx.put::<HashedStorages>(scope, rows[3]).unwrap();
+    assert_eq!(
+        logical_nodes(&mut tx.cursor_dup_read::<PackedStoragesTrie>().unwrap(), scope),
+        trie_nodes(&rows)
+    );
+    rows[4].value = U256::from(4343);
+    tx.put::<HashedStorages>(scope, rows[4]).unwrap();
+    for (path, node) in trie_nodes(&rows) {
+        tx.put::<PackedStoragesTrie>(scope, TrieEntry { nibbles: path.into(), node }).unwrap();
+    }
+    tx.finish_storage_trie_updates(scope).unwrap();
+    let shared = tx.packing.as_ref().unwrap().clone();
+    tx.commit().unwrap();
+    assert_eq!(shared.repaired_contracts.load(std::sync::atomic::Ordering::Relaxed), 1);
+    assert_eq!(
+        logical_nodes(
+            &mut db.tx().unwrap().cursor_dup_read::<PackedStoragesTrie>().unwrap(),
+            scope
+        ),
+        trie_nodes(&rows)
+    );
+}
+
+#[test]
+fn canonical_root_summary_skips_repair_without_a_reconstruction_cache() {
+    let dir = tempdir().unwrap();
+    let db = init_db(
+        dir.path(),
+        DatabaseArguments::test()
+            .with_experimental_packing(Some(PackingMode::Dense), ADAPTIVE_TRIE_DEPTH),
+    )
+    .unwrap();
+    let scope = B256::repeat_byte(46);
+    let mut rows = fixture(1400);
+    let tx = db.tx_mut().unwrap();
+    for row in &rows {
+        tx.put::<HashedStorages>(scope, *row).unwrap();
+    }
+    tx.commit().unwrap();
+    let tx = db.tx_mut().unwrap();
+    rows[3].value = U256::from(4646);
+    tx.put::<HashedStorages>(scope, rows[3]).unwrap();
+    let shared = tx.packing.as_ref().unwrap().clone();
+    let generation = shared.revision(scope).unwrap().0;
+    assert!(shared.cached(scope, None, (generation, 0)).unwrap().is_none());
+    let mut builder = HashBuilder::default().with_updates(true);
+    for row in &rows {
+        builder
+            .add_leaf(Nibbles::unpack(row.key), alloy_rlp::encode_fixed_size(&row.value).as_ref());
+    }
+    builder.root();
+    let (_, mut nodes) = builder.split();
+    let root = nodes.remove(&Nibbles::default()).unwrap();
+    let mut cursor = tx.cursor_dup_write::<PackedStoragesTrie>().unwrap();
+    for (path, node) in nodes {
+        let entry = TrieEntry { nibbles: path.into(), node };
+        assert!(cursor.replace_by_subkey(scope, entry.nibbles.clone(), Some(&entry)).unwrap());
+    }
+    let entry = TrieEntry { nibbles: Nibbles::default().into(), node: root };
+    assert!(cursor.replace_by_subkey(scope, entry.nibbles.clone(), Some(&entry)).unwrap());
+    drop(cursor);
+    tx.finish_storage_trie_updates(scope).unwrap();
+    tx.commit().unwrap();
+    assert_eq!(shared.repaired_contracts.load(std::sync::atomic::Ordering::Relaxed), 0);
+    assert_eq!(
+        logical_nodes(
+            &mut db.tx().unwrap().cursor_dup_read::<PackedStoragesTrie>().unwrap(),
+            scope
+        ),
+        trie_nodes(&rows)
+    );
+}
+
+#[test]
+fn read_regions_reuse_authenticated_content_across_commits_without_writer_sharing() {
+    for mode in [PackingMode::Dense, PackingMode::Integer32] {
+        for depth in [2, ADAPTIVE_TRIE_DEPTH] {
+            let dir = tempdir().unwrap();
+            let db = init_db(
+                dir.path(),
+                DatabaseArguments::test().with_experimental_packing(Some(mode), depth),
+            )
+            .unwrap();
+            let scope = B256::repeat_byte(61);
+            let other = B256::repeat_byte(62);
+            let mut rows = fixture(4096);
+            let tx = db.tx_mut().unwrap();
+            for row in &rows {
+                tx.put::<HashedStorages>(scope, *row).unwrap();
+            }
+            tx.commit().unwrap();
+            let old = db.tx().unwrap();
+            let expected = trie_nodes(&rows);
+            let frontier = (depth == ADAPTIVE_TRIE_DEPTH).then(|| {
+                old.packing.as_ref().unwrap().layout_frontier(old.inner(), scope).unwrap()
+            });
+            let path = *expected
+                .keys()
+                .find(|path| {
+                    frontier
+                        .as_ref()
+                        .map_or(path.len() >= depth, |frontier| !frontier.retains(path))
+                })
+                .unwrap();
+            let inside =
+                rows.iter().position(|row| Nibbles::unpack(row.key).starts_with(&path)).unwrap();
+            let prefix = frontier
+                .as_ref()
+                .map_or_else(|| path.slice(..depth), |frontier| frontier.region(rows[inside].key));
+            assert!(!prefix.is_empty());
+            let outside = rows
+                .iter()
+                .position(|row| Nibbles::unpack(row.key).slice(..1) != prefix.slice(..1))
+                .unwrap();
+            let mut old_cursor = old.cursor_dup_read::<PackedStoragesTrie>().unwrap();
+            assert_eq!(
+                old_cursor.seek_by_key_subkey(scope, path.into()).unwrap().unwrap().node,
+                expected[&path]
+            );
+            assert_eq!(region_stats(&old_cursor), 1);
+
+            let tx = db.tx_mut().unwrap();
+            tx.put::<HashedStorages>(other, StorageEntry::new(rows[0].key, U256::ONE)).unwrap();
+            tx.commit().unwrap();
+            {
+                let fresh = db.tx().unwrap();
+                let mut cursor = fresh.cursor_dup_read::<PackedStoragesTrie>().unwrap();
+                assert_eq!(
+                    cursor.seek_by_key_subkey(scope, path.into()).unwrap().unwrap().node,
+                    expected[&path]
+                );
+                assert_eq!(
+                    region_stats(&cursor),
+                    0,
+                    "an unrelated commit must preserve the authenticated region"
+                );
+            }
+            let tx = db.tx_mut().unwrap();
+            let mut writer_cursor = tx.cursor_dup_read::<PackedStoragesTrie>().unwrap();
+            assert_eq!(
+                writer_cursor.seek_by_key_subkey(scope, path.into()).unwrap().unwrap().node,
+                expected[&path]
+            );
+            assert_eq!(
+                region_stats(&writer_cursor),
+                1,
+                "writer cursors cannot consume the immutable content cache"
+            );
+            drop(writer_cursor);
+            rows[outside].value = U256::from(616161);
+            tx.put::<HashedStorages>(scope, rows[outside]).unwrap();
+            tx.commit().unwrap();
+            {
+                let fresh = db.tx().unwrap();
+                let mut cursor = fresh.cursor_dup_read::<PackedStoragesTrie>().unwrap();
+                assert_eq!(
+                    cursor.seek_by_key_subkey(scope, path.into()).unwrap().unwrap().node,
+                    expected[&path]
+                );
+                assert_eq!(
+                    region_stats(&cursor),
+                    0,
+                    "a mutation outside the committed child must preserve the region"
+                );
+            }
+            let tx = db.tx_mut().unwrap();
+            rows[inside].value = U256::from(626262);
+            tx.put::<HashedStorages>(scope, rows[inside]).unwrap();
+            tx.commit().unwrap();
+            let fresh = db.tx().unwrap();
+            let mut cursor = fresh.cursor_dup_read::<PackedStoragesTrie>().unwrap();
+            assert_eq!(
+                cursor.seek_by_key_subkey(scope, path.into()).unwrap().unwrap().node,
+                trie_nodes(&rows)[&path]
+            );
+            assert_eq!(
+                region_stats(&cursor),
+                1,
+                "a changed child hash must reject the previous content"
+            );
+            assert_eq!(
+                old_cursor.seek_by_key_subkey(scope, path.into()).unwrap().unwrap().node,
+                expected[&path]
+            );
+            let mut another_old = old.cursor_dup_read::<PackedStoragesTrie>().unwrap();
+            assert_eq!(
+                another_old.seek_by_key_subkey(scope, path.into()).unwrap().unwrap().node,
+                expected[&path]
+            );
+            assert_eq!(
+                region_stats(&another_old),
+                0,
+                "an old snapshot keeps its original authenticated content"
+            );
+        }
+    }
+}
+
+#[test]
+fn batched_upper_updates_match_canonical_nodes_with_partial_batches_and_skips() {
+    for count in [257, 513] {
+        for depth in [3, ADAPTIVE_TRIE_DEPTH] {
+            let dir = tempdir().unwrap();
+            let db = init_db(
+                dir.path(),
+                DatabaseArguments::test()
+                    .with_experimental_packing(Some(PackingMode::Dense), depth),
+            )
+            .unwrap();
+            let scope = B256::repeat_byte(63);
+            let mut rows = fixture(count);
+            let tx = db.tx_mut().unwrap();
+            for row in &rows {
+                tx.put::<HashedStorages>(scope, *row).unwrap();
+            }
+            tx.commit().unwrap();
+            let tx = db.tx_mut().unwrap();
+            rows[0].value = U256::from(636363);
+            tx.put::<HashedStorages>(scope, rows[0]).unwrap();
+            let shared = tx.packing.as_ref().unwrap();
+            let frontier =
+                (depth == ADAPTIVE_TRIE_DEPTH).then(|| shared.frontier(tx.inner(), scope).unwrap());
+            let mut builder = HashBuilder::default().with_updates(true);
+            for row in &rows {
+                builder.add_leaf(
+                    Nibbles::unpack(row.key),
+                    alloy_rlp::encode_fixed_size(&row.value).as_ref(),
+                );
+            }
+            builder.root();
+            let (_, updated) = builder.split();
+            let expected = updated
+                .into_iter()
+                .filter(|(path, _)| {
+                    frontier.as_ref().map_or(path.len() < depth, |frontier| frontier.retains(path))
+                })
+                .collect::<BTreeMap<_, _>>();
+            let (base, skips) = shared.unchanged(scope).unwrap();
+            assert!(!skips.is_empty());
+            let empty = BTreeMap::new();
+            for with_skips in [false, true] {
+                let (nodes, leaves) = store::rebuild_upper(
+                    scope,
+                    depth,
+                    frontier.as_deref(),
+                    if with_skips { base.as_ref() } else { &empty },
+                    if with_skips { &skips } else { &[] },
+                    |(_, slot), inclusive| {
+                        let index = rows
+                            .partition_point(|row| row.key < slot || !inclusive && row.key == slot);
+                        Ok(rows.get(index).copied().map(|row| (scope, row)))
+                    },
+                )
+                .unwrap();
+                assert_eq!(nodes, expected);
+                if with_skips {
+                    assert!(leaves < count);
+                } else {
+                    assert_eq!(leaves, count);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn physical_table_inventory_includes_exact_experimental_layout() {
+    for depth in [3, FULL_TRIE_DEPTH, ADAPTIVE_TRIE_DEPTH] {
+        let dir = tempdir().unwrap();
+        let db = init_db(
+            dir.path(),
+            DatabaseArguments::test().with_experimental_packing(Some(PackingMode::Dense), depth),
+        )
+        .unwrap();
+        let names = db.physical_table_names().collect::<Vec<_>>();
+        assert!(names.contains(&store::TABLE));
+        assert_eq!(names.contains(&frontier::TABLE), depth == ADAPTIVE_TRIE_DEPTH);
+        let tx = db.tx().unwrap();
+        for name in names {
+            assert!(tx.inner().open_db(Some(name)).is_ok(), "{name}");
+        }
+    }
+    let dir = tempdir().unwrap();
+    let db = init_db(dir.path(), DatabaseArguments::test()).unwrap();
+    let names = db.physical_table_names().collect::<Vec<_>>();
+    assert!(!names.contains(&store::TABLE));
+    assert!(!names.contains(&frontier::TABLE));
+}
+
+#[test]
+fn packed_entry_count_tracks_final_overlay_wipes_and_snapshots() {
+    for depth in [3, ADAPTIVE_TRIE_DEPTH] {
+        let dir = tempdir().unwrap();
+        let db = init_db(
+            dir.path(),
+            DatabaseArguments::test().with_experimental_packing(Some(PackingMode::Dense), depth),
+        )
+        .unwrap();
+        let scope = B256::repeat_byte(44);
+        let other = B256::repeat_byte(45);
+        let rows = fixture(800);
+        let tx = db.tx_mut().unwrap();
+        for row in &rows {
+            tx.put::<HashedStorages>(scope, *row).unwrap();
+        }
+        tx.put::<HashedStorages>(other, rows[0]).unwrap();
+        assert_eq!(tx.entries::<HashedStorages>().unwrap(), 801);
+        tx.commit().unwrap();
+        let old = db.tx().unwrap();
+        assert_eq!(old.entries::<HashedStorages>().unwrap(), 801);
+        let tx = db.tx_mut().unwrap();
+        tx.put::<HashedStorages>(scope, StorageEntry::new(rows[0].key, U256::from(17))).unwrap();
+        assert_eq!(tx.entries::<HashedStorages>().unwrap(), 801);
+        tx.delete::<HashedStorages>(scope, Some(rows[1])).unwrap();
+        assert_eq!(tx.entries::<HashedStorages>().unwrap(), 800);
+        tx.delete::<HashedStorages>(scope, None).unwrap();
+        assert_eq!(tx.entries::<HashedStorages>().unwrap(), 1);
+        tx.put::<HashedStorages>(scope, rows[2]).unwrap();
+        assert_eq!(tx.entries::<HashedStorages>().unwrap(), 2);
+        tx.clear::<HashedStorages>().unwrap();
+        assert_eq!(tx.entries::<HashedStorages>().unwrap(), 0);
+        tx.put::<HashedStorages>(scope, rows[3]).unwrap();
+        assert_eq!(tx.entries::<HashedStorages>().unwrap(), 1);
+        tx.commit().unwrap();
+        assert_eq!(old.entries::<HashedStorages>().unwrap(), 801);
+        assert_eq!(db.tx().unwrap().entries::<HashedStorages>().unwrap(), 1);
+    }
+}
+
+#[test]
 fn adaptive_frontiers_split_merge_reopen_and_abort_atomically() {
     for mode in [PackingMode::Dense, PackingMode::Integer32] {
         let dir = tempdir().unwrap();

@@ -10,6 +10,7 @@ mod frontier;
 mod store;
 #[cfg(test)]
 mod tests;
+pub(crate) use cache::SnapshotTrieCache;
 pub(crate) use cursor::{Logical, Move};
 pub(crate) use store::{Shared, Store, TABLE};
 

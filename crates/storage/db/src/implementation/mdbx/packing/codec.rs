@@ -112,22 +112,35 @@ impl<'a> Blob<'a> {
         Ok(StorageEntry::new(self.key(row), value))
     }
 
+    #[cfg(test)]
     pub(crate) fn rows(&self) -> Result<Vec<StorageEntry>, DatabaseError> {
-        if self.mode == PackingMode::Dense || self.anchor.is_some() {
-            return (0..self.count).map(|i| self.row(i)).collect()
-        }
         let mut rows = Vec::with_capacity(self.count);
+        self.rows_into(&mut rows)?;
+        Ok(rows)
+    }
+
+    /// Append decoded rows without discarding the caller's reusable allocation.
+    pub(crate) fn rows_into(&self, rows: &mut Vec<StorageEntry>) -> Result<(), DatabaseError> {
+        rows.reserve(self.count);
+        if self.mode == PackingMode::Dense || self.anchor.is_some() {
+            for i in 0..self.count {
+                rows.push(self.row(i)?);
+            }
+            return Ok(());
+        }
         for group in 0..self.count.div_ceil(32) {
             let start = group * 32;
-            let values = decode_group(self.part(group)?, (self.count - start).min(32))?;
+            let count = (self.count - start).min(32);
+            let values = decode_group_array(self.part(group)?, count)?;
             rows.extend(
                 values
                     .into_iter()
+                    .take(count)
                     .enumerate()
                     .map(|(i, v)| StorageEntry::new(self.key(start + i), v)),
             );
         }
-        Ok(rows)
+        Ok(())
     }
 
     fn part(&self, index: usize) -> Result<&[u8], DatabaseError> {
@@ -230,7 +243,8 @@ impl<'a> Blob<'a> {
 /// Owned validated blob. Its borrowed views need no repeated checksum or index scan.
 #[derive(Debug, Clone)]
 pub(crate) struct OwnedBlob {
-    bytes: Arc<[u8]>,
+    // Move the MDBX-owned Vec behind the Arc without copying its full payload again.
+    bytes: Arc<Vec<u8>>,
     count: usize,
     width: usize,
     index: usize,
@@ -249,7 +263,7 @@ impl OwnedBlob {
         let blob = Blob::parse_record(&bytes, anchor, mode)?;
         let (count, width, index, payload) = (blob.count, blob.width, blob.index, blob.payload);
         let anchor = blob.anchor;
-        Ok(Self { bytes: bytes.into(), count, width, index, payload, mode, anchor, group: None })
+        Ok(Self { bytes: Arc::new(bytes), count, width, index, payload, mode, anchor, group: None })
     }
 
     fn view(&self) -> Blob<'_> {
@@ -269,7 +283,8 @@ impl OwnedBlob {
     }
 
     pub(crate) fn byte_len(&self) -> usize {
-        self.bytes.len()
+        // Cache budgets must charge reserved bytes, not merely the serialized length.
+        self.bytes.capacity()
     }
 
     pub(crate) fn key(&self, row: usize) -> B256 {
@@ -278,10 +293,10 @@ impl OwnedBlob {
 
     pub(crate) fn row(&mut self, row: usize) -> Result<StorageEntry, DatabaseError> {
         if row >= self.count {
-            return Err(DatabaseError::Decode)
+            return Err(DatabaseError::Decode);
         }
         if self.mode == PackingMode::Dense || self.anchor.is_some() {
-            return self.view().row(row)
+            return self.view().row(row);
         }
         let group = row / 32;
         if self.group.as_ref().is_none_or(|(g, _)| *g != group) {
@@ -314,7 +329,7 @@ impl OwnedBlob {
             }
         }
         if bound.is_none() {
-            return if reverse { self.count.checked_sub(1) } else { (self.count > 0).then_some(0) }
+            return if reverse { self.count.checked_sub(1) } else { (self.count > 0).then_some(0) };
         }
         if reverse {
             lo.checked_sub(1)
@@ -324,100 +339,210 @@ impl OwnedBlob {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn encode(rows: &[StorageEntry], mode: PackingMode) -> Result<Vec<u8>, DatabaseError> {
-    if rows.windows(2).any(|p| p[0].key >= p[1].key) {
-        return Err(DatabaseError::Decode);
-    }
-    let mut payload = Vec::new();
-    let mut offsets = Vec::with_capacity(rows.len() + 1);
-    if mode == PackingMode::Dense {
-        for row in rows {
-            offsets.push(payload.len());
-            row.value.to_compact(&mut payload);
-        }
-    } else {
-        for group in rows.chunks(32) {
-            offsets.push(payload.len());
-            encode_group(group, &mut payload);
-        }
-    }
-    offsets.push(payload.len());
-    let width = if payload.len() <= u16::MAX as usize { 2 } else { 4 };
-    let mut out =
-        Vec::with_capacity(HEADER + rows.len() * 32 + offsets.len() * width + payload.len());
-    out.extend_from_slice(MAGIC);
-    out.extend_from_slice(&[if mode == PackingMode::Dense { 1 } else { 2 }, width as u8]);
-    out.extend_from_slice(
-        &u32::try_from(rows.len()).map_err(|_| DatabaseError::Decode)?.to_le_bytes(),
-    );
-    out.extend_from_slice(
-        &u32::try_from(payload.len()).map_err(|_| DatabaseError::Decode)?.to_le_bytes(),
-    );
-    out.extend_from_slice(&[0; 8]);
-    for row in rows {
-        out.extend_from_slice(row.key.as_slice());
-    }
-    for offset in offsets {
-        if width == 2 {
-            out.extend_from_slice(&(offset as u16).to_le_bytes());
-        } else {
-            out.extend_from_slice(&(offset as u32).to_le_bytes());
-        }
-    }
-    out.extend_from_slice(&payload);
-    let sum = checksum(&out);
-    out[18..26].copy_from_slice(&sum.to_le_bytes());
-    Ok(out)
+    let mut buffer = CodecBuffer::default();
+    buffer.encode_full(rows, mode)?;
+    Ok(buffer.bytes)
 }
 
 /// Inline small records omit the first slot already stored in the physical key. Singleton
 /// records also omit the count and lengths; larger inline records are bounded by encoded bytes.
+#[cfg(test)]
 pub(crate) fn encode_record(
     rows: &[StorageEntry],
     scope: B256,
     mode: PackingMode,
 ) -> Result<Vec<u8>, DatabaseError> {
-    if rows.is_empty() || rows.windows(2).any(|p| p[0].key >= p[1].key) {
-        return Err(DatabaseError::Decode);
-    }
-    // Even zero-width values cannot fit nine rows below the inline byte limit.
-    if rows.len() > 8 {
-        return encode(rows, mode);
-    }
-    let singleton = rows.len() == 1;
-    let inline_size = INLINE_HEADER +
-        if singleton { 0 } else { 1 + (rows.len() - 1) * 32 + rows.len() } +
-        rows.iter().map(|r| r.value.byte_len()).sum::<usize>();
-    if inline_size > INLINE_LIMIT {
-        return encode(rows, mode);
-    }
-    let mut out = vec![0; INLINE_HEADER];
-    out[0] = 0x80 | u8::from(mode == PackingMode::Integer32) | if singleton { 0 } else { 2 };
-    if !singleton {
-        out.push(rows.len() as u8);
-        for row in &rows[1..] {
+    let mut buffer = CodecBuffer::default();
+    buffer.encode_record(rows, scope, mode)?;
+    Ok(buffer.bytes)
+}
+
+/// Reusable output allocation; candidates are selected by size before any bytes are written.
+#[derive(Debug, Default)]
+pub(crate) struct CodecBuffer {
+    bytes: Vec<u8>,
+    groups: Vec<(U256, usize, bool, usize)>,
+}
+
+impl CodecBuffer {
+    fn encode_full(
+        &mut self,
+        rows: &[StorageEntry],
+        mode: PackingMode,
+    ) -> Result<(), DatabaseError> {
+        if rows.windows(2).any(|p| p[0].key >= p[1].key) {
+            return Err(DatabaseError::Decode);
+        }
+        self.groups.clear();
+        let payload_len = if mode == PackingMode::Dense {
+            payload_len(rows, mode)
+        } else {
+            self.groups.extend(rows.chunks(32).map(group_plan));
+            self.groups.iter().map(|plan| plan.3).sum()
+        };
+        let width = if payload_len <= u16::MAX as usize { 2 } else { 4 };
+        let entries = if mode == PackingMode::Dense { rows.len() } else { rows.len().div_ceil(32) };
+        let count = u32::try_from(rows.len()).map_err(|_| DatabaseError::Decode)?;
+        let len = u32::try_from(payload_len).map_err(|_| DatabaseError::Decode)?;
+        self.bytes.clear();
+        self.bytes.reserve(HEADER + rows.len() * 32 + (entries + 1) * width + payload_len);
+        let out = &mut self.bytes;
+        out.extend_from_slice(MAGIC);
+        out.extend_from_slice(&[if mode == PackingMode::Dense { 1 } else { 2 }, width as u8]);
+        out.extend_from_slice(&count.to_le_bytes());
+        out.extend_from_slice(&len.to_le_bytes());
+        out.extend_from_slice(&[0; 8]);
+        for row in rows {
             out.extend_from_slice(row.key.as_slice());
         }
+        let index = out.len();
+        out.resize(index + (entries + 1) * width, 0);
+        let payload = out.len();
+        let mut offset = 0;
+        if mode == PackingMode::Dense {
+            for (i, row) in rows.iter().enumerate() {
+                write_offset(out, index + i * width, width, offset);
+                row.value.to_compact(out);
+                offset = out.len() - payload;
+            }
+        } else {
+            for (i, group) in rows.chunks(32).enumerate() {
+                write_offset(out, index + i * width, width, offset);
+                encode_group_with_plan(group, out, self.groups[i]);
+                offset = out.len() - payload;
+            }
+        }
+        write_offset(out, index + entries * width, width, offset);
+        debug_assert_eq!(offset, payload_len);
+        let sum = checksum(out);
+        out[18..26].copy_from_slice(&sum.to_le_bytes());
+        Ok(())
+    }
+
+    pub(crate) fn encode_record(
+        &mut self,
+        rows: &[StorageEntry],
+        scope: B256,
+        mode: PackingMode,
+    ) -> Result<&[u8], DatabaseError> {
+        if rows.is_empty() || rows.windows(2).any(|p| p[0].key >= p[1].key) {
+            return Err(DatabaseError::Decode);
+        }
+        // Even zero-width values cannot fit nine rows in the inline tier.
+        if rows.len() > 8 {
+            self.encode_full(rows, mode)?;
+            return Ok(&self.bytes);
+        }
+        let inline_size = inline_len(rows);
+        // Preserve the legacy tie-breaking rules and every existing byte/tag.
+        if inline_size > INLINE_LIMIT ||
+            (rows.len() > 1 &&
+                mode == PackingMode::Integer32 &&
+                full_len(rows, mode) < inline_size)
+        {
+            self.encode_full(rows, mode)?;
+            return Ok(&self.bytes);
+        }
+        self.bytes.clear();
+        self.bytes.reserve(inline_size);
+        self.bytes.resize(INLINE_HEADER, 0);
+        let singleton = rows.len() == 1;
+        let out = &mut self.bytes;
+        out[0] = 0x80 | u8::from(mode == PackingMode::Integer32) | if singleton { 0 } else { 2 };
+        if !singleton {
+            out.push(rows.len() as u8);
+            for row in &rows[1..] {
+                out.extend_from_slice(row.key.as_slice());
+            }
+            for row in rows {
+                out.push(row.value.byte_len() as u8);
+            }
+        }
         for row in rows {
-            out.push(row.value.byte_len() as u8);
+            row.value.to_compact(out);
+        }
+        let mut anchor = [0; 64];
+        anchor[..32].copy_from_slice(scope.as_slice());
+        anchor[32..].copy_from_slice(rows[0].key.as_slice());
+        let sum = inline_checksum(out, &anchor);
+        out[1..9].copy_from_slice(&sum.to_le_bytes());
+        Ok(out)
+    }
+}
+
+fn write_offset(out: &mut [u8], at: usize, width: usize, offset: usize) {
+    if width == 2 {
+        out[at..at + 2].copy_from_slice(&(offset as u16).to_le_bytes());
+    } else {
+        out[at..at + 4].copy_from_slice(&(offset as u32).to_le_bytes());
+    }
+}
+
+fn payload_len(rows: &[StorageEntry], mode: PackingMode) -> usize {
+    if mode == PackingMode::Dense {
+        rows.iter().map(|r| r.value.byte_len()).sum()
+    } else {
+        rows.chunks(32).map(|group| group_plan(group).3).sum()
+    }
+}
+
+fn full_len(rows: &[StorageEntry], mode: PackingMode) -> usize {
+    let payload = payload_len(rows, mode);
+    let entries = if mode == PackingMode::Dense { rows.len() } else { rows.len().div_ceil(32) };
+    HEADER +
+        rows.len() * 32 +
+        (entries + 1) * if payload <= u16::MAX as usize { 2 } else { 4 } +
+        payload
+}
+
+fn inline_len(rows: &[StorageEntry]) -> usize {
+    INLINE_HEADER +
+        if rows.len() == 1 { 0 } else { 1 + rows.len().saturating_sub(1) * 32 + rows.len() } +
+        rows.iter().map(|r| r.value.byte_len()).sum::<usize>()
+}
+
+/// Exact physical size without creating either encoding candidate.
+pub(crate) fn encoded_record_len(rows: &[StorageEntry], mode: PackingMode) -> usize {
+    if rows.len() > 8 {
+        return full_len(rows, mode);
+    }
+    let inline = inline_len(rows);
+    if inline > INLINE_LIMIT {
+        full_len(rows, mode)
+    } else if rows.len() > 1 && mode == PackingMode::Integer32 {
+        inline.min(full_len(rows, mode))
+    } else {
+        inline
+    }
+}
+
+/// Bound a balanced row chunk by its encoded bytes. Existing readers accept variable counts.
+pub(crate) fn chunk_len(
+    rows: &[StorageEntry],
+    row_limit: usize,
+    byte_limit: usize,
+    mode: PackingMode,
+) -> usize {
+    if rows.is_empty() {
+        return 0;
+    }
+    let row_limit = row_limit.max(1);
+    let balanced = rows.len().div_ceil(rows.len().div_ceil(row_limit)).max(1);
+    if encoded_record_len(&rows[..balanced], mode) <= byte_limit {
+        return balanced;
+    }
+    let (mut lo, mut hi) = (1, balanced);
+    while lo < hi {
+        let mid = lo + (hi - lo).div_ceil(2);
+        if encoded_record_len(&rows[..mid], mode) <= byte_limit {
+            lo = mid;
+        } else {
+            hi = mid - 1;
         }
     }
-    for row in rows {
-        row.value.to_compact(&mut out);
-    }
-    let mut anchor = scope.to_vec();
-    anchor.extend_from_slice(rows[0].key.as_slice());
-    let sum = inline_checksum(&out, &anchor);
-    out[1..9].copy_from_slice(&sum.to_le_bytes());
-    // Integer groups can outperform Compact values, even for small records. Keep the
-    // complete full-record candidate when it is smaller than the inline representation.
-    if !singleton && mode == PackingMode::Integer32 {
-        let full = encode(rows, mode)?;
-        if full.len() < out.len() {
-            return Ok(full);
-        }
-    }
-    Ok(out)
+    lo
 }
 
 fn inline_checksum(bytes: &[u8], anchor: &[u8]) -> u64 {
@@ -430,97 +555,139 @@ fn inline_checksum(bytes: &[u8], anchor: &[u8]) -> u64 {
 
 // Each 32-value group selects raw Compact values or base plus bit-packed U256 deltas.
 // Raw fallback bounds overhead for unrelated high-entropy values.
+#[cfg(test)]
 fn encode_group(rows: &[StorageEntry], out: &mut Vec<u8>) {
-    let mut raw = vec![0];
-    for row in rows {
-        let mut bytes = Vec::new();
-        row.value.to_compact(&mut bytes);
-        raw.push(bytes.len() as u8);
-        raw.extend_from_slice(&bytes);
-    }
-    let base = rows.iter().map(|r| r.value).min().unwrap_or_default();
-    let max = rows.iter().map(|r| r.value).max().unwrap_or_default();
-    let width = (max - base).bit_len();
-    let mut base_bytes = Vec::new();
-    base.to_compact(&mut base_bytes);
-    let size = 4 + base_bytes.len() + (width * rows.len()).div_ceil(8);
-    if size >= raw.len() {
-        out.extend_from_slice(&raw);
-        return
+    encode_group_with_plan(rows, out, group_plan(rows));
+}
+
+fn encode_group_with_plan(
+    rows: &[StorageEntry],
+    out: &mut Vec<u8>,
+    (base, width, packed, _): (U256, usize, bool, usize),
+) {
+    if !packed {
+        out.push(0);
+        for row in rows {
+            out.push(row.value.byte_len() as u8);
+            row.value.to_compact(out);
+        }
+        return;
     }
     out.push(1);
-    out.push(base_bytes.len() as u8);
+    out.push(base.byte_len() as u8);
     out.extend_from_slice(&(width as u16).to_le_bytes());
-    out.extend_from_slice(&base_bytes);
+    base.to_compact(out);
+    if width == 0 {
+        return
+    }
     let start = out.len();
     out.resize(start + (width * rows.len()).div_ceil(8), 0);
     for (i, row) in rows.iter().enumerate() {
         let delta = (row.value - base).to_le_bytes::<32>();
-        for bit in 0..width {
-            if (delta[bit / 8] >> (bit % 8)) & 1 != 0 {
-                let at = i * width + bit;
-                out[start + at / 8] |= 1 << (at % 8);
+        for byte in 0..width.div_ceil(8) {
+            let bits = (width - byte * 8).min(8);
+            let value = delta[byte] & (u8::MAX >> (8 - bits));
+            let at = i * width + byte * 8;
+            let shift = at % 8;
+            out[start + at / 8] |= value << shift;
+            if shift + bits > 8 {
+                out[start + at / 8 + 1] |= value >> (8 - shift);
             }
         }
     }
 }
 
+fn group_plan(rows: &[StorageEntry]) -> (U256, usize, bool, usize) {
+    let mut base = U256::MAX;
+    let mut max = U256::ZERO;
+    let mut raw_size = 1;
+    for row in rows {
+        base = base.min(row.value);
+        max = max.max(row.value);
+        raw_size += 1 + row.value.byte_len();
+    }
+    if rows.is_empty() {
+        base = U256::ZERO;
+    }
+    let width = (max - base).bit_len();
+    let packed_size = 4 + base.byte_len() + (width * rows.len()).div_ceil(8);
+    let packed = packed_size < raw_size;
+    (base, width, packed, packed_size.min(raw_size))
+}
+
 fn compact(bytes: &[u8]) -> Result<U256, DatabaseError> {
     if bytes.len() > 32 {
-        return Err(DatabaseError::Decode)
+        return Err(DatabaseError::Decode);
     }
     let value = U256::from_compact(bytes, bytes.len()).0;
-    let mut canonical = Vec::new();
-    value.to_compact(&mut canonical);
-    if canonical != bytes {
-        return Err(DatabaseError::Decode)
+    let mut canonical = [0; 32];
+    value.to_compact(&mut canonical.as_mut_slice());
+    if value.byte_len() != bytes.len() || canonical[..bytes.len()] != *bytes {
+        return Err(DatabaseError::Decode);
     }
     Ok(value)
 }
 
 fn decode_group(bytes: &[u8], count: usize) -> Result<Vec<U256>, DatabaseError> {
-    let mut values = Vec::with_capacity(count);
+    let values = decode_group_array(bytes, count)?;
+    Ok(values[..count].to_vec())
+}
+
+fn decode_group_array(bytes: &[u8], count: usize) -> Result<[U256; 32], DatabaseError> {
+    if count > 32 {
+        return Err(DatabaseError::Decode);
+    }
+    let mut values = [U256::ZERO; 32];
     match bytes.first() {
         Some(0) => {
             let mut at = 1;
-            for _ in 0..count {
+            for value in &mut values[..count] {
                 let len = *bytes.get(at).ok_or(DatabaseError::Decode)? as usize;
                 at += 1;
                 let end = at + len;
-                values.push(compact(bytes.get(at..end).ok_or(DatabaseError::Decode)?)?);
+                *value = compact(bytes.get(at..end).ok_or(DatabaseError::Decode)?)?;
                 at = end;
             }
             if at != bytes.len() {
-                return Err(DatabaseError::Decode)
+                return Err(DatabaseError::Decode);
             }
         }
         Some(1) => {
             if bytes.len() < 4 {
-                return Err(DatabaseError::Decode)
+                return Err(DatabaseError::Decode);
             }
             let base_len = bytes[1] as usize;
             let width = u16::from_le_bytes([bytes[2], bytes[3]]) as usize;
             if width > 256 || base_len > 32 {
-                return Err(DatabaseError::Decode)
+                return Err(DatabaseError::Decode);
             }
             let start = 4 + base_len;
             if bytes.len() != start + (count * width).div_ceil(8) {
-                return Err(DatabaseError::Decode)
+                return Err(DatabaseError::Decode);
             }
             let base = compact(&bytes[4..start])?;
-            for i in 0..count {
+            if width == 0 {
+                values[..count].fill(base);
+                return Ok(values)
+            }
+            for (i, value) in values[..count].iter_mut().enumerate() {
                 let mut delta = [0u8; 32];
-                for bit in 0..width {
-                    let at = i * width + bit;
-                    delta[bit / 8] |= ((bytes[start + at / 8] >> (at % 8)) & 1) << (bit % 8);
+                for byte in 0..width.div_ceil(8) {
+                    let bits = (width - byte * 8).min(8);
+                    let at = i * width + byte * 8;
+                    let shift = at % 8;
+                    let mut value = bytes[start + at / 8] >> shift;
+                    if shift + bits > 8 {
+                        value |= bytes[start + at / 8 + 1] << (8 - shift);
+                    }
+                    delta[byte] = value & (u8::MAX >> (8 - bits));
                 }
-                values.push(
-                    base.checked_add(U256::from_le_bytes(delta)).ok_or(DatabaseError::Decode)?,
-                );
+                *value =
+                    base.checked_add(U256::from_le_bytes(delta)).ok_or(DatabaseError::Decode)?;
             }
             let used = count * width;
             if !used.is_multiple_of(8) && bytes.last().is_some_and(|b| *b >> (used % 8) != 0) {
-                return Err(DatabaseError::Decode)
+                return Err(DatabaseError::Decode);
             }
         }
         _ => return Err(DatabaseError::Decode),
@@ -594,6 +761,14 @@ mod tests {
             let index=at%bytes.len();bytes[index]=replacement;
             let sum=inline_checksum(&bytes,&anchor);bytes[1..9].copy_from_slice(&sum.to_le_bytes());
             if let Ok(blob)=Blob::parse_record(&bytes,&anchor,PackingMode::Dense) {let _=blob.rows();}
+        }
+
+        #[test]
+        fn group_bytes_match_legacy_encoder(values in prop::collection::vec(any::<[u8;32]>(),1..33)) {
+            let rows:Vec<_>=values.into_iter().enumerate().map(|(i,v)|StorageEntry::new(B256::from(U256::from(i).to_be_bytes::<32>()),U256::from_le_bytes(v))).collect();
+            let mut actual=Vec::new();
+            encode_group(&rows,&mut actual);
+            prop_assert_eq!(actual,legacy_group(&rows));
         }
     }
 
@@ -694,5 +869,124 @@ mod tests {
         let encoded = encode(&large, PackingMode::Dense).unwrap();
         assert_eq!(encoded[9], 4);
         assert_eq!(Blob::parse(&encoded).unwrap().rows().unwrap(), large);
+    }
+
+    /// Keep the original bit-level writer as an independent disk-format oracle.
+    fn legacy_group(rows: &[StorageEntry]) -> Vec<u8> {
+        let mut raw = vec![0];
+        for row in rows {
+            let mut value = Vec::new();
+            row.value.to_compact(&mut value);
+            raw.push(value.len() as u8);
+            raw.extend_from_slice(&value);
+        }
+        let base = rows.iter().map(|r| r.value).min().unwrap_or_default();
+        let max = rows.iter().map(|r| r.value).max().unwrap_or_default();
+        let width = (max - base).bit_len();
+        let mut base_bytes = Vec::new();
+        base.to_compact(&mut base_bytes);
+        if 4 + base_bytes.len() + (width * rows.len()).div_ceil(8) >= raw.len() {
+            return raw;
+        }
+        let mut out = vec![1, base_bytes.len() as u8];
+        out.extend_from_slice(&(width as u16).to_le_bytes());
+        out.extend_from_slice(&base_bytes);
+        let start = out.len();
+        out.resize(start + (width * rows.len()).div_ceil(8), 0);
+        for (i, row) in rows.iter().enumerate() {
+            let delta = (row.value - base).to_le_bytes::<32>();
+            for bit in 0..width {
+                if delta[bit / 8] >> (bit % 8) & 1 != 0 {
+                    let at = i * width + bit;
+                    out[start + at / 8] |= 1 << (at % 8);
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn byte_packing_preserves_all_bit_boundaries_and_rejects_padding() {
+        for width in 0..=256 {
+            for count in 1..=32 {
+                let base = U256::ONE << 248;
+                let delta = if width == 0 { U256::ZERO } else { U256::ONE << (width - 1) };
+                let rows: Vec<_> = (0..count)
+                    .map(|i| {
+                        StorageEntry::new(
+                            B256::from(U256::from(i).to_be_bytes::<32>()),
+                            if i == 0 { base } else { base + delta },
+                        )
+                    })
+                    .collect();
+                let mut actual = Vec::new();
+                encode_group(&rows, &mut actual);
+                assert_eq!(actual, legacy_group(&rows), "width={width}, count={count}");
+                assert_eq!(
+                    decode_group(&actual, count).unwrap(),
+                    rows.iter().map(|r| r.value).collect::<Vec<_>>()
+                );
+            }
+        }
+        assert!(decode_group(&[1, 0, 1, 0, 0x80], 1).is_err());
+        assert!(decode_group(&[1, 0, 0, 0], 33).is_err());
+        // A full-width delta plus a nonzero base must never wrap.
+        let mut overflowing = vec![1, 1, 0, 1];
+        U256::ONE.to_compact(&mut overflowing);
+        overflowing.extend_from_slice(&[0xff; 32]);
+        assert!(decode_group(&overflowing, 1).is_err());
+    }
+
+    #[test]
+    fn reusable_buffers_have_exact_sizes_and_append_rows() {
+        let mut buffer = CodecBuffer::default();
+        for mode in [PackingMode::Dense, PackingMode::Integer32] {
+            for count in [1, 2, 8, 9, 31, 32, 33, 256, 512] {
+                let rows: Vec<_> = (0..count)
+                    .map(|i| {
+                        StorageEntry::new(
+                            B256::from(U256::from(i).to_be_bytes::<32>()),
+                            if i % 2 == 0 { U256::MAX } else { U256::from(i) },
+                        )
+                    })
+                    .collect();
+                let bytes = buffer.encode_record(&rows, B256::ZERO, mode).unwrap();
+                assert_eq!(bytes.len(), encoded_record_len(&rows, mode));
+                let mut decoded = vec![rows[0]];
+                Blob::parse_record(bytes, &[0; 64], mode).unwrap().rows_into(&mut decoded).unwrap();
+                assert_eq!(decoded[1..], rows);
+            }
+        }
+        let rows: Vec<_> = (0..512)
+            .map(|i| StorageEntry::new(B256::from(U256::from(i).to_be_bytes::<32>()), U256::MAX))
+            .collect();
+        let limit = 4096 * 8 - 64;
+        let chunk = chunk_len(&rows, 512, limit, PackingMode::Dense);
+        assert!(chunk < rows.len());
+        assert!(encoded_record_len(&rows[..chunk], PackingMode::Dense) <= limit);
+        assert!(encoded_record_len(&rows[..chunk + 1], PackingMode::Dense) > limit);
+        assert_eq!(chunk_len(&rows[..0], 512, limit, PackingMode::Dense), 0);
+        assert_eq!(chunk_len(&rows, 0, 0, PackingMode::Dense), 1);
+    }
+
+    #[test]
+    fn compact_validation_matches_original_canonical_serialization() {
+        for value in [U256::ZERO, U256::ONE, U256::MAX, U256::ONE << 64, U256::ONE << 248] {
+            let mut canonical = Vec::new();
+            value.to_compact(&mut canonical);
+            assert_eq!(compact(&canonical).unwrap(), value);
+            for at in 0..=canonical.len() {
+                let mut malformed = canonical.clone();
+                malformed.insert(at, 0);
+                if malformed.len() <= 32 {
+                    let decoded = U256::from_compact(&malformed, malformed.len()).0;
+                    let mut reencoded = Vec::new();
+                    decoded.to_compact(&mut reencoded);
+                    assert_eq!(compact(&malformed).is_ok(), reencoded == malformed);
+                } else {
+                    assert!(compact(&malformed).is_err());
+                }
+            }
+        }
     }
 }

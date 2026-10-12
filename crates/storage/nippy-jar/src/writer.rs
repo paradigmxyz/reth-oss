@@ -1,6 +1,6 @@
 use crate::{
-    compression::Compression, ColumnResult, NippyJar, NippyJarChecker, NippyJarError,
-    NippyJarHeader,
+    compression::{Compression, Compressors, Lz4},
+    ColumnResult, NippyJar, NippyJarChecker, NippyJarError, NippyJarHeader,
 };
 use std::{
     fs::{File, OpenOptions},
@@ -43,6 +43,8 @@ pub struct NippyJarWriter<H: NippyJarHeader = ()> {
     column: usize,
     /// Whether the writer has changed data that needs to be committed.
     dirty: bool,
+    /// An empty jar's compression choice is made once before its first column is written.
+    compression_decided: bool,
 }
 
 impl<H: NippyJarHeader> NippyJarWriter<H> {
@@ -70,6 +72,7 @@ impl<H: NippyJarHeader> NippyJarWriter<H> {
             (jar, data_file.expect("qed"), offsets_file.expect("qed"))
         };
 
+        let compression_decided = jar.rows() > 0 || jar.compressor.is_some();
         let mut writer = Self {
             jar,
             data_file,
@@ -79,6 +82,7 @@ impl<H: NippyJarHeader> NippyJarWriter<H> {
             offsets: Vec::with_capacity(1_000_000),
             column: 0,
             dirty: false,
+            compression_decided,
         };
 
         if !is_created {
@@ -495,5 +499,138 @@ impl<H: NippyJarHeader> NippyJarWriter<H> {
     #[cfg(any(test, feature = "test-utils"))]
     pub const fn jar(&self) -> &NippyJar<H> {
         &self.jar
+    }
+
+    /// Select existing LZ4 compression for an empty single-column jar when a bounded sample
+    /// saves at least 20% of its encoded bytes. Populated or already compressed jars retain
+    /// their on-disk policy; a rejected sample cannot be reconsidered after a partial write.
+    ///
+    /// Metadata is persisted before any compressed data, without publishing pending changes
+    /// to the caller's user header. Every row keeps an independent offset and LZ4 block.
+    pub fn select_lz4_for_sample(
+        &mut self,
+        samples: impl IntoIterator<Item = impl AsRef<[u8]>>,
+    ) -> Result<bool, NippyJarError> {
+        if self.compression_decided ||
+            self.jar.columns != 1 ||
+            self.jar.rows() != 0 ||
+            self.column != 0 ||
+            !self.offsets.is_empty()
+        {
+            return Ok(false)
+        }
+        let compression = Lz4::default();
+        let (mut raw_bytes, mut compressed_bytes, mut count) = (0usize, 0usize, 0usize);
+        for sample in samples.into_iter().take(32) {
+            let sample = sample.as_ref();
+            // Tiny objects provide too little evidence to justify permanent per-row framing.
+            if sample.len() < 32 {
+                self.tmp_buf.clear();
+                self.compression_decided = true;
+                return Ok(false)
+            }
+            self.tmp_buf.clear();
+            self.tmp_buf.reserve(sample.len().saturating_mul(2).saturating_add(64));
+            compressed_bytes += compression.compress_to(sample, &mut self.tmp_buf)?;
+            raw_bytes += sample.len();
+            count += 1;
+        }
+        self.tmp_buf.clear();
+        if count == 0 {
+            return Ok(false)
+        }
+        self.compression_decided = true;
+        if compressed_bytes.saturating_mul(5) > raw_bytes.saturating_mul(4) {
+            return Ok(false)
+        }
+        // Load the committed header rather than freezing the possibly modified in-memory
+        // header. Changeset sidecars use that header as their crash-recovery commit marker.
+        let mut committed = NippyJar::<H>::load(self.jar.data_path())?;
+        if committed.rows() != 0 ||
+            committed.compressor.is_some() ||
+            self.data_file.get_ref().metadata()?.len() != 0
+        {
+            return Ok(false)
+        }
+        committed.compressor = Some(Compressors::Lz4(Lz4::default()));
+        committed.freeze_config()?;
+        self.jar.compressor = Some(Compressors::Lz4(compression));
+        self.dirty = true;
+        Ok(true)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::NippyJarCursor;
+
+    #[test]
+    fn sampled_compression_preserves_committed_header_and_reopens() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let jar = NippyJar::new(1, file.path(), 7u64);
+        let mut writer = NippyJarWriter::new(jar).unwrap();
+        *writer.user_header_mut() = 42;
+        let row = vec![0u8; 52];
+        assert!(writer.select_lz4_for_sample(std::iter::once(&row)).unwrap());
+        let committed = NippyJar::<u64>::load(file.path()).unwrap();
+        assert_eq!(*committed.user_header(), 7);
+        assert_eq!(committed.rows(), 0);
+        assert!(committed.compressor().is_some());
+        writer.append_column(Some(Ok(&row))).unwrap();
+        writer.commit().unwrap();
+        drop(writer);
+
+        let mut reopened =
+            NippyJarWriter::new(NippyJar::<u64>::load(file.path()).unwrap()).unwrap();
+        assert!(!reopened.select_lz4_for_sample(std::iter::once(&row)).unwrap());
+        let other: Vec<_> = (0..84).collect();
+        reopened.append_column(Some(Ok(&other))).unwrap();
+        reopened.commit().unwrap();
+        drop(reopened);
+        let jar = NippyJar::<u64>::load(file.path()).unwrap();
+        assert_eq!(*jar.user_header(), 42);
+        let mut cursor = NippyJarCursor::new(&jar).unwrap();
+        assert_eq!(cursor.row_by_number(0).unwrap().unwrap()[0], row.as_slice());
+        assert_eq!(cursor.row_by_number(1).unwrap().unwrap()[0], other.as_slice());
+    }
+
+    #[test]
+    fn rejected_sample_and_existing_raw_rows_keep_raw_policy() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut writer = NippyJarWriter::new(NippyJar::new_without_header(1, file.path())).unwrap();
+        let random: Vec<u8> = (0..84).collect();
+        let zeros = vec![0u8; 52];
+        assert!(!writer.select_lz4_for_sample(std::iter::once(&random)).unwrap());
+        assert!(!writer.select_lz4_for_sample(std::iter::once(&zeros)).unwrap());
+        writer.append_column(Some(Ok(&random))).unwrap();
+        writer.commit().unwrap();
+        drop(writer);
+        let mut reopened =
+            NippyJarWriter::new(NippyJar::load_without_header(file.path()).unwrap()).unwrap();
+        assert!(!reopened.select_lz4_for_sample(std::iter::once(&zeros)).unwrap());
+        reopened.append_column(Some(Ok(&zeros))).unwrap();
+        reopened.commit().unwrap();
+        drop(reopened);
+        let jar = NippyJar::load_without_header(file.path()).unwrap();
+        assert!(jar.compressor().is_none());
+        let mut cursor = NippyJarCursor::new(&jar).unwrap();
+        assert_eq!(cursor.row_by_number(0).unwrap().unwrap()[0], random.as_slice());
+        assert_eq!(cursor.row_by_number(1).unwrap().unwrap()[0], zeros.as_slice());
+    }
+
+    #[test]
+    fn samples_must_be_nonempty_and_not_tiny_or_partial_rows() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut writer = NippyJarWriter::new(NippyJar::new_without_header(1, file.path())).unwrap();
+        assert!(!writer.select_lz4_for_sample(std::iter::empty::<&[u8]>()).unwrap());
+        assert!(!writer.select_lz4_for_sample(std::iter::once([0u8; 16])).unwrap());
+        assert!(!writer.select_lz4_for_sample(std::iter::once([0u8; 52])).unwrap());
+
+        let other = tempfile::NamedTempFile::new().unwrap();
+        let mut writer =
+            NippyJarWriter::new(NippyJar::new_without_header(2, other.path())).unwrap();
+        writer.append_column(Some(Ok([0u8; 52]))).unwrap();
+        assert!(!writer.select_lz4_for_sample(std::iter::once([0u8; 52])).unwrap());
     }
 }

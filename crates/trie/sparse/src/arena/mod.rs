@@ -13,7 +13,7 @@ use crate::{
 };
 use alloc::{borrow::Cow, boxed::Box, vec::Vec};
 use alloy_primitives::{keccak256, map::B256Map, B256};
-use alloy_trie::TrieMask;
+use alloy_trie::{BranchNodeCompact, TrieMask};
 use core::{cmp::Reverse, mem};
 use reth_execution_errors::{SparseTrieErrorKind, SparseTrieResult};
 use reth_trie_common::{
@@ -613,6 +613,8 @@ pub struct ArenaParallelSparseTrie {
     buffers: ArenaTrieBuffers,
     /// Thresholds controlling when parallelism is enabled for different operations.
     parallelism_thresholds: ArenaParallelismThresholds,
+    /// A dirty root was hashed since the last update drain.
+    root_summary_pending: bool,
 }
 
 impl ArenaParallelSparseTrie {
@@ -2077,6 +2079,7 @@ impl Default for ArenaParallelSparseTrie {
             root,
             buffers: ArenaTrieBuffers::default(),
             parallelism_thresholds: ArenaParallelismThresholds::default(),
+            root_summary_pending: false,
         }
     }
 }
@@ -2153,6 +2156,7 @@ impl SparseTrie for ArenaParallelSparseTrie {
     }
 
     fn set_updates(&mut self, retain_updates: bool) {
+        self.root_summary_pending = false;
         if retain_updates {
             self.buffers.updates.get_or_insert_with(SparseTrieUpdates::default).clear();
         } else {
@@ -2300,6 +2304,8 @@ impl SparseTrie for ArenaParallelSparseTrie {
 
     #[instrument(level = "trace", target = TRACE_TARGET, skip_all, ret)]
     fn root(&mut self, new_epoch: TrieNodeEpoch) -> B256 {
+        let dirty_root =
+            matches!(self.upper_arena[self.root].state_ref(), Some(ArenaSparseNodeState::Dirty));
         self.update_subtrie_hashes(new_epoch);
 
         let rlp_node = Self::update_cached_rlp(
@@ -2310,6 +2316,9 @@ impl SparseTrie for ArenaParallelSparseTrie {
             new_epoch,
         );
 
+        if dirty_root && self.buffers.updates.is_some() {
+            self.root_summary_pending = true;
+        }
         rlp_node.as_hash().expect("root RlpNode must be a hash")
     }
 
@@ -2322,6 +2331,26 @@ impl SparseTrie for ArenaParallelSparseTrie {
             ArenaSparseNodeState::Revealed => Some(TrieNodeEpoch::UNMODIFIED),
             ArenaSparseNodeState::Cached { epoch, .. } => Some(*epoch),
             ArenaSparseNodeState::Dirty => None,
+        }
+    }
+
+    fn root_branch_summary(&self) -> Option<BranchNodeCompact> {
+        match &self.upper_arena[self.root] {
+            ArenaSparseNode::Branch(branch)
+                if branch.short_key.is_empty() &&
+                    matches!(branch.state, ArenaSparseNodeState::Cached { .. }) =>
+            {
+                Some(branch.branch_node_compact(&self.upper_arena))
+            }
+            _ => None,
+        }
+    }
+
+    fn take_root_branch_summary(&mut self) -> Option<BranchNodeCompact> {
+        if mem::take(&mut self.root_summary_pending) {
+            self.root_branch_summary()
+        } else {
+            None
         }
     }
 
@@ -2436,6 +2465,7 @@ impl SparseTrie for ArenaParallelSparseTrie {
     }
 
     fn take_updates(&mut self) -> SparseTrieUpdates {
+        self.root_summary_pending = false;
         match self.buffers.updates.take() {
             Some(updates) => {
                 self.buffers.updates = Some(SparseTrieUpdates::with_capacity(
@@ -2450,6 +2480,7 @@ impl SparseTrie for ArenaParallelSparseTrie {
 
     #[instrument(level = "trace", target = TRACE_TARGET, skip_all)]
     fn clear(&mut self) {
+        self.root_summary_pending = false;
         self.upper_arena = NodeArena::new();
         self.root = self
             .upper_arena
@@ -2904,6 +2935,28 @@ mod tests {
 
     const fn epoch(value: u64) -> TrieNodeEpoch {
         TrieNodeEpoch::new(value)
+    }
+
+    #[test]
+    fn root_branch_summary_requires_current_cached_empty_path_branch() {
+        let mut trie = ArenaParallelSparseTrie::default();
+        trie.set_root(TrieNodeV2::EmptyRoot, None, true).unwrap();
+        assert!(trie.root_branch_summary().is_none());
+        let mut leaves = B256Map::from_iter([
+            (B256::repeat_byte(0x11), LeafUpdate::Changed(vec![1])),
+            (B256::repeat_byte(0x22), LeafUpdate::Changed(vec![2])),
+        ]);
+        trie.update_leaves(&mut leaves, |_, _| panic!("empty trie needs no proofs")).unwrap();
+        assert!(trie.root_branch_summary().is_none());
+        trie.root(epoch(1));
+        assert!(trie.root_branch_summary().is_some());
+        assert!(trie.take_updates().updated_nodes.keys().all(|path| !path.is_empty()));
+        let mut changed =
+            B256Map::from_iter([(B256::repeat_byte(0x11), LeafUpdate::Changed(vec![3]))]);
+        trie.update_leaves(&mut changed, |_, _| panic!("revealed leaves need no proofs")).unwrap();
+        assert!(trie.root_branch_summary().is_none());
+        trie.root(epoch(2));
+        assert!(trie.root_branch_summary().is_some());
     }
 
     #[test]

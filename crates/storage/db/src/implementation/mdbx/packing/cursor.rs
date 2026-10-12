@@ -338,7 +338,7 @@ impl<K: TransactionKind> Logical<K> {
         if upper {
             let (base, skips) = self.shared.unchanged(scope)?;
             let adaptive = if self.shared.depth == super::ADAPTIVE_TRIE_DEPTH {
-                Some(self.shared.frontier(&self.tx, scope)?)
+                Some(self.shared.layout_frontier(&self.tx, scope)?)
             } else {
                 None
             };
@@ -441,7 +441,7 @@ impl<K: TransactionKind> Logical<K> {
         reverse: bool,
     ) -> Result<Option<(Nibbles, BranchNodeCompact)>, DatabaseError> {
         let adaptive = if self.shared.depth == super::ADAPTIVE_TRIE_DEPTH {
-            Some(self.shared.frontier(&self.tx, scope)?)
+            Some(self.shared.layout_frontier(&self.tx, scope)?)
         } else {
             None
         };
@@ -545,20 +545,7 @@ impl<K: TransactionKind> Logical<K> {
                 .as_ref()
                 .is_none_or(|(s, p, g, _)| *s != scope || *p != prefix || *g != region_generation)
             {
-                let rebuilt = if let Some(nodes) =
-                    self.shared.cached(scope, Some(prefix), (region_generation, 0))?
-                {
-                    nodes
-                } else {
-                    let nodes = Arc::new(self.rebuild(scope, &prefix, false)?);
-                    self.shared.cache(
-                        scope,
-                        Some(prefix),
-                        (region_generation, 0),
-                        Arc::clone(&nodes),
-                    )?;
-                    nodes
-                };
+                let rebuilt = self.region_nodes(scope, prefix, region_generation)?;
                 self.region = Some((scope, prefix, region_generation, rebuilt));
             }
             let nodes = &self.region.as_ref().ok_or(DatabaseError::Decode)?.3;
@@ -601,16 +588,7 @@ impl<K: TransactionKind> Logical<K> {
         mut candidate: Option<(Nibbles, BranchNodeCompact)>,
         frontier: &Frontier,
     ) -> Result<Option<(Nibbles, BranchNodeCompact)>, DatabaseError> {
-        let cuts: Vec<_> =
-            if reverse { frontier.cuts().rev().collect() } else { frontier.cuts().collect() };
-        for prefix in cuts {
-            if if reverse {
-                prefix > *query
-            } else {
-                prefix < *query && !query.starts_with(&prefix)
-            } {
-                continue
-            }
+        for prefix in frontier.cuts_for_query(*query, reverse) {
             if candidate.as_ref().is_some_and(|(path, _)| {
                 if reverse {
                     prefix < *path && !path.starts_with(&prefix)
@@ -626,15 +604,7 @@ impl<K: TransactionKind> Logical<K> {
                 .as_ref()
                 .is_none_or(|(s, p, g, _)| *s != scope || *p != prefix || *g != generation)
             {
-                let nodes = if let Some(nodes) =
-                    self.shared.cached(scope, Some(prefix), (generation, 0))?
-                {
-                    nodes
-                } else {
-                    let nodes = Arc::new(self.rebuild(scope, &prefix, false)?);
-                    self.shared.cache(scope, Some(prefix), (generation, 0), Arc::clone(&nodes))?;
-                    nodes
-                };
+                let nodes = self.region_nodes(scope, prefix, generation)?;
                 self.region = Some((scope, prefix, generation, nodes));
             }
             if let Some(hit) = seek_node(
@@ -654,6 +624,27 @@ impl<K: TransactionKind> Logical<K> {
             }
         }
         Ok(candidate)
+    }
+
+    fn region_nodes(
+        &mut self,
+        scope: B256,
+        prefix: Nibbles,
+        generation: u64,
+    ) -> Result<Arc<TrieNodes>, DatabaseError> {
+        let commitment = self
+            .upper
+            .as_ref()
+            .filter(|(contract, _, _, _)| *contract == scope && self.shared.is_read_snapshot())
+            .and_then(|(_, _, _, nodes)| region_commitment(nodes, prefix));
+        if let Some(nodes) =
+            self.shared.cached_region(scope, prefix, (generation, 0), commitment)?
+        {
+            return Ok(nodes);
+        }
+        let nodes = Arc::new(self.rebuild(scope, &prefix, false)?);
+        self.shared.cache_region(scope, prefix, (generation, 0), commitment, Arc::clone(&nodes))?;
+        Ok(nodes)
     }
 
     fn find_native_trie(
@@ -728,6 +719,21 @@ fn seek_node(
     hit.map(|(path, node)| (*path, node.clone()))
 }
 
+/// A retained branch's hashed child commits to the entire requested region, including any
+/// compressed extension beneath that child. Prefer the nearest available ancestor so a
+/// mutation outside this region is less likely to invalidate its cache entry.
+fn region_commitment(nodes: &TrieNodes, prefix: Nibbles) -> Option<(Nibbles, B256)> {
+    let mut commitment = None;
+    for (length, nibble) in prefix.iter().enumerate() {
+        if let Some(node) = nodes.get(&prefix.slice(..length)) &&
+            node.hash_mask.is_bit_set(nibble)
+        {
+            commitment = Some((prefix.slice(..length + 1), node.hash_for_nibble(nibble)));
+        }
+    }
+    commitment
+}
+
 impl Logical<RW> {
     pub(crate) fn write(
         &mut self,
@@ -767,7 +773,7 @@ impl Logical<RW> {
         if self.trie {
             let entry = TrieEntry::from_compact(value, value.len()).0;
             let retain = if self.shared.depth == super::ADAPTIVE_TRIE_DEPTH {
-                self.shared.frontier(&self.tx, s)?.retains(&entry.nibbles.0)
+                self.shared.layout_frontier(&self.tx, s)?.retains(&entry.nibbles.0)
             } else {
                 entry.nibbles.0.len() < self.shared.depth
             };
@@ -848,5 +854,124 @@ impl Logical<RW> {
             self.shared.delete(B256::from_slice(scope), B256::from_slice(&value[..32]))?;
         }
         Ok(())
+    }
+
+    /// Replace a known logical subkey without reading or reconstructing its old value.
+    /// Physical trie deletion is still required for paths that a changed frontier stopped
+    /// retaining. The caller supplies canonical trie updates, never a reconstructed read row.
+    pub(crate) fn replace_by_subkey(
+        &mut self,
+        scope: &[u8],
+        subkey: &[u8],
+        value: Option<&[u8]>,
+    ) -> Result<(), DatabaseError> {
+        self.tx.txn_execute(|_| ()).map_err(|e| DatabaseError::Read(e.into()))?;
+        self.shared.check()?;
+        let sub_len = if self.trie { 33 } else { 32 };
+        if scope.len() != 32 ||
+            subkey.len() != sub_len ||
+            value.is_some_and(|value| value.get(..sub_len) != Some(subkey))
+        {
+            return Err(DatabaseError::Decode)
+        }
+        let contract = B256::from_slice(scope);
+        if self.trie {
+            if subkey.iter().all(|byte| *byte == 0) {
+                self.shared.invalidate_trie_root(Some(contract))?;
+            }
+            if self
+                .physical
+                .get_both_range::<Vec<u8>>(scope, subkey)
+                .map_err(|e| DatabaseError::Read(e.into()))?
+                .is_some_and(|bytes| bytes.get(..33) == Some(subkey))
+            {
+                self.physical
+                    .del(WriteFlags::CURRENT)
+                    .map_err(|e| DatabaseError::Delete(e.into()))?;
+                self.shared.trie_changed(Some(contract))?;
+            }
+            if let Some(value) = value {
+                let entry = TrieEntry::from_compact(value, value.len()).0;
+                let retain = if self.shared.depth == super::ADAPTIVE_TRIE_DEPTH {
+                    self.shared.layout_frontier(&self.tx, contract)?.retains(&entry.nibbles.0)
+                } else {
+                    entry.nibbles.0.len() < self.shared.depth
+                };
+                if retain {
+                    self.physical
+                        .put(scope, value, WriteFlags::UPSERT)
+                        .map_err(|e| DatabaseError::Read(e.into()))?;
+                    self.shared.trie_changed(Some(contract))?;
+                }
+                if entry.nibbles.0.is_empty() {
+                    self.shared.mark_trie_root_written(contract)?;
+                }
+                self.position = Position::Row((scope.to_vec(), value.to_vec()));
+            } else {
+                self.position = Position::Missing;
+            }
+        } else if let Some(value) = value {
+            if value.len() > 64 {
+                return Err(DatabaseError::Decode)
+            }
+            self.shared.put(contract, StorageEntry::from_compact(value, value.len()).0)?;
+            self.position = Position::Row((scope.to_vec(), value.to_vec()));
+        } else {
+            self.shared.delete(contract, B256::from_slice(subkey))?;
+            self.position = Position::Missing;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn region_commitments_use_only_covering_hashed_ancestor_children() {
+        let prefix = |digits: &[u8]| Nibbles::from_nibbles_unchecked(digits);
+        let broad_hash = B256::repeat_byte(1);
+        let near_hash = B256::repeat_byte(2);
+        let nodes = TrieNodes::from([
+            (Nibbles::default(), BranchNodeCompact::new(1 << 3, 0, 1 << 3, vec![broad_hash], None)),
+            (prefix(&[3, 4]), BranchNodeCompact::new(1 << 5, 0, 1 << 5, vec![near_hash], None)),
+        ]);
+        assert_eq!(
+            region_commitment(&nodes, prefix(&[3, 4, 5, 6])),
+            Some((prefix(&[3, 4, 5]), near_hash))
+        );
+        assert_eq!(region_commitment(&nodes, prefix(&[3, 4, 7])), Some((prefix(&[3]), broad_hash)));
+        assert_eq!(region_commitment(&nodes, prefix(&[3])), Some((prefix(&[3]), broad_hash)));
+        assert!(region_commitment(&nodes, prefix(&[4])).is_none());
+        assert!(region_commitment(&nodes, Nibbles::default()).is_none());
+        let unhashed = TrieNodes::from([(
+            Nibbles::default(),
+            BranchNodeCompact::new(1 << 3, 0, 0, Vec::new(), None),
+        )]);
+        assert!(region_commitment(&unhashed, prefix(&[3, 4])).is_none());
+    }
+
+    #[test]
+    fn ordered_node_seeks_preserve_inclusive_reverse_and_hidden_root() {
+        let prefix = |digits: &[u8]| Nibbles::from_nibbles_unchecked(digits);
+        let node = BranchNodeCompact::new(1, 1, 1, vec![B256::ZERO], None);
+        let nodes = BTreeMap::from([
+            (Nibbles::default(), node.clone()),
+            (prefix(&[1]), node.clone()),
+            (prefix(&[3, 4]), node.clone()),
+            (prefix(&[8]), node),
+        ]);
+        let seek = |query, inclusive, reverse, omit_root| {
+            seek_node(&nodes, query, inclusive, reverse, omit_root).map(|(path, _)| path)
+        };
+        assert_eq!(seek(Nibbles::default(), true, false, true), Some(prefix(&[1])));
+        assert_eq!(seek(Nibbles::default(), true, true, true), None);
+        assert_eq!(seek(prefix(&[1]), false, true, true), None);
+        assert_eq!(seek(prefix(&[1]), false, true, false), Some(Nibbles::default()));
+        assert_eq!(seek(prefix(&[3, 4]), true, false, true), Some(prefix(&[3, 4])));
+        assert_eq!(seek(prefix(&[3, 4]), false, false, true), Some(prefix(&[8])));
+        assert_eq!(seek(prefix(&[3, 4]), false, true, true), Some(prefix(&[1])));
+        assert_eq!(seek(prefix(&[3, 5]), true, true, true), Some(prefix(&[3, 4])));
     }
 }
