@@ -1,4 +1,4 @@
-# Runs `ethereum/hive` tests.
+# Runs `Soubhik-10/hive` tests with the Frames EELS error mapper.
 
 name: hive
 
@@ -49,8 +49,8 @@ jobs:
       - name: Checkout hive tests
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          repository: ethereum/hive
-          ref: master
+          repository: Soubhik-10/hive
+          ref: feat/eip8141-frames
           path: hivetests
           persist-credentials: false
 
@@ -248,8 +248,8 @@ jobs:
       - name: Checkout hive tests
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          repository: ethereum/hive
-          ref: master
+          repository: Soubhik-10/hive
+          ref: feat/eip8141-frames
           path: hivetests
           persist-credentials: false
 
@@ -512,8 +512,8 @@ jobs:
       - name: Checkout hive tests
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          repository: ethereum/hive
-          ref: master
+          repository: Soubhik-10/hive
+          ref: feat/eip8141-frames
           path: hivetests
           persist-credentials: false
 
@@ -700,8 +700,8 @@ jobs:
 #      - name: Checkout hive tests
 #        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 #        with:
-#          repository: ethereum/hive
-#          ref: master
+#          repository: Soubhik-10/hive
+#          ref: feat/eip8141-frames
 #          path: hivetests
 #          persist-credentials: false
 #
