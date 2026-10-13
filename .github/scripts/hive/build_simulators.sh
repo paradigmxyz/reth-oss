@@ -15,7 +15,7 @@ case "${fixture_variant}" in
         eels_fork="Osaka"
         ;;
     bogota)
-        eels_fixtures="https://github.com/ethereum/execution-specs/releases/download/tests-frames-devnet%40v1.0.0/fixtures_frames-devnet.tar.gz"
+        eels_fixtures="https://github.com/ethereum/execution-specs/releases/download/tests-frames-devnet%40v1.0.0/fixtures_bogota-devnet.tar.gz"
         eels_branch="fix/reth-frames-devnet-1-hive-error-mapping"
         eels_fork="Bogota"
         ;;
@@ -36,15 +36,15 @@ go build .
 # Build the fixture-heavy EELS images serially to avoid exhausting the runner
 # while both builds download and unpack the same large fixture archive.
 echo "Building images"
-./hive -client reth --sim "ethereum/eels/consume-engine" \
+./hive --docker.buildoutput -client reth --sim "ethereum/eels/consume-engine" \
     --sim.buildarg fixtures="${eels_fixtures}" \
     --sim.buildarg branch="${eels_branch}" \
     --sim.timelimit 1s || true
-./hive -client reth --sim "ethereum/eels/consume-rlp" \
+./hive --docker.buildoutput -client reth --sim "ethereum/eels/consume-rlp" \
     --sim.buildarg fixtures="${eels_fixtures}" \
     --sim.buildarg branch="${eels_branch}" \
     --sim.timelimit 1s || true
-./hive -client reth --sim "ethereum/eels/execute-blobs" \
+./hive --docker.buildoutput -client reth --sim "ethereum/eels/execute-blobs" \
     --sim.buildarg branch="${eels_branch}" \
     --sim.buildarg fork="${eels_fork}" \
     --sim.timelimit 1s || true &
