@@ -21,6 +21,7 @@ fn cases(total: usize) -> Vec<Case> {
                 handler: "boolean".into(),
                 suite: "invalid".into(),
                 name: format!("{index:04}"),
+                configuration: Default::default(),
             }
         })
         .collect()

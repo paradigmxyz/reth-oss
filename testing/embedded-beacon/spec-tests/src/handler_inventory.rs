@@ -79,6 +79,7 @@ pub fn inspect_manifest(manifest: &FixtureManifest) -> Result<HandlerInventory, 
             handler: parts[3].into(),
             suite: parts[4].into(),
             name: parts[5..].join("/"),
+            configuration: Default::default(),
         };
         let key = parts[..5].join("/");
         let entry = handlers.entry(key).or_insert_with(|| HandlerInventoryEntry {

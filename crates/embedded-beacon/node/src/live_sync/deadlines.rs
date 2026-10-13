@@ -17,8 +17,8 @@ impl LiveSync {
     }
 
     fn expired_data_provider(&self, now: Instant) -> Option<PeerId> {
-        self.sidecar_request
-            .as_ref()
+        self.sidecars
+            .requested()
             .filter(|pending| data_expired(pending.started, now))
             .map(|pending| pending.peer)
             .or_else(|| {

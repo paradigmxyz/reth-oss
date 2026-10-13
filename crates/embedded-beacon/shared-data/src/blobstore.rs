@@ -1,9 +1,10 @@
 //! Execution-pool facade sharing exact blob, commitment and proof bytes with consensus owners.
 
-use crate::{Encoding, ObjectId, ObjectKind, Owner, SharedDataStore, StoreError};
+use crate::{Encoding, ObjectId, ObjectKind, OwnedObjectBatch, Owner, SharedDataStore, StoreError};
 use alloy_eips::{
     eip4844::{
-        Blob, BlobAndProofV1, BlobAndProofV2, BlobCellsAndProofsV1, BlobTransactionSidecar, Bytes48,
+        kzg_to_versioned_hash, Blob, BlobAndProofV1, BlobAndProofV2, BlobCellsAndProofsV1,
+        BlobTransactionSidecar, Bytes48,
     },
     eip7594::{
         BlobCellMask, BlobTransactionSidecarEip7594, BlobTransactionSidecarVariant, Cell,
@@ -17,21 +18,21 @@ use reth_transaction_pool::blobstore::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     sync::{Arc, Weak},
 };
 
-/// BlobStore facade whose pool deletion releases only the transaction's independent owner pins.
+/// `BlobStore` facade whose pool deletion releases only the transaction's independent owner pins.
 #[derive(Debug, Clone)]
 pub struct SharedBlobStore {
     shared: SharedDataStore,
-    gate: Arc<Mutex<BTreeMap<B256, Weak<BlobTransactionSidecarVariant>>>>,
+    gate: Arc<Mutex<BlobCache>>,
 }
 
 impl SharedBlobStore {
     /// Creates a facade around an already opened, isolated shared-data store.
     pub fn new(shared: SharedDataStore) -> Self {
-        Self { shared, gate: Arc::new(Mutex::new(BTreeMap::new())) }
+        Self { shared, gate: Arc::new(Mutex::new(BlobCache::default())) }
     }
 
     /// Returns the underlying byte store for consensus pinning and physical statistics.
@@ -39,7 +40,7 @@ impl SharedBlobStore {
         &self.shared
     }
 
-    fn transaction_hashes(&self) -> Vec<B256> {
+    fn durable_transaction_hashes(&self) -> Vec<B256> {
         self.shared
             .owners()
             .into_iter()
@@ -63,16 +64,17 @@ impl SharedBlobStore {
     ) -> Result<Option<Arc<BlobTransactionSidecarVariant>>, BlobStoreError> {
         self.shared.ensure_healthy().map_err(blob_error)?;
         let mut cache = self.gate.lock();
+        self.refresh_index(&mut cache)?;
         let owner = Owner::Pool(tx.0);
         let ids = self.shared.owner_objects(owner);
         let Some(id) = ids
             .into_iter()
             .find(|id| id.kind == ObjectKind::BlobSidecar && id.encoding == Encoding::Json)
         else {
-            cache.remove(&tx);
+            cache.decoded.remove(&tx);
             return Ok(None);
         };
-        if let Some(decoded) = cache.get(&tx).and_then(Weak::upgrade) {
+        if let Some(decoded) = cache.decoded.get(&tx).and_then(Weak::upgrade) {
             return Ok(Some(decoded));
         }
         let bytes = self
@@ -119,7 +121,7 @@ impl SharedBlobStore {
         if logical_size(&sidecar) != descriptor.logical_size {
             return Err(blob_error(FacadeError::MalformedSidecar));
         }
-        cache.insert(tx, Arc::downgrade(&sidecar));
+        cache.decoded.insert(tx, Arc::downgrade(&sidecar));
         Ok(Some(sidecar))
     }
 
@@ -134,7 +136,7 @@ impl SharedBlobStore {
     fn v3(&self, hashes: &[B256]) -> Result<Vec<Option<BlobAndProofV2>>, BlobStoreError> {
         self.shared.ensure_healthy().map_err(blob_error)?;
         let mut result = vec![None; hashes.len()];
-        for tx in self.transaction_hashes() {
+        for tx in self.lookup_transactions(hashes)? {
             if let Some(sidecar) = self.read_sidecar(tx)? &&
                 let Some(sidecar) = sidecar.as_eip7594()
             {
@@ -148,78 +150,118 @@ impl SharedBlobStore {
         }
         Ok(result)
     }
+    fn refresh_index(&self, cache: &mut BlobCache) -> Result<(), BlobStoreError> {
+        let generation = self.shared.reference_generation().map_err(blob_error)?;
+        if cache.generation == Some(generation) {
+            return Ok(());
+        }
+        cache.generation = None;
+        let mut index = BlobIndex::default();
+        for tx in self.durable_transaction_hashes() {
+            let ids = self.shared.owner_objects(Owner::Pool(tx.0));
+            let Some(id) = ids
+                .into_iter()
+                .find(|id| id.kind == ObjectKind::BlobSidecar && id.encoding == Encoding::Json)
+            else {
+                continue;
+            };
+            let bytes = self.read_bytes(id)?;
+            let descriptor = serde_json::from_slice::<Descriptor>(&bytes).map_err(blob_error)?;
+            descriptor.validate().map_err(blob_error)?;
+            let hashes = descriptor
+                .commitments
+                .iter()
+                .map(|id| {
+                    let bytes = self.read_bytes(*id)?;
+                    let commitment = Bytes48::try_from(bytes.as_ref()).map_err(blob_error)?;
+                    Ok(kzg_to_versioned_hash(commitment.as_slice()))
+                })
+                .collect::<Result<Vec<_>, BlobStoreError>>()?;
+            index.replace(
+                tx,
+                IndexedSidecar { descriptor: id, logical_size: descriptor.logical_size, hashes },
+            );
+        }
+        cache.decoded.retain(|tx, _| {
+            cache.index.entries.get(tx).map(|entry| entry.descriptor) ==
+                index.entries.get(tx).map(|entry| entry.descriptor)
+        });
+        cache.index = index;
+        // Keep the generation observed before reading. Concurrent mutations force a fresh lookup.
+        cache.generation = Some(generation);
+        Ok(())
+    }
+
+    fn lookup_transactions(&self, hashes: &[B256]) -> Result<Vec<B256>, BlobStoreError> {
+        let mut cache = self.gate.lock();
+        self.refresh_index(&mut cache)?;
+        Ok(hashes
+            .iter()
+            .filter_map(|hash| cache.index.hashes.get(hash))
+            .flatten()
+            .copied()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect())
+    }
 }
 
 impl BlobStore for SharedBlobStore {
     fn insert(&self, tx: B256, data: PooledBlobSidecar) -> Result<(), BlobStoreError> {
-        self.shared.ensure_healthy().map_err(blob_error)?;
-        if !data.availability().is_full() {
-            return Err(blob_error(FacadeError::PartialSidecar));
-        }
-        let sidecar = data.into_sidecar();
-        let proofs = match &sidecar {
-            BlobTransactionSidecarVariant::Eip4844(value) => &value.proofs,
-            BlobTransactionSidecarVariant::Eip7594(value) => &value.cell_proofs,
-        };
-        let mut objects = Vec::new();
-        let blobs = sidecar
-            .blobs()
-            .iter()
-            .map(|blob| add_object(&mut objects, ObjectKind::Blob, blob.as_slice()))
-            .collect();
-        let commitments = sidecar
-            .commitments()
-            .iter()
-            .map(|commitment| {
-                add_object(&mut objects, ObjectKind::Commitment, commitment.as_slice())
-            })
-            .collect();
-        let proof_ids = proofs
-            .iter()
-            .map(|proof| add_object(&mut objects, ObjectKind::Proof, proof.as_slice()))
-            .collect();
-        let descriptor = Descriptor {
-            flavor: if sidecar.is_eip7594() { Flavor::Eip7594 } else { Flavor::Eip4844 },
-            blobs,
-            commitments,
-            proofs: proof_ids,
-            logical_size: logical_size(&sidecar),
-        };
-        descriptor.validate().map_err(blob_error)?;
-        objects.push((
-            ObjectKind::BlobSidecar,
-            Encoding::Json,
-            serde_json::to_vec(&descriptor).map_err(blob_error)?,
-        ));
-        let mut cache = self.gate.lock();
-        self.shared.put_owned_batch(Owner::Pool(tx.0), &objects).map_err(blob_error)?;
-        cache.remove(&tx);
-        Ok(())
+        self.insert_all(vec![(tx, data)])
     }
 
     fn insert_all(&self, txs: Vec<(B256, PooledBlobSidecar)>) -> Result<(), BlobStoreError> {
         self.shared.ensure_healthy().map_err(blob_error)?;
-        for (tx, sidecar) in txs {
-            self.insert(tx, sidecar)?;
+        let prepared = txs
+            .into_iter()
+            .map(|(tx, data)| {
+                let sidecar = prepare_sidecar(data)?;
+                Ok((tx, sidecar))
+            })
+            .collect::<Result<Vec<_>, BlobStoreError>>()?;
+        if prepared.is_empty() {
+            return Ok(());
+        }
+        let batches = prepared
+            .iter()
+            .map(|(tx, sidecar)| OwnedObjectBatch {
+                owner: Owner::Pool(tx.0),
+                objects: &sidecar.objects,
+            })
+            .collect::<Vec<_>>();
+        let mut cache = self.gate.lock();
+        self.refresh_index(&mut cache)?;
+        let (_, commit) = self.shared.put_owned_batches_tracked(&batches).map_err(blob_error)?;
+        if cache.generation == Some(commit.before) {
+            for (tx, sidecar) in prepared {
+                cache.index.replace(tx, sidecar.entry);
+                cache.decoded.remove(&tx);
+            }
+            cache.generation = Some(commit.after);
+        } else {
+            cache.invalidate();
         }
         Ok(())
     }
 
     fn delete(&self, tx: B256) -> Result<(), BlobStoreError> {
-        self.shared.ensure_healthy().map_err(blob_error)?;
-        let mut cache = self.gate.lock();
-        self.shared.replace_owner(Owner::Pool(tx.0), &[]).map_err(blob_error)?;
-        cache.remove(&tx);
-        Ok(())
+        self.delete_all(vec![tx])
     }
 
     fn delete_all(&self, txs: Vec<B256>) -> Result<(), BlobStoreError> {
-        self.shared.ensure_healthy().map_err(blob_error)?;
         let mut cache = self.gate.lock();
+        self.refresh_index(&mut cache)?;
         let owners = txs.iter().map(|tx| Owner::Pool(tx.0)).collect::<Vec<_>>();
-        self.shared.release_owners(&owners).map_err(blob_error)?;
-        for tx in txs {
-            cache.remove(&tx);
+        let commit = self.shared.release_owners_tracked(&owners).map_err(blob_error)?;
+        if cache.generation == Some(commit.before) {
+            for tx in txs {
+                cache.index.remove(tx);
+                cache.decoded.remove(&tx);
+            }
+            cache.generation = Some(commit.after);
+        } else {
+            cache.invalidate();
         }
         Ok(())
     }
@@ -275,7 +317,7 @@ impl BlobStore for SharedBlobStore {
     ) -> Result<Vec<Option<BlobAndProofV1>>, BlobStoreError> {
         self.shared.ensure_healthy().map_err(blob_error)?;
         let mut result = vec![None; hashes.len()];
-        for tx in self.transaction_hashes() {
+        for tx in self.lookup_transactions(hashes)? {
             if let Some(sidecar) = self.read_sidecar(tx)? &&
                 let Some(sidecar) = sidecar.as_eip4844()
             {
@@ -313,7 +355,7 @@ impl BlobStore for SharedBlobStore {
     ) -> Result<Vec<Option<BlobCellsAndProofsV1>>, BlobStoreError> {
         self.shared.ensure_healthy().map_err(blob_error)?;
         let mut result = vec![None; hashes.len()];
-        for tx in self.transaction_hashes() {
+        for tx in self.lookup_transactions(hashes)? {
             if let Some(sidecar) = self.read_sidecar(tx)? &&
                 let Some(sidecar) = sidecar.as_eip7594()
             {
@@ -331,23 +373,9 @@ impl BlobStore for SharedBlobStore {
     }
 
     fn has_versioned_hashes(&self, hashes: &[B256]) -> Result<Vec<bool>, BlobStoreError> {
-        self.shared.ensure_healthy().map_err(blob_error)?;
-        let mut found = vec![false; hashes.len()];
-        for tx in self.transaction_hashes() {
-            if let Some(sidecar) = self.read_sidecar(tx)? {
-                for available in sidecar.versioned_hashes() {
-                    for (index, requested) in hashes.iter().enumerate() {
-                        if *requested == available {
-                            found[index] = true;
-                        }
-                    }
-                }
-            }
-            if found.iter().all(|value| *value) {
-                break;
-            }
-        }
-        Ok(found)
+        let mut cache = self.gate.lock();
+        self.refresh_index(&mut cache)?;
+        Ok(hashes.iter().map(|hash| cache.index.hashes.contains_key(hash)).collect())
     }
 
     fn get_cells(
@@ -362,23 +390,17 @@ impl BlobStore for SharedBlobStore {
     }
 
     fn data_size_hint(&self) -> Option<usize> {
-        self.shared.ensure_healthy().ok()?;
-        self.transaction_hashes().into_iter().try_fold(0usize, |sum, tx| {
-            let ids = self.shared.owner_objects(Owner::Pool(tx.0));
-            let id = ids
-                .into_iter()
-                .find(|id| id.kind == ObjectKind::BlobSidecar && id.encoding == Encoding::Json)?;
-            let bytes = self.shared.get(id).ok().flatten()?;
-            let descriptor = serde_json::from_slice::<Descriptor>(&bytes).ok()?;
-            descriptor.validate().ok()?;
-            sum.checked_add(descriptor.logical_size)
-        })
+        let mut cache = self.gate.lock();
+        self.refresh_index(&mut cache).ok()?;
+        usize::try_from(cache.index.logical_bytes).ok()
     }
+
     fn blobs_len(&self) -> usize {
-        if self.shared.ensure_healthy().is_err() {
+        let mut cache = self.gate.lock();
+        if self.refresh_index(&mut cache).is_err() {
             return 0;
         }
-        self.transaction_hashes().len()
+        cache.index.entries.len()
     }
 }
 
@@ -431,6 +453,108 @@ enum FacadeError {
     PartialSidecar,
     #[error("malformed sidecar cardinalities or object namespaces")]
     MalformedSidecar,
+}
+
+#[derive(Debug, Default)]
+struct BlobCache {
+    generation: Option<u64>,
+    index: BlobIndex,
+    decoded: BTreeMap<B256, Weak<BlobTransactionSidecarVariant>>,
+}
+
+impl BlobCache {
+    fn invalidate(&mut self) {
+        self.generation = None;
+        self.decoded.clear();
+    }
+}
+
+#[derive(Debug, Default)]
+struct BlobIndex {
+    entries: BTreeMap<B256, IndexedSidecar>,
+    hashes: BTreeMap<B256, BTreeSet<B256>>,
+    logical_bytes: u128,
+}
+
+impl BlobIndex {
+    fn replace(&mut self, tx: B256, entry: IndexedSidecar) {
+        self.remove(tx);
+        self.logical_bytes += entry.logical_size as u128;
+        for hash in &entry.hashes {
+            self.hashes.entry(*hash).or_default().insert(tx);
+        }
+        self.entries.insert(tx, entry);
+    }
+
+    fn remove(&mut self, tx: B256) {
+        if let Some(entry) = self.entries.remove(&tx) {
+            self.logical_bytes -= entry.logical_size as u128;
+            for hash in entry.hashes {
+                if let std::collections::btree_map::Entry::Occupied(mut holders) =
+                    self.hashes.entry(hash)
+                {
+                    holders.get_mut().remove(&tx);
+                    if holders.get().is_empty() {
+                        holders.remove();
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+struct IndexedSidecar {
+    descriptor: ObjectId,
+    logical_size: usize,
+    hashes: Vec<B256>,
+}
+
+struct PreparedSidecar {
+    objects: Vec<(ObjectKind, Encoding, Vec<u8>)>,
+    entry: IndexedSidecar,
+}
+
+fn prepare_sidecar(data: PooledBlobSidecar) -> Result<PreparedSidecar, BlobStoreError> {
+    if !data.availability().is_full() {
+        return Err(blob_error(FacadeError::PartialSidecar));
+    }
+    let sidecar = data.into_sidecar();
+    let proofs = match &sidecar {
+        BlobTransactionSidecarVariant::Eip4844(value) => &value.proofs,
+        BlobTransactionSidecarVariant::Eip7594(value) => &value.cell_proofs,
+    };
+    let mut objects = Vec::new();
+    let descriptor = Descriptor {
+        flavor: if sidecar.is_eip7594() { Flavor::Eip7594 } else { Flavor::Eip4844 },
+        blobs: sidecar
+            .blobs()
+            .iter()
+            .map(|blob| add_object(&mut objects, ObjectKind::Blob, blob.as_slice()))
+            .collect(),
+        commitments: sidecar
+            .commitments()
+            .iter()
+            .map(|value| add_object(&mut objects, ObjectKind::Commitment, value.as_slice()))
+            .collect(),
+        proofs: proofs
+            .iter()
+            .map(|value| add_object(&mut objects, ObjectKind::Proof, value.as_slice()))
+            .collect(),
+        logical_size: logical_size(&sidecar),
+    };
+    descriptor.validate().map_err(blob_error)?;
+    let bytes = serde_json::to_vec(&descriptor).map_err(blob_error)?;
+    let id = ObjectId::new(ObjectKind::BlobSidecar, Encoding::Json, &bytes);
+    objects.push((ObjectKind::BlobSidecar, Encoding::Json, bytes));
+    Ok(PreparedSidecar {
+        objects,
+        entry: IndexedSidecar {
+            descriptor: id,
+            logical_size: descriptor.logical_size,
+            hashes: sidecar.versioned_hashes().collect(),
+        },
+    })
 }
 
 fn logical_size(sidecar: &BlobTransactionSidecarVariant) -> usize {
@@ -543,5 +667,109 @@ mod tests {
         assert!(store
             .insert(tx, BlobTransactionSidecarVariant::Eip4844(malformed).into())
             .is_err());
+    }
+
+    fn sidecar(commitment: Bytes48) -> PooledBlobSidecar {
+        BlobTransactionSidecarVariant::Eip4844(BlobTransactionSidecar {
+            blobs: vec![Blob::default()],
+            commitments: vec![commitment],
+            proofs: vec![Bytes48::default()],
+        })
+        .into()
+    }
+
+    #[test]
+    fn batched_indexes_track_duplicate_holders_replacement_and_restart() {
+        let directory = TempDir::new().unwrap();
+        let first = B256::from([1; 32]);
+        let second = B256::from([2; 32]);
+        let commitment = Bytes48::from([7; 48]);
+        let hash = kzg_to_versioned_hash(commitment.as_slice());
+        let replacement = Bytes48::from([8; 48]);
+        let replacement_hash = kzg_to_versioned_hash(replacement.as_slice());
+        let size = alloy_eips::eip4844::BYTES_PER_BLOB + 96;
+        {
+            let store = open(directory.path());
+            let before = store.shared.try_observe().unwrap().journal_commits_total;
+            store
+                .insert_all(vec![(first, sidecar(commitment)), (second, sidecar(commitment))])
+                .unwrap();
+            assert_eq!(store.shared.try_observe().unwrap().journal_commits_total, before + 1);
+            assert_eq!(store.blobs_len(), 2);
+            assert_eq!(store.data_size_hint(), Some(2 * size));
+            store.insert(first, sidecar(replacement)).unwrap();
+            assert_eq!(
+                store.has_versioned_hashes(&[hash, replacement_hash]).unwrap(),
+                vec![true, true]
+            );
+            store.delete(second).unwrap();
+            assert_eq!(
+                store.has_versioned_hashes(&[hash, replacement_hash, hash]).unwrap(),
+                vec![false, true, false]
+            );
+            assert_eq!(store.blobs_len(), 1);
+            assert_eq!(store.data_size_hint(), Some(size));
+        }
+        let store = open(directory.path());
+        assert_eq!(store.blobs_len(), 1);
+        assert_eq!(store.data_size_hint(), Some(size));
+        assert_eq!(
+            store
+                .get_by_versioned_hashes_v1(&[hash, replacement_hash])
+                .unwrap()
+                .iter()
+                .map(Option::is_some)
+                .collect::<Vec<_>>(),
+            vec![false, true]
+        );
+    }
+
+    #[test]
+    fn metrics_do_not_read_objects_and_external_pool_changes_invalidate_indexes() {
+        let directory = TempDir::new().unwrap();
+        let store = open(directory.path());
+        let tx = B256::from([1; 32]);
+        let commitment = Bytes48::from([7; 48]);
+        let hash = kzg_to_versioned_hash(commitment.as_slice());
+        store.insert(tx, sidecar(commitment)).unwrap();
+        let decoded = store.get(tx).unwrap().unwrap();
+        let blob = ObjectId::new(ObjectKind::Blob, Encoding::Raw, decoded.blobs()[0].as_slice());
+        store.shared.pin(Owner::Consensus([2; 32]), blob).unwrap();
+        let before = store.shared.try_observe().unwrap();
+        assert_eq!(store.blobs_len(), 1);
+        assert_eq!(store.data_size_hint(), Some(logical_size(&decoded)));
+        assert_eq!(store.has_versioned_hashes(&[hash]).unwrap(), vec![true]);
+        assert_eq!(store.shared.try_observe().unwrap(), before);
+        store.shared.replace_owner(Owner::Pool(tx.0), &[]).unwrap();
+        assert_eq!(store.blobs_len(), 0);
+        assert_eq!(store.data_size_hint(), Some(0));
+        assert_eq!(store.has_versioned_hashes(&[hash]).unwrap(), vec![false]);
+        assert!(store.get(tx).unwrap().is_none());
+        assert!(store.shared.get(blob).unwrap().is_some());
+        store.shared.inner.lock().journal.mark_publication_uncertain();
+        assert_eq!(store.data_size_hint(), None);
+        assert_eq!(store.blobs_len(), 0);
+        assert!(store.has_versioned_hashes(&[hash]).is_err());
+    }
+
+    #[test]
+    fn malformed_later_batch_member_cannot_publish_an_earlier_transaction() {
+        let directory = TempDir::new().unwrap();
+        let store = open(directory.path());
+        let first = B256::from([1; 32]);
+        let malformed = BlobTransactionSidecarVariant::Eip4844(BlobTransactionSidecar {
+            blobs: vec![Blob::default()],
+            commitments: vec![],
+            proofs: vec![],
+        });
+        let before = store.shared.try_observe().unwrap();
+        assert!(store
+            .insert_all(vec![
+                (first, sidecar(Bytes48::default())),
+                (B256::from([2; 32]), malformed.into())
+            ])
+            .is_err());
+        assert!(!store.contains(first).unwrap());
+        assert_eq!(store.shared.try_observe().unwrap(), before);
     }
 }

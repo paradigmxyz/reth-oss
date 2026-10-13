@@ -459,6 +459,7 @@ fn artificial_compliance_metadata_selects_and_labels_only_explicit_fixture_mode(
         handler: "block_weight_test".into(),
         suite: "suite".into(),
         name: "case".into(),
+        configuration: Default::default(),
     };
     let metadata = directory.path().join("meta.yaml");
     std::fs::write(&metadata, "bls_setting: 2\n").unwrap();
@@ -498,6 +499,7 @@ fn strict_genesis_adapter_rejects_artificial_signature_metadata() {
         handler: "initialization".into(),
         suite: "pyspec_tests".into(),
         name: "case".into(),
+        configuration: Default::default(),
     };
     std::fs::write(directory.path().join("meta.yaml"), "bls_setting: 2\n").unwrap();
     assert_eq!(

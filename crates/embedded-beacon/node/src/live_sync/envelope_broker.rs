@@ -25,10 +25,10 @@ impl LiveSync {
             job.metadata.slot() != active.slot ||
             self.broker_envelope.is_some() ||
             self.broker_envelope_retry.is_some() ||
-            self.envelope_request.is_some() ||
-            self.envelope_retry.is_some() ||
-            self.sidecar_request.is_some() ||
-            self.sidecar_retry.is_some()
+            self.envelopes.requested().is_some() ||
+            self.envelopes.waiting().is_some() ||
+            self.sidecars.requested().is_some() ||
+            self.sidecars.waiting().is_some()
         {
             return Err(LiveSyncError::Response)
         }

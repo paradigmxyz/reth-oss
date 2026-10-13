@@ -34,7 +34,9 @@ async fn syncing_and_accepted_advance_checked_consensus_without_execution_author
         let wire =
             WireBlock::from_ssz(signed.to_ssz(Preset::Minimal).unwrap(), &setup.config).unwrap();
         tokio::task::spawn_blocking(move || {
-            let mut worker = Worker::initialize_mode(setup, Ok(0), false, None, true).unwrap();
+            let mut worker =
+                Worker::initialize_mode(setup, Ok(0), false, StartupExecutionMode::Optimistic)
+                    .unwrap();
             assert!(!status(&worker).execution_acknowledged);
             assert_eq!(backend.forkchoice_calls.lock().unwrap().len(), 1);
             let slot_ms = worker.config.seconds_per_slot * 1000;
@@ -120,7 +122,8 @@ async fn optimistic_signed_rejection_and_actual_invalid_fail_safely() {
     *backend.payload_status.lock().unwrap() = PayloadStatusEnum::Syncing;
     let config = setup.config.clone();
     tokio::task::spawn_blocking(move || {
-        let mut worker = Worker::initialize_mode(setup, Ok(0), false, None, true).unwrap();
+        let mut worker =
+            Worker::initialize_mode(setup, Ok(0), false, StartupExecutionMode::Optimistic).unwrap();
         worker.advance(config.seconds_per_slot * 1000).unwrap();
         let anchor = worker.graph.snapshot().unwrap();
         // A native optimistic unknown-parent dependency must not close the graph owner.
@@ -291,7 +294,9 @@ async fn genuine_fulu_checkpoint_descendant_and_exact_original_restart_remain_op
     *backend.expected_payload_hash.lock().unwrap() = [42; 32];
     let wire = WireBlock::from_ssz(signed.to_ssz(Preset::Minimal).unwrap(), &config).unwrap();
     tokio::task::spawn_blocking(move || {
-        let mut worker = Worker::initialize_mode(initial, Ok(now), false, None, true).unwrap();
+        let mut worker =
+            Worker::initialize_mode(initial, Ok(now), false, StartupExecutionMode::Optimistic)
+                .unwrap();
         let child_ms = now + config.seconds_per_slot * 1000;
         let OwnerClock::Controlled(clock) = &worker.clock else { unreachable!() };
         clock.store(child_ms, Ordering::Release);
@@ -337,7 +342,8 @@ async fn genuine_fulu_checkpoint_descendant_and_exact_original_restart_remain_op
         *reopened.payload_status.lock().unwrap() = PayloadStatusEnum::Syncing;
         *reopened.expected_payload_hash.lock().unwrap() = [42; 32];
         let mut restored =
-            Worker::initialize_mode(restored, Ok(child_ms), true, None, true).unwrap();
+            Worker::initialize_mode(restored, Ok(child_ms), true, StartupExecutionMode::Optimistic)
+                .unwrap();
         let plan = recovery::ReplayPlan::prepare(
             &restored.repository,
             &config,
@@ -347,8 +353,7 @@ async fn genuine_fulu_checkpoint_descendant_and_exact_original_restart_remain_op
         .unwrap();
         for sequence in &plan.transcript.as_ref().unwrap().sequences {
             restored.replay_original_event(*sequence).unwrap();
-            assert!(restored.replay_state_lease.is_none());
-            assert!(restored.replay_event.is_none());
+            assert!(restored.replay.event().is_none());
         }
         assert_eq!(
             restored.import_metrics.replayed_events_total,

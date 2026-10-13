@@ -56,7 +56,7 @@ impl ImportCoordinator {
             availability,
             limits,
             recovery_limits,
-            false,
+            StartupExecutionMode::Strict,
         )
     }
 
@@ -90,7 +90,7 @@ impl ImportCoordinator {
             availability,
             limits,
             recovery_limits,
-            true,
+            StartupExecutionMode::Optimistic,
         )
     }
 
@@ -103,7 +103,7 @@ impl ImportCoordinator {
         availability: RetrievalAvailability,
         limits: ImportLimits,
         recovery_limits: RecoveryLimits,
-        optimistic: bool,
+        mode: StartupExecutionMode,
     ) -> Result<ImportStartup, ImportError>
     where
         E: ExecutionEngine<
@@ -154,8 +154,7 @@ impl ImportCoordinator {
                 );
                 let initialized = prepared.and_then(|plan| {
                     let now = setup.clock.now();
-                    Worker::initialize_mode(setup, now, true, None, optimistic)
-                        .map(|worker| (worker, plan))
+                    Worker::initialize_mode(setup, now, true, mode).map(|worker| (worker, plan))
                 });
                 let (mut worker, plan) = match initialized {
                     Ok(value) => value,

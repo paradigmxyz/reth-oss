@@ -525,6 +525,7 @@ fn cooling_checkpoint_binding(
 mod tests {
     use super::*;
     use crate::compact::{StateData, StateSourceIdentity};
+    use reth_embedded_beacon_state_transition::ssz::Ssz;
 
     #[test]
     fn checkpoint_cooling_reuses_only_exact_origin_and_checks_replacement_data() {

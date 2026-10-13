@@ -1,8 +1,8 @@
 //! Published phase0 processing fixture adapter.
 
 use super::{
-    config_override, config_version_override, fixture_disables_bls, hex, phase0, phase0_processing,
-    read_snappy_ssz, schema_preset, yaml, Case,
+    fixture_disables_bls, hex, phase0, phase0_processing, read_snappy_ssz, schema_preset, yaml,
+    Case,
 };
 
 pub(super) fn run_phase0_processing(case: &Case, max_bytes: usize) -> Result<(), String> {
@@ -13,34 +13,7 @@ pub(super) fn run_phase0_processing(case: &Case, max_bytes: usize) -> Result<(),
         reth_embedded_beacon_state_transition::ssz::phase0::BeaconState::from_ssz(&bytes, preset)
             .map_err(|error| error.to_string())?;
     let mut parameters = phase0_processing::Phase0Parameters::for_preset(preset);
-    parameters.ejection_balance =
-        config_override(case, "EJECTION_BALANCE", parameters.ejection_balance, max_bytes)?;
-    parameters.min_per_epoch_churn_limit = config_override(
-        case,
-        "MIN_PER_EPOCH_CHURN_LIMIT",
-        parameters.min_per_epoch_churn_limit,
-        max_bytes,
-    )?;
-    parameters.churn_limit_quotient =
-        config_override(case, "CHURN_LIMIT_QUOTIENT", parameters.churn_limit_quotient, max_bytes)?;
-    parameters.min_validator_withdrawability_delay = config_override(
-        case,
-        "MIN_VALIDATOR_WITHDRAWABILITY_DELAY",
-        parameters.min_validator_withdrawability_delay,
-        max_bytes,
-    )?;
-    parameters.shard_committee_period = config_override(
-        case,
-        "SHARD_COMMITTEE_PERIOD",
-        parameters.shard_committee_period,
-        max_bytes,
-    )?;
-    parameters.genesis_fork_version = config_version_override(
-        case,
-        "GENESIS_FORK_VERSION",
-        parameters.genesis_fork_version,
-        max_bytes,
-    )?;
+    super::fixture_config::apply_phase0(case, max_bytes, &mut parameters)?;
     parameters.validate().map_err(|error| error.to_string())?;
     macro_rules! operation {
         ($handler:ident, $value:expr $(,)?) => {

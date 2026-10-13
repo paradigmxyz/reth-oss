@@ -33,6 +33,7 @@ use std::{
     future::Future,
     io::Read,
     path::{Component, Path, PathBuf},
+    sync::OnceLock,
     task::{Context, Poll, Waker},
     time::Instant,
 };
@@ -45,6 +46,7 @@ mod block_gossip;
 mod block_sequences;
 mod case_execution;
 mod fast_confirmation;
+mod fixture_config;
 mod fork_choice_availability;
 mod fork_choice_merge;
 mod fork_choice_store;
@@ -200,6 +202,7 @@ struct Case {
     handler: String,
     suite: String,
     name: String,
+    configuration: OnceLock<(usize, fixture_config::FixtureConfig)>,
 }
 
 impl Default for RunOptions {
@@ -586,6 +589,7 @@ fn discover_files(root: &Path, files: &[PathBuf]) -> Result<Vec<Case>, String> {
                 handler: parts[3].into(),
                 suite: parts[4].into(),
                 name: parts[5..].join("/"),
+                configuration: Default::default(),
             })
         })
         .collect()
@@ -1027,23 +1031,7 @@ fn config_yaml(path: &Path, max_bytes: usize) -> Result<Value, String> {
 }
 
 fn config_override(case: &Case, key: &str, default: u64, max_bytes: usize) -> Result<u64, String> {
-    let mut value = default;
-    // Enclosing defaults are applied first, then the nearest case override.
-    let mut ancestors = case.path.ancestors().take(6).collect::<Vec<_>>();
-    ancestors.reverse();
-    for ancestor in ancestors {
-        let path = ancestor.join("config.yaml");
-        if path.is_file() {
-            let config = config_yaml(&path, max_bytes)?;
-            if !config[key].is_null() {
-                value = config[key]
-                    .as_u64()
-                    .or_else(|| config[key].as_str().and_then(|text| text.parse().ok()))
-                    .ok_or_else(|| format!("invalid unsigned config override: {key}"))?;
-            }
-        }
-    }
-    Ok(value)
+    fixture_config::with_config(case, max_bytes, |config| config.unsigned(key, default))
 }
 fn run_shuffling(case: &Case, max_bytes: usize) -> Result<(), String> {
     let data = yaml(&case.path.join("mapping.yaml"), max_bytes)?;
@@ -1379,19 +1367,7 @@ fn config_version_override(
     default: [u8; 4],
     max_bytes: usize,
 ) -> Result<[u8; 4], String> {
-    let mut value = default;
-    let mut ancestors = case.path.ancestors().take(6).collect::<Vec<_>>();
-    ancestors.reverse();
-    for ancestor in ancestors {
-        let path = ancestor.join("config.yaml");
-        if path.is_file() {
-            let config = config_yaml(&path, max_bytes)?;
-            if !config[key].is_null() {
-                value = fixed_hex::<4>(&config[key])?;
-            }
-        }
-    }
-    Ok(value)
+    fixture_config::with_config(case, max_bytes, |config| config.version(key, default))
 }
 
 #[derive(Debug)]
@@ -1574,19 +1550,7 @@ fn config_value_override(
     name: &str,
     max_bytes: usize,
 ) -> Result<Option<Value>, String> {
-    let mut directory = Some(case.path.as_path());
-    for _ in 0..6 {
-        let Some(path) = directory else { break };
-        let config = path.join("config.yaml");
-        if config.is_file() {
-            let value = config_yaml(&config, max_bytes)?;
-            if let Some(value) = value.get(name) {
-                return Ok(Some(value.clone()));
-            }
-        }
-        directory = path.parent();
-    }
-    Ok(None)
+    fixture_config::with_config(case, max_bytes, |config| config.value(name))
 }
 
 fn fixture_transition_parameters(

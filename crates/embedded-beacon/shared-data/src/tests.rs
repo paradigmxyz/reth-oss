@@ -636,3 +636,34 @@ fn single_object_put_reuses_cache_ownership_and_skips_oversized_cache_allocation
     assert_eq!(store.get(large).unwrap().unwrap().as_ref(), b"oversized");
     assert_eq!(store.owner_objects(second), vec![id]);
 }
+
+#[test]
+fn owner_replacements_publish_one_generation_and_last_duplicate_owner_wins() {
+    let directory = tempfile::tempdir().unwrap();
+    let first = Owner::Pool([3; 32]);
+    let second = Owner::Consensus([4; 32]);
+    let initial = vec![(ObjectKind::Blob, Encoding::Raw, b"initial".to_vec())];
+    let replacement = vec![(ObjectKind::Blob, Encoding::Raw, b"replacement".to_vec())];
+    let shared = vec![(ObjectKind::Blob, Encoding::Raw, b"shared".to_vec())];
+    let ids;
+    {
+        let store = SharedDataStore::open(directory.path(), identity(), 0).unwrap();
+        let before = store.try_observe().unwrap().journal_commits_total;
+        ids = store
+            .put_owned_batches(&[
+                OwnedObjectBatch { owner: first, objects: &initial },
+                OwnedObjectBatch { owner: second, objects: &shared },
+                OwnedObjectBatch { owner: first, objects: &replacement },
+            ])
+            .unwrap();
+        assert_eq!(store.try_observe().unwrap().journal_commits_total, before + 1);
+        assert_eq!(store.owner_objects(first), ids[2]);
+        assert_eq!(store.owner_objects(second), ids[1]);
+    }
+    let store = SharedDataStore::open(directory.path(), identity(), 0).unwrap();
+    assert_eq!(store.owner_objects(first), ids[2]);
+    assert_eq!(store.owner_objects(second), ids[1]);
+    store.collect_garbage().unwrap();
+    assert!(store.get(ids[0][0]).unwrap().is_none());
+    assert_eq!(store.get(ids[2][0]).unwrap().unwrap().as_ref(), b"replacement");
+}

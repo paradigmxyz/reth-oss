@@ -46,6 +46,7 @@ mod envelope_retry;
 mod history_broker;
 mod observations;
 mod ranges;
+mod request_state;
 mod retry;
 mod serving;
 
@@ -54,6 +55,7 @@ use deferred::DeferredImport;
 use envelope_broker::{BrokerEnvelopePending, RetryingBrokerEnvelope};
 use envelope_retry::WaitingEnvelope;
 use history_broker::HistoryBroker;
+use request_state::RequestState;
 use retry::{rotate_data_peer, DataPeerCycle, RetryingSidecar};
 use serving::{ActiveServing, ServingToken};
 
@@ -89,8 +91,8 @@ pub struct LiveSync {
     validated_range_cursor: u64,
     gossip_turn: bool,
     block_request: Option<BlockPending>,
-    envelope_request: Option<EnvelopePending>,
-    sidecar_request: Option<SidecarPending>,
+    envelopes: RequestState<WaitingEnvelope, EnvelopePending>,
+    sidecars: RequestState<RetryingSidecar, SidecarPending>,
     active: Option<ActiveImport>,
     stopped: oneshot::Receiver<()>,
     branch: Option<BranchRecovery>,
@@ -98,11 +100,9 @@ pub struct LiveSync {
     connected: HashSet<PeerId>,
     gossip_queue: VecDeque<QueuedGossip>,
     gossip_active: Option<ActiveGossip>,
-    sidecar_retry: Option<RetryingSidecar>,
     sidecar_cycle: DataPeerCycle,
     serving: Option<ActiveServing>,
     deferred_import: Option<DeferredImport>,
-    envelope_retry: Option<WaitingEnvelope>,
     broker_envelope: Option<BrokerEnvelopePending>,
     broker_envelope_retry: Option<RetryingBrokerEnvelope>,
     custody: CustodyTask,
@@ -162,8 +162,8 @@ impl LiveSync {
                 validated_range_cursor: slot.checked_add(1).ok_or(LiveSyncError::Bounds)?,
                 gossip_turn: true,
                 block_request: None,
-                envelope_request: None,
-                sidecar_request: None,
+                envelopes: Default::default(),
+                sidecars: Default::default(),
                 active: None,
                 stopped,
                 branch: None,
@@ -171,11 +171,11 @@ impl LiveSync {
                 connected: HashSet::new(),
                 gossip_queue: VecDeque::new(),
                 gossip_active: None,
-                sidecar_retry: None,
+
                 sidecar_cycle: DataPeerCycle::default(),
                 serving: None,
                 deferred_import: None,
-                envelope_retry: None,
+
                 broker_envelope: None,
                 broker_envelope_retry: None,
                 custody: CustodyTask::default(),
@@ -210,10 +210,10 @@ impl LiveSync {
         self.observations.update(
             self.targets.len(),
             usize::from(self.block_request.is_some()) +
-                usize::from(self.envelope_request.is_some()) +
-                usize::from(self.sidecar_request.is_some()) +
-                usize::from(self.sidecar_retry.is_some()) +
-                usize::from(self.envelope_retry.is_some()) +
+                usize::from(self.envelopes.requested().is_some()) +
+                usize::from(self.sidecars.requested().is_some()) +
+                usize::from(self.sidecars.waiting().is_some()) +
+                usize::from(self.envelopes.waiting().is_some()) +
                 usize::from(self.broker_envelope.is_some()) +
                 usize::from(self.broker_envelope_retry.is_some()) +
                 self.history.requests(),
@@ -367,10 +367,8 @@ impl LiveSync {
             self.active.is_some() ||
             self.deferred_import.is_some() ||
             self.block_request.is_some() ||
-            self.envelope_request.is_some() ||
-            self.envelope_retry.is_some() ||
-            self.sidecar_request.is_some() ||
-            self.sidecar_retry.is_some() ||
+            !self.envelopes.is_idle() ||
+            !self.sidecars.is_idle() ||
             self.gossip_active.is_some()
         {
             return Ok(());
@@ -525,16 +523,16 @@ impl LiveSync {
                     } else {
                         false
                     };
-                if self.envelope_request.as_ref().is_some_and(|pending| pending.peer == peer) {
-                    let pending = self.envelope_request.take().ok_or(LiveSyncError::Response)?;
+                if self.envelopes.requested().is_some_and(|pending| pending.peer == peer) {
+                    let pending = self.envelopes.take_requested().ok_or(LiveSyncError::Response)?;
                     self.retry_envelope(pending)?;
                 }
                 if self.broker_envelope.as_ref().is_some_and(|pending| pending.peer == peer) {
                     let pending = self.broker_envelope.take().ok_or(LiveSyncError::Response)?;
                     self.retry_broker_envelope(pending)?;
                 }
-                if self.sidecar_request.as_ref().is_some_and(|pending| pending.peer == peer) {
-                    let pending = self.sidecar_request.take().ok_or(LiveSyncError::Response)?;
+                if self.sidecars.requested().is_some_and(|pending| pending.peer == peer) {
+                    let pending = self.sidecars.take_requested().ok_or(LiveSyncError::Response)?;
                     self.retry_sidecar(pending)?;
                 }
                 if rebase {
@@ -658,8 +656,8 @@ impl LiveSync {
                     return self.broker_envelope_result(peer, id, batch);
                 }
                 if !self
-                    .envelope_request
-                    .as_ref()
+                    .envelopes
+                    .requested()
                     .is_some_and(|pending| pending.peer == peer && pending.id == id)
                 {
                     // A closed or replaced request can leave a completed transport event. Drop
@@ -668,7 +666,7 @@ impl LiveSync {
                         "[beacon] Discarded response without its current request association");
                     return Ok(())
                 }
-                let pending = self.envelope_request.take().ok_or(LiveSyncError::Response)?;
+                let pending = self.envelopes.take_requested().ok_or(LiveSyncError::Response)?;
                 EnvelopeRequest::Roots(vec![pending.root])
                     .matches(&self.config, &batch, |root| {
                         (root == pending.root).then_some(&pending.metadata)
@@ -707,8 +705,8 @@ impl LiveSync {
                     return self.retry_broker_envelope(pending);
                 }
                 if !self
-                    .envelope_request
-                    .as_ref()
+                    .envelopes
+                    .requested()
                     .is_some_and(|pending| pending.peer == peer && pending.id == id)
                 {
                     // A closed or replaced request can leave a completed transport event. Drop
@@ -717,15 +715,15 @@ impl LiveSync {
                         "[beacon] Discarded response without its current request association");
                     return Ok(())
                 }
-                let pending = self.envelope_request.take().ok_or(LiveSyncError::Response)?;
+                let pending = self.envelopes.take_requested().ok_or(LiveSyncError::Response)?;
                 self.retire_unavailable_provider(peer, code)?;
                 // Keep the admitted beacon graph; this response proves no execution branch.
                 self.retry_envelope(pending)?;
             }
             TransportEvent::Sidecars { peer, id, batch } => {
                 if !self
-                    .sidecar_request
-                    .as_ref()
+                    .sidecars
+                    .requested()
                     .is_some_and(|pending| pending.peer == peer && pending.id == id)
                 {
                     // A closed or replaced request can leave a completed transport event. Drop
@@ -734,7 +732,7 @@ impl LiveSync {
                         "[beacon] Discarded response without its current request association");
                     return Ok(())
                 }
-                let pending = self.sidecar_request.take().ok_or(LiveSyncError::Response)?;
+                let pending = self.sidecars.take_requested().ok_or(LiveSyncError::Response)?;
                 let result = pending
                     .job
                     .request
@@ -745,8 +743,8 @@ impl LiveSync {
             }
             TransportEvent::SidecarsUnavailable { peer, id, code } => {
                 if !self
-                    .sidecar_request
-                    .as_ref()
+                    .sidecars
+                    .requested()
                     .is_some_and(|pending| pending.peer == peer && pending.id == id)
                 {
                     // A closed or replaced request can leave a completed transport event. Drop
@@ -755,7 +753,7 @@ impl LiveSync {
                         "[beacon] Discarded response without its current request association");
                     return Ok(())
                 }
-                let pending = self.sidecar_request.take().ok_or(LiveSyncError::Response)?;
+                let pending = self.sidecars.take_requested().ok_or(LiveSyncError::Response)?;
                 self.remove_peer(peer);
                 self.retire_unavailable_provider(peer, code)?;
                 self.retry_sidecar(pending)?;
@@ -813,12 +811,12 @@ impl LiveSync {
                 "[beacon] Discarded availability job without its retained original candidate");
             return Ok(())
         }
-        if self.sidecar_request.is_some() || self.sidecar_retry.is_some() {
+        if !self.sidecars.is_idle() {
             job.complete(Err(RetrievalError::Capacity));
             return Ok(())
         }
         let started = job.created;
-        self.sidecar_retry = Some(RetryingSidecar { job, started, tried: Vec::new() });
+        self.sidecars.wait(RetryingSidecar { job, started, tried: Vec::new() })?;
         self.schedule_sidecar_retry()?;
         Ok(())
     }
@@ -827,8 +825,7 @@ impl LiveSync {
         result: Result<ImportReceipt, ImportError>,
     ) -> Result<(), LiveSyncError> {
         let active = self.active.take().ok_or(LiveSyncError::Response)?;
-        if self.sidecar_request.is_some() ||
-            self.sidecar_retry.is_some() ||
+        if !self.sidecars.is_idle() ||
             self.broker_envelope.is_some() ||
             self.broker_envelope_retry.is_some()
         {
@@ -921,10 +918,10 @@ impl LiveSync {
             // the small exact metadata and candidate-signature context for subsequent DA.
             drop(active._batch);
             if is_gloas {
-                if self.envelope_retry.is_some() || self.envelope_request.is_some() {
+                if !self.envelopes.is_idle() {
                     return Err(LiveSyncError::Bounds);
                 }
-                self.envelope_retry = Some(WaitingEnvelope {
+                self.envelopes.wait(WaitingEnvelope {
                     root,
                     slot,
                     metadata,
@@ -932,7 +929,7 @@ impl LiveSync {
                     started: Instant::now(),
                     tried: Vec::new(),
                     preferred: peer,
-                });
+                })?;
                 self.schedule_envelope_retry()?;
                 self.schedule_broker_envelope()?;
                 self.schedule_history()?;
@@ -1136,8 +1133,8 @@ impl LiveSync {
             return Err(LiveSyncError::RequestTimeout);
         }
         if self
-            .sidecar_request
-            .as_ref()
+            .sidecars
+            .requested()
             .is_some_and(|pending| pending.started.elapsed() >= REQUEST_TIMEOUT)
         {
             // The private transport request can still own a stream. Stop rather than reuse its
@@ -1148,8 +1145,8 @@ impl LiveSync {
             .block_request
             .as_ref()
             .is_some_and(|pending| pending.started.elapsed() >= REQUEST_TIMEOUT) ||
-            self.envelope_request
-                .as_ref()
+            self.envelopes
+                .requested()
                 .is_some_and(|pending| pending.started.elapsed() >= REQUEST_TIMEOUT)
         {
             return Err(LiveSyncError::RequestTimeout);

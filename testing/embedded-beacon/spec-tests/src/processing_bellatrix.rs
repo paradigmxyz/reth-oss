@@ -11,42 +11,7 @@ pub(super) fn run_bellatrix_processing(case: &Case, max_bytes: usize) -> Result<
     let spec_only = fixture_disables_bls(case, max_bytes)?;
     let bytes = read_snappy_ssz(&case.path.join("pre.ssz_snappy"), max_bytes)?;
     let mut parameters = bellatrix_processing::BellatrixParameters::for_preset(preset);
-    parameters.altair.phase0.ejection_balance = config_override(
-        case,
-        "EJECTION_BALANCE",
-        parameters.altair.phase0.ejection_balance,
-        max_bytes,
-    )?;
-    parameters.altair.phase0.min_per_epoch_churn_limit = config_override(
-        case,
-        "MIN_PER_EPOCH_CHURN_LIMIT",
-        parameters.altair.phase0.min_per_epoch_churn_limit,
-        max_bytes,
-    )?;
-    parameters.altair.phase0.churn_limit_quotient = config_override(
-        case,
-        "CHURN_LIMIT_QUOTIENT",
-        parameters.altair.phase0.churn_limit_quotient,
-        max_bytes,
-    )?;
-    parameters.altair.phase0.min_validator_withdrawability_delay = config_override(
-        case,
-        "MIN_VALIDATOR_WITHDRAWABILITY_DELAY",
-        parameters.altair.phase0.min_validator_withdrawability_delay,
-        max_bytes,
-    )?;
-    parameters.altair.phase0.shard_committee_period = config_override(
-        case,
-        "SHARD_COMMITTEE_PERIOD",
-        parameters.altair.phase0.shard_committee_period,
-        max_bytes,
-    )?;
-    parameters.altair.phase0.genesis_fork_version = config_version_override(
-        case,
-        "GENESIS_FORK_VERSION",
-        parameters.altair.phase0.genesis_fork_version,
-        max_bytes,
-    )?;
+    super::fixture_config::apply_phase0(case, max_bytes, &mut parameters.altair.phase0)?;
     parameters.fork_version = config_version_override(
         case,
         "BELLATRIX_FORK_VERSION",

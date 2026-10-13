@@ -14,10 +14,7 @@ pub(super) struct WaitingEnvelope {
 }
 impl LiveSync {
     pub(super) fn schedule_envelope_retry(&mut self) -> Result<(), LiveSyncError> {
-        let Some(mut retry) = self.envelope_retry.take() else { return Ok(()) };
-        if self.envelope_request.is_some() {
-            return Err(LiveSyncError::Bounds)
-        }
+        let Some(mut retry) = self.envelopes.take_waiting() else { return Ok(()) };
         if retry.started.elapsed() >= Duration::from_secs(18) {
             // Every previous stream had a known response or disconnect. A missing envelope
             // grants no FULL branch; an actual later signed child can still select EMPTY.
@@ -36,7 +33,7 @@ impl LiveSync {
             .min_by_key(|target| usize::from(target.peer != retry.preferred))
             .map(|target| target.peer);
         let Some(peer) = selected else {
-            self.envelope_retry = Some(retry);
+            self.envelopes.wait(retry)?;
             return Ok(())
         };
         let result = self.peer.as_mut().ok_or(LiveSyncError::PeerUnavailable)?.request_envelopes(
@@ -47,7 +44,7 @@ impl LiveSync {
         match result {
             Ok(id) => {
                 retry.tried.push(peer);
-                self.envelope_request = Some(EnvelopePending {
+                self.envelopes.request(EnvelopePending {
                     peer,
                     id,
                     root: retry.root,
@@ -56,27 +53,27 @@ impl LiveSync {
                     candidate: retry.candidate,
                     started: retry.started,
                     tried: retry.tried,
-                });
+                })?;
             }
             Err(PeerStartupError::Peer(PeerRuntimeError::Transport(TransportError::Capacity))) => {
-                self.envelope_retry = Some(retry);
+                self.envelopes.wait(retry)?;
             }
             Err(PeerStartupError::Peer(PeerRuntimeError::Transport(
                 TransportError::Configuration,
             ))) => {
                 self.remove_peer(peer);
                 retry.tried.push(peer);
-                self.envelope_retry = Some(retry);
+                self.envelopes.wait(retry)?;
             }
             Err(error) => return Err(error.into()),
         }
         Ok(())
     }
     pub(super) fn retry_envelope(&mut self, pending: EnvelopePending) -> Result<(), LiveSyncError> {
-        if self.envelope_retry.is_some() || pending.tried.len() > MAX_PEERS {
+        if self.envelopes.waiting().is_some() || pending.tried.len() > MAX_PEERS {
             return Err(LiveSyncError::Bounds)
         }
-        self.envelope_retry = Some(WaitingEnvelope {
+        self.envelopes.wait(WaitingEnvelope {
             root: pending.root,
             slot: pending.slot,
             metadata: pending.metadata,
@@ -84,7 +81,7 @@ impl LiveSync {
             started: pending.started,
             tried: pending.tried,
             preferred: pending.peer,
-        });
+        })?;
         self.schedule_envelope_retry()
     }
 }

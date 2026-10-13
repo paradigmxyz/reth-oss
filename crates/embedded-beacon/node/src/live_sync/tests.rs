@@ -606,8 +606,8 @@ fn detached_driver(
         validated_range_cursor: admitted_slot + 1,
         gossip_turn: true,
         block_request: None,
-        envelope_request: None,
-        sidecar_request: None,
+        envelopes: Default::default(),
+        sidecars: Default::default(),
         active: None,
         stopped,
         branch: None,
@@ -615,11 +615,11 @@ fn detached_driver(
         connected: HashSet::new(),
         gossip_queue: VecDeque::new(),
         gossip_active: None,
-        sidecar_retry: None,
+
         sidecar_cycle: DataPeerCycle::default(),
         serving: None,
         deferred_import: None,
-        envelope_retry: None,
+
         broker_envelope: None,
         broker_envelope_retry: None,
         custody: CustodyTask::default(),
@@ -672,7 +672,7 @@ pub(crate) async fn assert_background_custody_job_without_active_import(
         }
         driver.retrieve(job).unwrap();
         if mutation == 3 {
-            let pending = driver.sidecar_retry.take().unwrap();
+            let pending = driver.sidecars.take_waiting().unwrap();
             assert_eq!((pending.job.root, pending.job.slot), (head, slot));
             assert_eq!(pending.started, original_created);
             assert_eq!(pending.job.created, original_created);
@@ -680,9 +680,9 @@ pub(crate) async fn assert_background_custody_job_without_active_import(
             // Missing remote data is a known result, never a proof seal or new graph authority.
             pending.job.complete(Err(RetrievalError::Missing));
         } else {
-            assert!(driver.sidecar_retry.is_none());
+            assert!(driver.sidecars.waiting().is_none());
         }
-        assert!(driver.sidecar_request.is_none());
+        assert!(driver.sidecars.requested().is_none());
         assert!(tokio::time::timeout(Duration::from_secs(10), background)
             .await
             .unwrap()

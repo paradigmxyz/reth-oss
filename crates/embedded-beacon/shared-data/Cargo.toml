@@ -30,3 +30,7 @@ proptest.workspace = true
 default = []
 test-utils = ["reth-transaction-pool?/test-utils"]
 reth = ["dep:reth-transaction-pool", "dep:alloy-eips", "dep:alloy-primitives"]
+
+[[example]]
+name = "pool_index"
+required-features = ["reth"]

@@ -7,7 +7,11 @@
 //! reopen/reconciliation. Cancellation of a reply does not cancel an already queued import.
 //! This component grants no live-readiness or recovery authority to persisted head hints.
 
-use self::{confirmation::Confirmation, optimistic::optimistic_error};
+use self::{
+    confirmation::Confirmation,
+    mode::{ReplayContext, StartupExecutionMode},
+    optimistic::optimistic_error,
+};
 use crate::{
     bootstrap::checked_config_digest,
     compact_persistence::{state_source::RepositoryStateSource, AdmittedStateRepository},
@@ -106,7 +110,7 @@ impl ImportCoordinator {
         C: ClassicAvailability + 'static,
         G: GloasAvailability + 'static,
     {
-        Self::start_with_receipt(
+        Self::start_with_mode(
             config,
             anchor,
             repository,
@@ -114,8 +118,7 @@ impl ImportCoordinator {
             classic_availability,
             gloas_availability,
             limits,
-            None,
-            false,
+            StartupExecutionMode::Strict,
         )
         .await
     }
@@ -145,7 +148,7 @@ impl ImportCoordinator {
         C: ClassicAvailability + 'static,
         G: GloasAvailability + 'static,
     {
-        Self::start_with_receipt(
+        Self::start_with_mode(
             config,
             anchor,
             repository,
@@ -153,8 +156,7 @@ impl ImportCoordinator {
             classic_availability,
             gloas_availability,
             limits,
-            Some(receipt),
-            false,
+            StartupExecutionMode::Reconciled(Box::new(receipt)),
         )
         .await
     }
@@ -183,7 +185,7 @@ impl ImportCoordinator {
         C: ClassicAvailability + 'static,
         G: GloasAvailability + 'static,
     {
-        Self::start_with_receipt(
+        Self::start_with_mode(
             config,
             anchor,
             repository,
@@ -191,14 +193,13 @@ impl ImportCoordinator {
             classic_availability,
             gloas_availability,
             limits,
-            None,
-            true,
+            StartupExecutionMode::Optimistic,
         )
         .await
     }
 
     #[allow(clippy::too_many_arguments)]
-    async fn start_with_receipt<E, C, G>(
+    async fn start_with_mode<E, C, G>(
         config: ChainConfig,
         anchor: ImportAnchor,
         repository: AdmittedStateRepository,
@@ -206,8 +207,7 @@ impl ImportCoordinator {
         classic_availability: C,
         gloas_availability: G,
         limits: ImportLimits,
-        receipt: Option<ReconciledCheckpoint>,
-        optimistic: bool,
+        mode: StartupExecutionMode,
     ) -> Result<Self, ImportError>
     where
         E: ExecutionEngine<
@@ -248,7 +248,7 @@ impl ImportCoordinator {
                     clock: OwnerClock::System,
                 };
                 let now = setup.clock.now();
-                let initialized = Worker::initialize_mode(setup, now, false, receipt, optimistic);
+                let initialized = Worker::initialize_mode(setup, now, false, mode);
                 match initialized {
                     Ok(mut worker) => {
                         if ready.send(Ok(())).is_ok() {
@@ -1122,11 +1122,7 @@ struct Worker<E, C, G> {
     execution_boundary: Option<ExecutionCheckpointBoundary>,
     recovery_execution_boundary: Option<PreparedRecoveryExecutionBoundary>,
     replaying: bool,
-    replay_event: Option<crate::compact_persistence::events::DurableEvent>,
-    // Keep one already checked immutable allocation alive during its serialized replay attempt.
-    // This is counted by the storage resident budget and never replaces fresh durable checks.
-    replay_state_lease: Option<StateLease>,
-    replay_started: bool,
+    replay: ReplayContext,
     column_retention: Option<Arc<dyn ColumnRetention>>,
     unsigned_custody_context: Option<UnsignedCustodyAnchor>,
     clock: OwnerClock,
@@ -1185,16 +1181,27 @@ where
         replaying: bool,
         receipt: Option<ReconciledCheckpoint>,
     ) -> Result<Self, ImportError> {
-        Self::initialize_mode(setup, now, replaying, receipt, false)
+        Self::initialize_mode(
+            setup,
+            now,
+            replaying,
+            receipt.map_or(StartupExecutionMode::Strict, |receipt| {
+                StartupExecutionMode::Reconciled(Box::new(receipt))
+            }),
+        )
     }
 
     fn initialize_mode(
         setup: WorkerSetup<E, C, G>,
         now: Result<u64, ImportError>,
         replaying: bool,
-        receipt: Option<ReconciledCheckpoint>,
-        optimistic: bool,
+        mode: StartupExecutionMode,
     ) -> Result<Self, ImportError> {
+        let (receipt, optimistic) = match mode {
+            StartupExecutionMode::Strict => (None, false),
+            StartupExecutionMode::Reconciled(receipt) => (Some(*receipt), false),
+            StartupExecutionMode::Optimistic => (None, true),
+        };
         let WorkerSetup {
             config,
             anchor,
@@ -1313,7 +1320,7 @@ where
             Graph::new(state, block, &parameters, source.clone(), limits.fast_confirmation)?
         };
         if optimistic {
-            if receipt.is_some() || !(Fork::Bellatrix..=Fork::Fulu).contains(&fork) {
+            if !(Fork::Bellatrix..=Fork::Fulu).contains(&fork) {
                 return Err(ImportError::Configuration)
             }
             let Graph::Classic { store, .. } = &mut graph else {
@@ -1414,9 +1421,7 @@ where
             execution_boundary,
             recovery_execution_boundary,
             replaying,
-            replay_event: None,
-            replay_state_lease: None,
-            replay_started: false,
+            replay: ReplayContext::default(),
             column_retention: None,
             unsigned_custody_context: None,
             clock,
@@ -1868,7 +1873,7 @@ where
                 let observations = timings.start(timing::ImportPhase::BodyObservations);
                 let verified = candidate.admit_body_observations(root, &signed)?;
                 timings.record(timing::ImportPhase::BodyObservations, observations);
-                if self.replay_event.is_none() {
+                if self.replay.event().is_none() {
                     for (index, context) in verified {
                         slashings.push((
                             signed.schema_fork(),
@@ -1907,7 +1912,7 @@ where
         let recording = timings.start(timing::ImportPhase::Recording);
         // Engine/DA validation may finish in a later slot. Tick the actual admitted candidate
         // to callback completion before FCU; never backdate optional confirmation observations.
-        if let Some(event) = &self.replay_event {
+        if let Some(event) = self.replay.event() {
             if event.historical {
                 candidate.bootstrap_tick(
                     &self.config,
@@ -1950,163 +1955,6 @@ where
             finalized_epoch = snapshot.finalized_checkpoint.epoch,
             execution_forkchoice_updated, "[beacon] Published strict admitted consensus event");
         Ok(ImportReceipt { admitted_root, snapshot, execution_forkchoice_updated })
-    }
-
-    fn publish(&mut self, graph: &mut Graph) -> Result<bool, ImportError> {
-        self.publish_with_snapshot(graph).map(|(dispatched, _)| dispatched)
-    }
-
-    fn publish_with_snapshot(
-        &mut self,
-        graph: &mut Graph,
-    ) -> Result<(bool, StoreSnapshot), ImportError> {
-        if self.optimistic && matches!(graph, Graph::Classic { .. }) {
-            let dispatched = self.publish_optimistic(graph)?;
-            return Ok((dispatched, graph.snapshot()?))
-        }
-        if self.replaying {
-            return Ok((false, graph.snapshot()?))
-        }
-        if let Some(boundary) = &self.execution_boundary {
-            boundary.check_adapter(&self.config, &self.engine).map_err(execution_boundary_error)?;
-        }
-        if self.engine.is_closed() {
-            return Err(ImportError::EngineUncertain)
-        }
-        let policy = FinalizedRetentionPolicy::default();
-        let mut prepared = match (&self.execution_boundary, &*graph) {
-            (Some(boundary), Graph::Gloas { store, .. }) => {
-                // Gloas roll-forward binds the graph before finalized pruning. Classic
-                // publication does not consume this value and need not select another head.
-                let expected_execution = graph
-                    .execution_state_with_boundary(Some(boundary))
-                    .map_err(|error| ImportError::PublicationInfrastructure(error.to_string()))?
-                    .map(|(_, state)| state);
-                boundary
-                    .prepare_finalized_roll_forward(
-                        &self.config,
-                        store,
-                        policy,
-                        expected_execution,
-                        &self.engine,
-                    )
-                    .map_err(execution_boundary_error)?
-            }
-            _ => None,
-        };
-        // A restart candidate cannot prune its prepared seed before the exact later-head
-        // acknowledgement activates it. Normal finalized retirement resumes on the next step.
-        let mut confirmation_reset = false;
-        if self.recovery_execution_boundary.is_none() {
-            let removed_blocks = match graph {
-                Graph::Classic { store, .. } => {
-                    store.prune_finalized_history(policy)?.removed_blocks
-                }
-                Graph::Gloas { store, .. } => {
-                    if prepared.is_some() {
-                        store.prune_finalized_consensus_history(policy)?.removed_blocks
-                    } else {
-                        store.prune_finalized_history(policy)?.removed_blocks
-                    }
-                }
-            };
-            if removed_blocks > 0 {
-                graph.reset_confirmation()?;
-                confirmation_reset = true;
-            }
-        }
-        let candidate_boundary = prepared
-            .as_ref()
-            .map(|prepared| prepared.candidate())
-            .or(self.execution_boundary.as_ref())
-            .or_else(|| {
-                self.recovery_execution_boundary.as_ref().map(|boundary| boundary.candidate())
-            });
-        // All graph mutations for this publication are complete. Engine acknowledgement,
-        // journal commits and byte collection cannot change the native selected graph head.
-        // Reuse its exact metadata instead of repeatedly scoring the same vote map.
-        let snapshot = graph.snapshot()?;
-        let execution = graph
-            .execution_state_with_snapshot(candidate_boundary, snapshot)
-            .map_err(|error| ImportError::PublicationInfrastructure(error.to_string()))?
-            .map(|(_, state)| {
-                let fork = self
-                    .config
-                    .fork_at_slot(graph.current_slot())
-                    .map_err(|_| ImportError::Configuration)?
-                    .fork;
-                Ok::<_, ImportError>((fork, state))
-            })
-            .transpose()?;
-        if confirmation_reset &&
-            let (Some(prepared), Graph::Gloas { store, .. }) = (&mut prepared, &*graph)
-        {
-            prepared
-                .rebind_finalized_confirmation(
-                    &self.config,
-                    store,
-                    &self.engine,
-                    execution.as_ref().map(|(_, state)| *state),
-                )
-                .map_err(execution_boundary_error)?;
-        }
-        self.source
-            .prepare_snapshot(snapshot)
-            .map_err(|error| ImportError::Persistence(error.to_string()))?;
-        let dispatched = if let Some((fork, state)) = execution &&
-            self.last_execution_state.as_ref() != Some(&(fork, state))
-        {
-            let version = forkchoice_version(fork).ok_or(ImportError::Configuration)?;
-            // No attributes or invented custody declaration. An attempted failure may already
-            // have changed the remote canonical EL chain; halt instead of retrying or rolling back.
-            let receipt = self
-                .runtime
-                .block_on(self.engine.forkchoice_updated_receipt(version, state, None))
-                .map_err(|error| ImportError::Forkchoice(error.to_string()))?;
-            self.last_verified_forkchoice = Some(receipt);
-            true
-        } else {
-            false
-        };
-        self.source
-            .commit_snapshot(snapshot)
-            .map_err(|error| ImportError::Persistence(error.to_string()))?;
-        if let Some(prepared) = prepared {
-            self.execution_boundary = Some(
-                prepared
-                    .commit(
-                        &self.config,
-                        &self.engine,
-                        execution.as_ref().and(self.last_verified_forkchoice.as_ref()),
-                        &self.repository,
-                    )
-                    .map_err(|error| ImportError::PublicationInfrastructure(error.to_string()))?,
-            );
-        }
-        if let Some(prepared) = self.recovery_execution_boundary.take() {
-            let Graph::Gloas { store, .. } = &*graph else {
-                return Err(ImportError::RecoveryRequired)
-            };
-            self.execution_boundary = Some(
-                prepared
-                    .commit(
-                        &self.config,
-                        store,
-                        snapshot,
-                        execution.as_ref().map(|(_, state)| *state),
-                        execution.as_ref().and(self.last_verified_forkchoice.as_ref()),
-                        &self.repository,
-                        &self.engine,
-                    )
-                    .map_err(execution_boundary_error)?,
-            );
-        }
-        self.source
-            .finish_retention(snapshot)
-            .map_err(|error| ImportError::Persistence(error.to_string()))?;
-        self.collect_after_publication_with_snapshot(graph, execution.as_ref(), snapshot)?;
-        self.last_execution_state = execution;
-        Ok((dispatched, snapshot))
     }
 }
 
@@ -2401,8 +2249,10 @@ mod genesis;
 mod gossip;
 mod maintenance;
 mod metrics;
+mod mode;
 mod observation;
 mod optimistic;
+mod publication;
 mod recovery;
 mod serving;
 mod slashings;

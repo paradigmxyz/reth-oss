@@ -40,10 +40,7 @@ impl LiveSync {
         }
     }
     pub(super) fn schedule_sidecar_retry(&mut self) -> Result<(), LiveSyncError> {
-        let Some(mut retry) = self.sidecar_retry.take() else { return Ok(()) };
-        if self.sidecar_request.is_some() {
-            return Err(LiveSyncError::Bounds)
-        }
+        let Some(mut retry) = self.sidecars.take_waiting() else { return Ok(()) };
         if retry.job.reply.is_closed() {
             retry.job.complete(Err(RetrievalError::Missing));
             return Ok(())
@@ -57,7 +54,7 @@ impl LiveSync {
         if select_data_peer(&self.targets, &retry.tried, retry.job.slot, |_| 0).is_none() {
             // No eligible provider means no transport access or consumed fairness turn. Keep
             // the exact original job queued, including genuine detached custody recovery.
-            self.sidecar_retry = Some(retry);
+            self.sidecars.wait(retry)?;
             return Ok(())
         }
         let runtime = self.peer.as_ref().ok_or(LiveSyncError::PeerUnavailable)?;
@@ -68,7 +65,7 @@ impl LiveSync {
             |peer| sidecar_custody_overlap(runtime, peer, &retry.job.request),
         );
         let Some(peer) = selected else {
-            self.sidecar_retry = Some(retry);
+            self.sidecars.wait(retry)?;
             return Ok(())
         };
         let result = self
@@ -81,39 +78,39 @@ impl LiveSync {
                 self.sidecar_cycle.issued(peer);
                 rotate_data_peer(&mut self.targets, peer);
                 retry.tried.push(peer);
-                self.sidecar_request = Some(SidecarPending {
+                self.sidecars.request(SidecarPending {
                     peer,
                     id,
                     job: retry.job,
                     started: retry.started,
                     tried: retry.tried,
-                });
+                })?;
             }
             Err(PeerStartupError::Peer(PeerRuntimeError::Transport(TransportError::Capacity))) => {
                 // Existing codec/proof jobs retain permits through cancellation. Keep this
                 // single original job rather than duplicating it or extending its deadline.
-                self.sidecar_retry = Some(retry);
+                self.sidecars.wait(retry)?;
             }
             Err(PeerStartupError::Peer(PeerRuntimeError::Transport(
                 TransportError::Configuration,
             ))) => {
                 self.remove_peer(peer);
                 retry.tried.push(peer);
-                self.sidecar_retry = Some(retry);
+                self.sidecars.wait(retry)?;
             }
             Err(error) => return Err(error.into()),
         }
         Ok(())
     }
     pub(super) fn retry_sidecar(&mut self, pending: SidecarPending) -> Result<(), LiveSyncError> {
-        if self.sidecar_retry.is_some() || pending.tried.len() > MAX_PEERS {
+        if self.sidecars.waiting().is_some() || pending.tried.len() > MAX_PEERS {
             return Err(LiveSyncError::Bounds)
         }
-        self.sidecar_retry = Some(RetryingSidecar {
+        self.sidecars.wait(RetryingSidecar {
             job: pending.job,
             started: pending.started,
             tried: pending.tried,
-        });
+        })?;
         self.schedule_sidecar_retry()
     }
 }

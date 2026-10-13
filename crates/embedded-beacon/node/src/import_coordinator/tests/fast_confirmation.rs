@@ -166,7 +166,9 @@ async fn optimistic_fcr_requires_real_catchup_and_retries_nonzero_safety_without
     let OwnerClock::Controlled(clock) = &initial.clock else { unreachable!() };
     let clock = clock.clone();
     tokio::task::spawn_blocking(move || {
-        let mut worker = Worker::initialize_mode(initial, Ok(0), false, None, true).unwrap();
+        let mut worker =
+            Worker::initialize_mode(initial, Ok(0), false, StartupExecutionMode::Optimistic)
+                .unwrap();
         let millis = worker.config.seconds_per_slot * 1000;
         let (_, fresh) = backend.forkchoice_calls.lock().unwrap()[0];
         assert_eq!(fresh.safe_block_hash, B256::ZERO);

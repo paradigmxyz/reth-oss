@@ -168,7 +168,7 @@ where
                 }
                 let result = self.import(
                     input.clone(),
-                    self.replay_event.as_ref().map_or(0, |event| event.received_ms),
+                    self.replay.event().map_or(0, |event| event.received_ms),
                 );
                 let missing_data = availability.take_deferred_data();
                 match result {

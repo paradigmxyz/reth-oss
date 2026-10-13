@@ -38,8 +38,13 @@ async fn checkpoint_recovery_opens_newer_peer_identity_without_advancing_anchor_
         let (restored, _) = setup(&directory, &store, &parameters);
         let OwnerClock::Controlled(clock) = &restored.clock else { unreachable!() };
         clock.store(recovery_time, Ordering::Release);
-        let restored =
-            Worker::initialize_mode(restored, Ok(recovery_time), true, None, false).unwrap();
+        let restored = Worker::initialize_mode(
+            restored,
+            Ok(recovery_time),
+            true,
+            StartupExecutionMode::Strict,
+        )
+        .unwrap();
         let plan = recovery::ReplayPlan::prepare(
             &restored.repository,
             &config,

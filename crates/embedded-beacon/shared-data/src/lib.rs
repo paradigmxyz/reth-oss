@@ -67,6 +67,7 @@ impl SharedDataStore {
                 object_dir,
                 journal,
                 owner_index,
+                pool_generation: 0,
                 references,
                 observations: Default::default(),
                 objects,
@@ -176,32 +177,65 @@ impl SharedDataStore {
         owner: Owner,
         objects: &[(ObjectKind, Encoding, Vec<u8>)],
     ) -> Result<Vec<ObjectId>, StoreError> {
+        self.put_owned_batches(&[OwnedObjectBatch { owner, objects }])?
+            .pop()
+            .ok_or(StoreError::InvalidPublication)
+    }
+
+    /// Replaces multiple owners atomically after publishing all immutable objects.
+    /// Repeated owners use the last batch, matching sequential replacement semantics.
+    pub fn put_owned_batches(
+        &self,
+        batches: &[OwnedObjectBatch<'_>],
+    ) -> Result<Vec<Vec<ObjectId>>, StoreError> {
+        self.put_owned_batches_tracked(batches).map(|(ids, commit)| {
+            debug_assert!(commit.after >= commit.before);
+            ids
+        })
+    }
+
+    fn put_owned_batches_tracked(
+        &self,
+        batches: &[OwnedObjectBatch<'_>],
+    ) -> Result<(Vec<Vec<ObjectId>>, ReferenceCommit), StoreError> {
         let mut inner = self.inner.lock();
         inner.journal.ensure_healthy()?;
+        let before = inner.pool_generation;
         let mut next = inner.objects.clone();
+        let replacements = batches
+            .iter()
+            .enumerate()
+            .map(|(index, batch)| (batch.owner, index))
+            .collect::<BTreeMap<_, _>>();
         for entry in next.values_mut() {
-            entry.owners.remove(&owner);
+            entry.owners.retain(|owner| !replacements.contains_key(owner));
         }
-        let mut ids = Vec::with_capacity(objects.len());
-        for (kind, encoding, bytes) in objects {
-            let id = ObjectId::new(*kind, *encoding, bytes);
-            let path = inner.object_dir.join(id.filename());
-            inner.publish_object(&path, id, bytes)?;
-            next.entry(id)
-                .or_insert_with(|| ObjectEntry {
+        let mut batches_ids = Vec::with_capacity(batches.len());
+        for (index, batch) in batches.iter().enumerate() {
+            let mut ids = Vec::with_capacity(batch.objects.len());
+            for (kind, encoding, bytes) in batch.objects {
+                let id = ObjectId::new(*kind, *encoding, bytes);
+                let path = inner.object_dir.join(id.filename());
+                inner.publish_object(&path, id, bytes)?;
+                let entry = next.entry(id).or_insert_with(|| ObjectEntry {
                     id,
                     size: bytes.len() as u64,
                     owners: BTreeSet::new(),
-                })
-                .owners
-                .insert(owner);
-            ids.push(id);
+                });
+                if replacements.get(&batch.owner) == Some(&index) {
+                    entry.owners.insert(batch.owner);
+                }
+                ids.push(id);
+            }
+            batches_ids.push(ids);
         }
         inner.persist(next)?;
-        for ((_, _, bytes), id) in objects.iter().zip(&ids) {
-            inner.cache_borrowed(*id, bytes.as_slice());
+        for (batch, ids) in batches.iter().zip(&batches_ids) {
+            for ((_, _, bytes), id) in batch.objects.iter().zip(ids) {
+                inner.cache_borrowed(*id, bytes.as_slice());
+            }
         }
-        Ok(ids)
+        Ok((batches_ids, ReferenceCommit { before, after: inner.pool_generation }))
     }
 
     /// Publishes borrowed immutable objects and independent owner edges in one generation.
@@ -287,15 +321,31 @@ impl SharedDataStore {
     }
     /// Releases every pin belonging to the supplied owners in a single atomic commit.
     pub fn release_owners(&self, owners: &[Owner]) -> Result<(), StoreError> {
+        self.release_owners_tracked(owners).map(|commit| {
+            debug_assert!(commit.after >= commit.before);
+        })
+    }
+
+    fn release_owners_tracked(&self, owners: &[Owner]) -> Result<ReferenceCommit, StoreError> {
         let mut inner = self.inner.lock();
         inner.journal.ensure_healthy()?;
+        let before = inner.pool_generation;
         let owners = owners.iter().copied().collect::<BTreeSet<_>>();
         let mut next = inner.objects.clone();
         for entry in next.values_mut() {
             entry.owners.retain(|owner| !owners.contains(owner));
         }
-        inner.persist(next)
+        inner.persist(next)?;
+        Ok(ReferenceCommit { before, after: inner.pool_generation })
     }
+
+    #[cfg(feature = "reth")]
+    fn reference_generation(&self) -> Result<u64, StoreError> {
+        let inner = self.inner.lock();
+        inner.journal.ensure_healthy()?;
+        Ok(inner.pool_generation)
+    }
+
     /// Returns independently owned bytes. A reader remains valid after disk garbage collection.
     pub fn get(&self, id: ObjectId) -> Result<Option<Arc<[u8]>>, StoreError> {
         self.get_bounded(id, usize::MAX)
@@ -500,6 +550,15 @@ pub struct CommittedPinnedObject<'a> {
     id: ObjectId,
     bytes: &'a [u8],
     owners: &'a [Owner],
+}
+
+/// One independent owner's replacement object set in an atomic publication.
+#[derive(Debug)]
+pub struct OwnedObjectBatch<'a> {
+    /// Durable owner whose previous pins are replaced.
+    pub owner: Owner,
+    /// Complete immutable objects to retain after the transaction.
+    pub objects: &'a [(ObjectKind, Encoding, Vec<u8>)],
 }
 
 /// Immutable object identity including semantic kind and byte encoding.
@@ -727,6 +786,12 @@ fn verify_object_file(path: &Path, id: ObjectId, size: u64) -> Result<(), StoreE
     }
     Ok(())
 }
+#[derive(Debug, Clone, Copy)]
+struct ReferenceCommit {
+    before: u64,
+    after: u64,
+}
+
 #[derive(Debug)]
 struct StoreInner {
     namespace_dir: PathBuf,
@@ -734,6 +799,7 @@ struct StoreInner {
     journal: journal::Journal,
     objects: BTreeMap<ObjectId, ObjectEntry>,
     owner_index: BTreeMap<Owner, BTreeSet<ObjectId>>,
+    pool_generation: u64,
     references: observation::ReferenceObservation,
     observations: observation::StoreCounters,
     cache: BTreeMap<ObjectId, CacheEntry>,
@@ -768,6 +834,17 @@ impl StoreInner {
         if next == self.objects {
             return Ok(())
         }
+        let (owner_index, references) = build_owner_index(&next);
+        let pool_changed = !self
+            .owner_index
+            .iter()
+            .filter(|(owner, _)| matches!(owner, Owner::Pool(_)))
+            .eq(owner_index.iter().filter(|(owner, _)| matches!(owner, Owner::Pool(_))));
+        let pool_generation = if pool_changed {
+            self.pool_generation.checked_add(1).ok_or(StoreError::GenerationOverflow)?
+        } else {
+            self.pool_generation
+        };
         let started = std::time::Instant::now();
         self.journal.commit(&ReferenceState { objects: next.values().cloned().collect() })?;
         self.observations.journal_commits_total =
@@ -776,7 +853,9 @@ impl StoreInner {
             .observations
             .journal_commit_micros_total
             .saturating_add(u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX));
-        (self.owner_index, self.references) = build_owner_index(&next);
+        self.owner_index = owner_index;
+        self.references = references;
+        self.pool_generation = pool_generation;
         self.objects = next;
         Ok(())
     }

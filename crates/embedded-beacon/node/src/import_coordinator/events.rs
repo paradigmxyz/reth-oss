@@ -60,7 +60,7 @@ where
         candidate: &Graph,
         original: Option<&[u8]>,
     ) -> Result<(), ImportError> {
-        let event = if let Some(event) = &self.replay_event {
+        let event = if let Some(event) = self.replay.event() {
             if event.action != action ||
                 event.received_ms != received_ms ||
                 event.begin_ms != begin_ms ||
@@ -82,7 +82,7 @@ where
             }
         };
         self.source
-            .record_event(candidate.snapshot()?, event, original, self.replay_event.is_some())
+            .record_event(candidate.snapshot()?, event, original, self.replay.event().is_some())
             .map_err(persistence)
     }
     pub(super) fn record_clock_event(
@@ -91,7 +91,7 @@ where
         candidate: &Graph,
         historical: bool,
     ) -> Result<(), ImportError> {
-        let mut event = self.replay_event.clone().unwrap_or_else(|| DurableEvent {
+        let mut event = self.replay.event().cloned().unwrap_or_else(|| DurableEvent {
             sequence: 0,
             begin_ms,
             completed_ms: candidate.time_ms(),
@@ -107,14 +107,14 @@ where
         }
         event.historical = historical;
         self.source
-            .record_event(candidate.snapshot()?, event, None, self.replay_event.is_some())
+            .record_event(candidate.snapshot()?, event, None, self.replay.event().is_some())
             .map_err(persistence)
     }
     pub(super) fn begin_original_event(
         &mut self,
         sequence: u64,
     ) -> Result<DurableEvent, ImportError> {
-        if !self.replaying || self.replay_event.is_some() || self.replay_state_lease.is_some() {
+        if !self.replaying || self.replay.event().is_some() {
             return Err(ImportError::RecoveryRequired)
         }
         let authentication_started = Instant::now();
@@ -126,25 +126,23 @@ where
             if matches!(event.action, EventAction::Slashing { .. }) {
                 // A complete signed equivocation proof has no arrival-slot rule. Reauthenticate
                 // its exact old signing domains against the actual cut registry without rewinding.
-                self.replay_started = true;
-                self.replay_event = Some(event.clone());
-                self.replay_state_lease = lease;
+                self.replay.started = true;
+                self.replay.begin(event.clone(), lease)?;
                 return Ok(event)
             }
             return Err(ImportError::RecoveryRequired)
         }
-        if !self.replay_started {
+        if !self.replay.started {
             // The constructor has no observed clock history. Restore only the original owner's
             // conservative start clock before the first native event, never optional vote flags.
             self.graph.bootstrap_tick(&self.config, event.begin_ms, self.limits.max_tick_slots)?;
-            self.replay_started = true;
+            self.replay.started = true;
         } else if event.historical {
             self.graph.bootstrap_tick(&self.config, event.begin_ms, self.limits.max_tick_slots)?;
         } else {
             self.graph.advance(&self.config, event.begin_ms, self.limits.max_tick_slots)?;
         }
-        self.replay_event = Some(event.clone());
-        self.replay_state_lease = lease;
+        self.replay.begin(event.clone(), lease)?;
         tracing::debug!(target: "beacon::replay", sequence, kind = replay_event_kind(&event.action),
             original_authentication_ms = authentication_ms,
             clock_reconstruction_ms = clock_started.elapsed().as_millis(),
@@ -161,8 +159,7 @@ where
             Some(input) => self.import(input, event.received_ms).map(|_| ()),
             None => self.apply_original_observation(&event),
         };
-        self.replay_event = None;
-        self.replay_state_lease = None;
+        self.replay.finish();
         if result.is_ok() {
             self.import_metrics.replayed_events_total =
                 self.import_metrics.replayed_events_total.saturating_add(1);
@@ -397,8 +394,7 @@ where
                 }
                 self.apply_original_observation(&event)
             };
-            self.replay_event = None;
-            self.replay_state_lease = None;
+            self.replay.finish();
             result?;
             recovered.record(&event.action);
             self.import_metrics.replayed_events_total =
