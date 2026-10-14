@@ -15,7 +15,7 @@ case "${fixture_variant}" in
         eels_fork="Osaka"
         ;;
     bogota)
-        eels_fixtures="https://github.com/ethereum/execution-specs/releases/download/tests-frames-devnet%40v1.0.0/fixtures_bogota-devnet.tar.gz"
+        eels_fixtures="https://github.com/ethereum/execution-specs/releases/download/tests-bogota-devnet%40v1.1.0/fixtures_bogota-devnet.tar.gz"
         eels_branch="fix/reth-frames-devnet-1-hive-error-mapping"
         eels_fork="Bogota"
         ;;
