@@ -2,7 +2,6 @@
 set -eo pipefail
 
 fixture_variant="${1:-amsterdam}"
-# Cache-bump for the EELS frame-mapping update (a1945ddfd).
 
 case "${fixture_variant}" in
     amsterdam)
@@ -16,8 +15,8 @@ case "${fixture_variant}" in
         eels_fork="Osaka"
         ;;
     bogota)
-        eels_fixtures="https://github.com/ethereum/execution-specs/releases/download/tests-frames-devnet%40v1.0.0/fixtures_frames-devnet.tar.gz"
-        eels_branch="devnets/frames/1"
+        eels_fixtures="https://github.com/ethereum/execution-specs/releases/download/tests-bogota-devnet%40v1.1.0/fixtures_bogota-devnet.tar.gz"
+        eels_branch="fix/reth-frames-devnet-1-hive-error-mapping"
         eels_fork="Bogota"
         ;;
     *)
@@ -32,20 +31,30 @@ mkdir hive_assets/
 cd hivetests
 go build .
 
+if [[ "${fixture_variant}" == "bogota" ]]; then
+    # Keep the archive compressed in the images. Each simulator extracts only
+    # its fixture format at startup, avoiding two full fixture-cache layers.
+    engine_fixtures="simulators/ethereum/eels/consume-engine/fixtures.tar.gz"
+    rlp_fixtures="simulators/ethereum/eels/consume-rlp/fixtures.tar.gz"
+    curl --fail --location --retry 5 --retry-all-errors --connect-timeout 30 \
+        "${eels_fixtures}" --output "${engine_fixtures}"
+    ln "${engine_fixtures}" "${rlp_fixtures}"
+    eels_fixtures="/fixtures"
+fi
+
 ./hive -client reth # first builds and caches the client
 
-# Build the fixture-heavy EELS images serially to avoid exhausting the runner
-# while both builds download and unpack the same large fixture archive.
+# Build the fixture-heavy EELS images serially to limit peak disk usage.
 echo "Building images"
-./hive -client reth --sim "ethereum/eels/consume-engine" \
+./hive --docker.buildoutput -client reth --sim "ethereum/eels/consume-engine" \
     --sim.buildarg fixtures="${eels_fixtures}" \
     --sim.buildarg branch="${eels_branch}" \
     --sim.timelimit 1s || true
-./hive -client reth --sim "ethereum/eels/consume-rlp" \
+./hive --docker.buildoutput -client reth --sim "ethereum/eels/consume-rlp" \
     --sim.buildarg fixtures="${eels_fixtures}" \
     --sim.buildarg branch="${eels_branch}" \
     --sim.timelimit 1s || true
-./hive -client reth --sim "ethereum/eels/execute-blobs" \
+./hive --docker.buildoutput -client reth --sim "ethereum/eels/execute-blobs" \
     --sim.buildarg branch="${eels_branch}" \
     --sim.buildarg fork="${eels_fork}" \
     --sim.timelimit 1s || true &
