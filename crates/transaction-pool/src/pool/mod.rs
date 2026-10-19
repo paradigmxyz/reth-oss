@@ -81,7 +81,8 @@ use crate::{
     },
     traits::{
         AllPoolTransactions, BestTransactionsAttributes, BlockInfo, GetPooledTransactionLimit,
-        NewBlobSidecar, PoolSize, PoolTransaction, PropagatedTransactions, TransactionOrigin,
+        NewBlobSidecar, PoolSize, PoolTransaction, PoolUpdateKind, PropagatedTransactions,
+        TransactionOrigin,
     },
     validate::{
         FrameDependencies, TransactionValidationOutcome, ValidPoolTransaction, ValidTransaction,
@@ -89,7 +90,7 @@ use crate::{
     CanonicalStateUpdate, EthPoolTransaction, PoolConfig, TransactionOrdering,
     TransactionValidator,
 };
-use alloy_consensus::Transaction;
+use alloy_consensus::{BlockHeader, Transaction};
 
 use alloy_primitives::{
     map::{AddressSet, HashSet},
@@ -548,19 +549,54 @@ where
     }
 
     /// Updates the entire pool after a new block was executed.
+    /// Revalidates every public frame because storage changes are not supplied.
     pub fn on_canonical_state_change(&self, update: CanonicalStateUpdate<'_, V::Block>) {
-        self.on_canonical_state_change_with_touched_accounts(update, &[]);
+        self.on_canonical_state_change_inner(update, None);
     }
 
-    /// Withdraws frames atomically with advancing the pool's canonical head.
+    /// Withdraws affected frames atomically with advancing the pool's canonical head.
+    ///
+    /// `touched` must include every address with changed storage, code, or account state, including
+    /// destroyed accounts. Reorgs revalidate all frames to recheck fork-dependent validity.
     pub fn on_canonical_state_change_with_touched_accounts(
         &self,
         update: CanonicalStateUpdate<'_, V::Block>,
-        _touched: &[Address],
+        touched: &[Address],
+    ) {
+        let dependencies = FrameDependencies {
+            accounts: update
+                .changed_accounts
+                .iter()
+                .map(|account| account.address)
+                .chain(touched.iter().copied())
+                .collect(),
+            ..Default::default()
+        };
+        self.on_canonical_state_change_with_dependencies(update, &dependencies);
+    }
+
+    /// Withdraws frames that depend on changed account information, code, or individual slots.
+    ///
+    /// `dependencies` must cover all state changes, including account destruction. Reorgs still
+    /// revalidate every frame to check fork-dependent validity.
+    pub fn on_canonical_state_change_with_dependencies(
+        &self,
+        update: CanonicalStateUpdate<'_, V::Block>,
+        dependencies: &FrameDependencies,
+    ) {
+        self.on_canonical_state_change_inner(update, Some(dependencies));
+    }
+
+    fn on_canonical_state_change_inner(
+        &self,
+        update: CanonicalStateUpdate<'_, V::Block>,
+        dependencies: Option<&FrameDependencies>,
     ) {
         trace!(target: "txpool", ?update, "updating pool on canonical state change");
 
         let block_info = update.block_info();
+        let timestamp = update.timestamp();
+        let current_slot = update.new_tip.header().slot_number().map(|slot| slot.saturating_add(1));
         let CanonicalStateUpdate {
             new_tip, changed_accounts, mined_transactions, update_kind, ..
         } = update;
@@ -571,8 +607,12 @@ where
         // update the pool
         let outcome = {
             let mut pool = self.pool.write();
-            // Recheck fork-dependent wire validity even when no selected nonce changed.
-            let affected = pool.frame_transaction_hashes();
+            let affected = match dependencies {
+                Some(dependencies) if update_kind == PoolUpdateKind::Commit => {
+                    pool.affected_frame_transactions(dependencies, timestamp, current_slot)
+                }
+                _ => pool.frame_transaction_hashes(),
+            };
             let mut queue = self.frame_revalidation.lock();
             for hash in &mined_transactions {
                 queue.cancel(hash);
@@ -1850,17 +1890,27 @@ impl<T: PoolTransaction> OnNewCanonicalStateOutcome<T> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::{
         blobstore::{BlobStore, InMemoryBlobStore, PooledBlobSidecar},
         identifier::SenderId,
-        test_utils::{testing_pool, MockTransaction, TestPoolBuilder},
-        validate::ValidTransaction,
-        BlockInfo, PoolConfig, SubPoolLimit, TransactionOrigin, TransactionPool,
-        TransactionPoolExt, TransactionValidationOutcome, ValidPoolTransaction, U256,
+        test_utils::{testing_pool, MockTransaction, OkValidator, TestPoolBuilder},
+        validate::{FrameValidation, RecentRootReference, ValidTransaction},
+        BlockInfo, CoinbaseTipOrdering, EthPooledTransaction, PoolConfig, SubPoolLimit,
+        TransactionOrigin, TransactionPool, TransactionPoolExt, TransactionValidationOutcome,
+        ValidPoolTransaction, U256,
     };
-    use alloy_consensus::Transaction;
-    use alloy_eips::{eip4844::BlobTransactionSidecar, eip7594::BlobTransactionSidecarVariant};
-    use alloy_primitives::Address;
+    use alloy_consensus::{Header, Transaction, TxEip8141};
+    use alloy_eips::{
+        eip1559::{ETHEREUM_BLOCK_GAS_LIMIT_30M, MIN_PROTOCOL_BASE_FEE},
+        eip4844::BlobTransactionSidecar,
+        eip7594::BlobTransactionSidecarVariant,
+        eip8141::{Frame, FrameMode, TransactionFees, EXPIRY_VERIFIER},
+        eip8272::{RECENT_ROOT_ADDRESS, RECENT_ROOT_LENGTH},
+    };
+    use alloy_primitives::{Address, Bytes, Sealable};
+    use reth_ethereum_primitives::{Block, TransactionSigned};
+    use reth_primitives_traits::Block as _;
     use std::{fs, path::PathBuf, sync::Arc};
 
     #[tokio::test]
@@ -2019,5 +2069,216 @@ mod tests {
         assert!(test_pool.get_highest_consecutive_transaction_by_sender(sender, 0).is_none());
         assert!(test_pool.remove_transactions_by_sender(sender).is_empty());
         assert_eq!(test_pool.sender_id(&sender), None);
+    }
+
+    #[test]
+    fn canonical_frame_revalidation_selects_dependencies_and_expiry() {
+        let sender = Address::with_last_byte(1);
+        let payer = Address::with_last_byte(3);
+        let helper = Address::with_last_byte(4);
+        let root =
+            RecentRootReference { source_id: B256::repeat_byte(1), slot: 0, root: B256::ZERO };
+        let root_dependency = root.dependency();
+        for (touched, timestamp, slot, update_kind, complete, remaining) in [
+            (vec![], 5, 0, PoolUpdateKind::Commit, true, [true, true]),
+            (vec![Address::with_last_byte(9)], 5, 0, PoolUpdateKind::Commit, true, [true, true]),
+            (vec![sender], 5, 0, PoolUpdateKind::Commit, true, [false, true]),
+            (vec![payer], 5, 0, PoolUpdateKind::Commit, true, [false, true]),
+            (vec![helper], 5, 0, PoolUpdateKind::Commit, true, [false, true]),
+            (vec![RECENT_ROOT_ADDRESS], 5, 0, PoolUpdateKind::Commit, true, [true, false]),
+            (vec![], 6, 0, PoolUpdateKind::Commit, true, [false, true]),
+            (vec![], 5, RECENT_ROOT_LENGTH - 1, PoolUpdateKind::Commit, true, [true, false]),
+            (vec![], 5, 0, PoolUpdateKind::Reorg, true, [false, false]),
+            (vec![], 5, 0, PoolUpdateKind::Commit, false, [false, false]),
+        ] {
+            let pool = PoolInner::new(
+                OkValidator::<EthPooledTransaction>::default(),
+                CoinbaseTipOrdering::default(),
+                InMemoryBlobStore::default(),
+                PoolConfig::default(),
+            );
+            let mut hashes = Vec::new();
+            for sender in [sender, Address::with_last_byte(2)] {
+                let expiry = sender == Address::with_last_byte(1);
+                let mut frames = Vec::new();
+                if expiry {
+                    frames.push(Frame {
+                        mode: FrameMode::Verify,
+                        target: EXPIRY_VERIFIER.into(),
+                        data: Bytes::copy_from_slice(&5u64.to_be_bytes()),
+                        ..Default::default()
+                    });
+                    frames.push(Frame { mode: FrameMode::Verify, flags: 2, ..Default::default() });
+                    frames.push(Frame {
+                        mode: FrameMode::Verify,
+                        flags: 1,
+                        target: payer.into(),
+                        ..Default::default()
+                    });
+                } else {
+                    frames.push(Frame {
+                        mode: FrameMode::Verify,
+                        target: RECENT_ROOT_ADDRESS.into(),
+                        data: [
+                            root.source_id.as_slice(),
+                            root.slot.to_be_bytes().as_slice(),
+                            root.root.as_slice(),
+                        ]
+                        .concat()
+                        .into(),
+                        ..Default::default()
+                    });
+                    frames.push(Frame { mode: FrameMode::Verify, flags: 3, ..Default::default() });
+                }
+                let mut transaction = EthPooledTransaction::new(
+                    Recovered::new_unchecked(
+                        TransactionSigned::Eip8141(
+                            TxEip8141 {
+                                sender,
+                                frames,
+                                fees: TransactionFees {
+                                    max_fee_per_gas: U256::from(MIN_PROTOCOL_BASE_FEE),
+                                    ..Default::default()
+                                },
+                                ..Default::default()
+                            }
+                            .seal_slow(),
+                        ),
+                        sender,
+                    ),
+                    0,
+                );
+                transaction
+                    .set_frame_validation(Arc::new(FrameValidation {
+                        sender,
+                        sender_nonce: 0,
+                        nonce_keys: None,
+                        state_nonce: 0,
+                        sender_balance: U256::MAX,
+                        sender_code_hash: None,
+                        payer: if expiry { payer } else { sender },
+                        max_cost: *transaction.cost(),
+                        payer_balance: U256::MAX,
+                        head_hash: pool.block_info().last_seen_block_hash,
+                        dependencies: FrameDependencies {
+                            code: if expiry { vec![helper] } else { vec![] },
+                            storage: if expiry {
+                                vec![]
+                            } else {
+                                vec![(RECENT_ROOT_ADDRESS, root_dependency.storage_key)]
+                            },
+                            ..Default::default()
+                        },
+                        expires_at: expiry.then_some(5),
+                        recent_root_dependencies: if expiry {
+                            vec![]
+                        } else {
+                            vec![root_dependency]
+                        },
+                        exclusive_payer: false,
+                    }))
+                    .unwrap();
+                hashes.push(*transaction.hash());
+                pool.add_transactions(
+                    TransactionOrigin::External,
+                    [TransactionValidationOutcome::Valid {
+                        balance: U256::MAX,
+                        state_nonce: 0,
+                        bytecode_hash: None,
+                        transaction: ValidTransaction::Valid(transaction),
+                        propagate: true,
+                        authorities: None,
+                    }],
+                )[0]
+                .as_ref()
+                .unwrap();
+            }
+            let head = Block {
+                header: Header {
+                    timestamp,
+                    slot_number: Some(slot),
+                    gas_limit: ETHEREUM_BLOCK_GAS_LIMIT_30M,
+                    ..Default::default()
+                },
+                ..Default::default()
+            }
+            .seal_slow();
+            let update = CanonicalStateUpdate {
+                new_tip: &head,
+                pending_block_base_fee: 0,
+                pending_block_blob_fee: None,
+                changed_accounts: vec![],
+                mined_transactions: vec![],
+                update_kind,
+            };
+            if complete {
+                pool.on_canonical_state_change_with_dependencies(
+                    update.clone(),
+                    &FrameDependencies { accounts: touched, ..Default::default() },
+                );
+            } else {
+                pool.on_canonical_state_change(update.clone());
+            }
+            for (hash, remains) in hashes.iter().zip(remaining) {
+                assert_eq!(pool.get(hash).is_some(), remains);
+            }
+            let mut queued = pool
+                .frame_revalidation
+                .lock()
+                .snapshot()
+                .into_iter()
+                .map(|tx| *tx.hash())
+                .collect::<Vec<_>>();
+            queued.sort_unstable();
+            let mut expected = hashes
+                .iter()
+                .copied()
+                .zip(remaining)
+                .filter_map(|(hash, remains)| (!remains).then_some(hash))
+                .collect::<Vec<_>>();
+            expected.sort_unstable();
+            assert_eq!(queued, expected);
+
+            if remaining[1] {
+                pool.on_canonical_state_change_with_dependencies(
+                    update.clone(),
+                    &FrameDependencies {
+                        storage: vec![(
+                            RECENT_ROOT_ADDRESS,
+                            root_dependency.storage_key + U256::from(1),
+                        )],
+                        ..Default::default()
+                    },
+                );
+                assert!(pool.get(&hashes[1]).is_some());
+                pool.on_canonical_state_change_with_dependencies(
+                    update.clone(),
+                    &FrameDependencies {
+                        storage: vec![(RECENT_ROOT_ADDRESS, root_dependency.storage_key)],
+                        ..Default::default()
+                    },
+                );
+                assert!(pool.get(&hashes[1]).is_none());
+            }
+
+            pool.on_canonical_state_change_with_touched_accounts(
+                CanonicalStateUpdate {
+                    new_tip: &head,
+                    pending_block_base_fee: 0,
+                    pending_block_blob_fee: None,
+                    changed_accounts: vec![],
+                    mined_transactions: vec![hashes[0]],
+                    update_kind: PoolUpdateKind::Commit,
+                },
+                &[],
+            );
+            assert!(pool.get(&hashes[0]).is_none());
+            assert!(pool
+                .frame_revalidation
+                .lock()
+                .snapshot()
+                .iter()
+                .all(|tx| tx.hash() != &hashes[0]));
+        }
     }
 }

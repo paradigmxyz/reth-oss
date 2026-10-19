@@ -887,6 +887,14 @@ where
     fn cleanup_blobs(&self) {
         self.pool.cleanup_blobs()
     }
+
+    fn on_canonical_state_change_with_dependencies(
+        &self,
+        update: CanonicalStateUpdate<'_, Self::Block>,
+        dependencies: &validate::FrameDependencies,
+    ) {
+        self.pool.on_canonical_state_change_with_dependencies(update, dependencies);
+    }
 }
 
 impl<V, T, S> ValidatingPool for Pool<V, T, S>

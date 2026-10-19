@@ -188,18 +188,26 @@ impl<T: TransactionOrdering> TxPool<T> {
         &self.all_transactions
     }
 
-    /// Returns publicly validated frame transactions affected by the supplied state changes.
+    /// Returns publicly validated frames affected by state changes or head-dependent blob pricing.
     pub(crate) fn affected_frame_transactions(
         &self,
         dependencies: &FrameDependencies,
         timestamp: u64,
         current_slot: Option<u64>,
     ) -> Vec<TxHash> {
-        self.all_transactions
-            .frame_reservations
-            .affected(dependencies, timestamp, current_slot)
-            .into_iter()
-            .collect()
+        let mut affected = self.all_transactions.frame_reservations.affected(
+            dependencies,
+            timestamp,
+            current_slot,
+        );
+        // TXPARAM(max_cost) and payer reservations use the head's blob base fee. Even a prefix
+        // with unchanged state dependencies must be rechecked when it carries blobs.
+        for hash in self.all_transactions.frame_reservations.hashes() {
+            if self.all_transactions.by_hash.get(&hash).is_some_and(|tx| tx.is_blob_transaction()) {
+                affected.insert(hash);
+            }
+        }
+        affected.into_iter().collect()
     }
 
     /// Returns every transaction currently holding a public frame reservation.
@@ -2617,7 +2625,7 @@ mod tests {
         traits::{PoolTransaction, TransactionOrigin},
         EthPooledTransaction, SubPoolLimit,
     };
-    use alloy_consensus::{Transaction, TxEip8141, TxType};
+    use alloy_consensus::{transaction::Recovered, Transaction, TxEip8141, TxType};
     use alloy_eips::eip8141::{Frame, TransactionFees};
     use alloy_primitives::{address, Sealable};
     use reth_ethereum_primitives::TransactionSigned;
@@ -5611,5 +5619,40 @@ mod tests {
         assert_eq!(t1.id().nonce, 1, "expected nonce 1, got {}", t1.id().nonce);
         assert_eq!(t2.id().nonce, 2, "expected nonce 2, got {}", t2.id().nonce);
         assert_eq!(t3.id().nonce, 3, "expected nonce 3, got {}", t3.id().nonce);
+    }
+
+    #[test]
+    fn frame_blob_reservations_revalidate_for_head_pricing() {
+        let mut pool = TxPool::new(crate::CoinbaseTipOrdering::default(), PoolConfig::default());
+        let mut blob_hash = None;
+        for (sender, with_blobs) in [(1, false), (2, true)] {
+            let mut tx = validated_frame(
+                Address::repeat_byte(sender),
+                SenderId::from(u64::from(sender)),
+                0,
+                100,
+                5,
+            );
+            if with_blobs {
+                let mut frame = tx.transaction.frame_transaction().unwrap().clone();
+                frame.blob_versioned_hashes = vec![B256::repeat_byte(1)];
+                frame.fees.max_fee_per_blob_gas = U256::from(1);
+                let metadata = Arc::clone(tx.transaction.frame_validation().unwrap());
+                tx.transaction = EthPooledTransaction::new(
+                    Recovered::new_unchecked(
+                        TransactionSigned::Eip8141(frame.seal_slow()),
+                        tx.sender(),
+                    ),
+                    0,
+                );
+                tx.transaction.set_frame_validation(metadata).unwrap();
+                blob_hash = Some(*tx.hash());
+            }
+            pool.add_transaction(tx, U256::from(5), 0, None).unwrap();
+        }
+        assert_eq!(
+            pool.affected_frame_transactions(&FrameDependencies::default(), 1, None),
+            vec![blob_hash.unwrap()],
+        );
     }
 }

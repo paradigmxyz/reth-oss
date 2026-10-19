@@ -58,7 +58,8 @@ use crate::{
         TransactionListenerKind,
     },
     validate::{
-        FrameValidation, TransactionValidationOutcome, TransactionValidator, ValidPoolTransaction,
+        FrameDependencies, FrameValidation, TransactionValidationOutcome, TransactionValidator,
+        ValidPoolTransaction,
     },
     AddedTransactionOutcome, AllTransactionsEvents,
 };
@@ -804,6 +805,9 @@ pub trait TransactionPoolExt: TransactionPool {
 
     /// Updates the head with all touched state addresses, including destroyed accounts.
     ///
+    /// The addresses must cover storage changes as well as changes to account information. Public
+    /// frame pools use them to select validation prefixes affected by the update.
+    ///
     /// Pools supporting public frames must override this and
     /// [`Self::revalidate_frame_transactions`]; the defaults preserve non-frame pool behavior.
     fn on_canonical_state_change_with_touched_accounts(
@@ -831,6 +835,20 @@ pub trait TransactionPoolExt: TransactionPool {
 
     /// Maintenance function to cleanup blobs that are no longer needed.
     fn cleanup_blobs(&self);
+
+    /// Updates the head with the complete changes to account information, code, and storage slots.
+    ///
+    /// Unlike address-only updates, storage changes identify individual slots so a write to a
+    /// shared contract does not require revalidating frames that read other slots. Include
+    /// destroyed accounts in `dependencies.accounts` even if individual deleted slots are unknown.
+    /// The default falls back to a full canonical update.
+    fn on_canonical_state_change_with_dependencies(
+        &self,
+        update: CanonicalStateUpdate<'_, Self::Block>,
+        _dependencies: &FrameDependencies,
+    ) {
+        self.on_canonical_state_change(update);
+    }
 }
 
 /// Extension for [`TransactionPool`] that exposes the pool's underlying [`TransactionValidator`].

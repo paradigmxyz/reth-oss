@@ -5,6 +5,7 @@ use std::{
 };
 
 use alloy_primitives::{Address, TxHash, B256, U256};
+use revm::database::BundleState;
 
 /// State metadata captured while validating a frame transaction.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -307,9 +308,34 @@ impl FrameReservations {
     }
 }
 
+impl From<&BundleState> for FrameDependencies {
+    /// Records changed account information and storage slots, excluding reads and no-op writes.
+    fn from(state: &BundleState) -> Self {
+        let mut dependencies = Self::default();
+        for (address, account) in state.state() {
+            // Destruction can clear storage without retaining each deleted slot in the bundle.
+            if account.is_info_changed() || account.was_destroyed() {
+                dependencies.accounts.push(*address);
+            }
+            dependencies.storage.extend(
+                account
+                    .storage
+                    .iter()
+                    .filter_map(|(slot, value)| value.is_changed().then_some((*address, *slot))),
+            );
+        }
+        dependencies
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use revm::{
+        database::states::{AccountStatus, BundleAccount, StorageSlot},
+        state::AccountInfo,
+    };
+
     fn m(sender: u8, nonce: u64, payer: u8, cost: u64) -> FrameValidation {
         FrameValidation {
             sender: Address::repeat_byte(sender),
@@ -533,5 +559,64 @@ mod tests {
 
         r.remove(&B256::repeat_byte(1));
         assert!(r.affected(&FrameDependencies::default(), 0, Some(u64::MAX)).is_empty());
+    }
+
+    #[test]
+    fn frame_dependencies_distinguish_storage_changes_from_account_changes() {
+        let address = Address::repeat_byte(8);
+        let slot = U256::from(7);
+        let other_slot = U256::from(8);
+        let info = AccountInfo { nonce: 1, ..Default::default() };
+        let mut state = BundleState::default();
+        state.state.insert(
+            address,
+            BundleAccount::new(
+                Some(info.clone()),
+                Some(info),
+                [
+                    (slot, StorageSlot::new_changed(U256::ZERO, U256::from(1))),
+                    (other_slot, StorageSlot::new(U256::ZERO)),
+                ]
+                .into_iter()
+                .collect(),
+                AccountStatus::Changed,
+            ),
+        );
+        let dependencies = FrameDependencies::from(&state);
+        assert!(dependencies.accounts.is_empty());
+        assert!(dependencies.code.is_empty());
+        assert_eq!(dependencies.storage, vec![(address, slot)]);
+
+        let mut reservations = FrameReservations::default();
+        for (hash, slot) in [(1, slot), (2, other_slot)] {
+            let mut metadata = m(hash, 0, hash, 1);
+            metadata.dependencies.storage.push((address, slot));
+            put(&mut reservations, hash, metadata).unwrap();
+        }
+        assert_eq!(
+            reservations.affected(&dependencies, 0, None),
+            HashSet::from([B256::repeat_byte(1)]),
+        );
+
+        for status in [AccountStatus::Destroyed, AccountStatus::DestroyedChanged] {
+            let account = state.state.get_mut(&address).unwrap();
+            account.status = status;
+            account.info = if status == AccountStatus::Destroyed {
+                None
+            } else {
+                account.original_info.clone()
+            };
+            let dependencies = FrameDependencies::from(&state);
+            assert_eq!(dependencies.accounts, vec![address]);
+            assert_eq!(
+                reservations.affected(&dependencies, 0, None),
+                HashSet::from([B256::repeat_byte(1), B256::repeat_byte(2)]),
+            );
+        }
+
+        let account = state.state.get_mut(&address).unwrap();
+        account.status = AccountStatus::Changed;
+        account.info.as_mut().unwrap().balance = U256::from(1);
+        assert_eq!(FrameDependencies::from(&state).accounts, vec![address]);
     }
 }

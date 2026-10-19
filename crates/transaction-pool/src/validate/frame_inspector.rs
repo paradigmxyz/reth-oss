@@ -304,6 +304,10 @@ where
         if !self.deploying(ctx) {
             self.reject("creation outside deploy frame");
         }
+        // A factory's balance must not become a shared validation dependency.
+        if !inputs.value().is_zero() {
+            self.reject("value transfer in validation prefix");
+        }
         match Self::account(ctx, inputs.caller()) {
             Ok(info) if inputs.created_address(info.nonce) == self.sender => {}
             Ok(_) => self.reject("deploy frame created an account other than sender"),
@@ -537,5 +541,34 @@ mod tests {
         run(&[0x5f, 0x5f, 0x5d, 0x60, 0x03, 0x5f, 0x5f, 0xaa, 0x00], false);
         // A rejected opcode remains sticky even though APPROVE would otherwise succeed.
         run(&[0x42, 0x60, 0x03, 0x5f, 0x5f, 0xaa, 0x00], false);
+    }
+
+    #[test]
+    fn deploy_frame_creation_rejects_factory_value_transfers() {
+        let factory = Address::repeat_byte(2);
+        for scheme in [
+            revm::context_interface::CreateScheme::Create,
+            revm::context_interface::CreateScheme::Create2 { salt: U256::ZERO },
+        ] {
+            for value in [U256::ZERO, U256::from(1)] {
+                let mut inputs = CreateInputs::new(factory, scheme, value, Bytes::new(), 10_000, 0);
+                let sender = inputs.created_address(0);
+                let mut policy = policy();
+                policy.deploy_index = Some(0);
+                let mut inspector = FrameValidationInspector::new(sender, policy);
+                let mut ctx = Context::mainnet();
+                ctx.local_mut().set_frame_transaction(Some(FrameTransactionRuntime::new(sender)));
+
+                let outcome = inspector.create(&mut ctx, &mut inputs);
+                if value.is_zero() {
+                    assert!(outcome.is_none());
+                    assert_eq!(inspector.error(), None);
+                } else {
+                    assert!(outcome.is_some());
+                    assert_eq!(inspector.error(), Some("value transfer in validation prefix"));
+                }
+                assert!(ctx.journal().evm_state().is_empty());
+            }
+        }
     }
 }

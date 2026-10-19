@@ -38,7 +38,7 @@ use crate::{
     transactions::config::{StrictEthAnnouncementFilter, TransactionPropagationKind},
     NetworkHandle, TxTypesCounter,
 };
-use alloy_eips::eip2718::Typed2718;
+use alloy_eips::eip2718::{Typed2718, EIP8141_TX_TYPE_ID};
 use alloy_primitives::{
     bytes::BufMut,
     map::{hash_map::Entry, B256Map, B256Set, FbBuildHasher, HashMap, HashSet},
@@ -944,7 +944,12 @@ where
         // filter all transactions unknown to the peer
         let mut full_transactions = FullTransactionsBuilder::new(peer.version);
 
-        let to_propagate = self.pool.get_all(txs).into_iter().map(PropagateTransaction::pool_tx);
+        let to_propagate = self
+            .pool
+            .get_all(txs)
+            .into_iter()
+            .map(PropagateTransaction::pool_tx)
+            .filter(|tx| tx.can_propagate(&self.pool));
 
         if propagation_mode.is_forced() {
             // skip cache check if forced
@@ -1016,8 +1021,12 @@ where
                 return
             };
 
-            let to_propagate =
-                self.pool.get_all(hashes).into_iter().map(PropagateTransaction::pool_tx);
+            let to_propagate = self
+                .pool
+                .get_all(hashes)
+                .into_iter()
+                .map(PropagateTransaction::pool_tx)
+                .filter(|tx| tx.can_propagate(&self.pool));
 
             let mut propagated = PropagatedTransactions::default();
 
@@ -1070,13 +1079,15 @@ where
     /// Note: EIP-4844 are disallowed from being broadcast in full and are only ever sent as hashes, see also <https://eips.ethereum.org/EIPS/eip-4844#networking>.
     fn propagate_transactions(
         &mut self,
-        to_propagate: Vec<PropagateTransaction>,
+        mut to_propagate: Vec<PropagateTransaction>,
         propagation_mode: PropagationMode,
     ) -> PropagatedTransactions {
         let mut propagated = PropagatedTransactions::default();
         if self.network.tx_gossip_disabled() {
             return propagated
         }
+
+        to_propagate.retain(|tx| tx.can_propagate(&self.pool));
 
         // send full transactions to a set of the connected peers based on the configured mode
         let max_num_full = self.config.propagation_mode.full_peer_count(self.peers.len());
@@ -1891,6 +1902,14 @@ impl PropagateTransaction {
     fn shared(&self) -> LazyEncodedTransaction {
         self.transaction.clone()
     }
+
+    /// Manual propagation must also enforce public frame admission, including for transactions
+    /// supplied directly for broadcast rather than retrieved from the pool.
+    fn can_propagate<P: TransactionPool>(&self, pool: &P) -> bool {
+        self.tx_type() != EIP8141_TX_TYPE_ID ||
+            pool.get(self.tx_hash())
+                .is_some_and(|tx| tx.propagate && tx.transaction.frame_validation().is_some())
+    }
 }
 
 /// A pooled transaction encoder that avoids cloning into the consensus transaction for propagation.
@@ -2413,9 +2432,14 @@ mod tests {
         transactions::config::RelaxedEthAnnouncementFilter,
         NetworkConfigBuilder, NetworkManager,
     };
-    use alloy_consensus::{Transaction as _, TxEip1559, TxLegacy};
-    use alloy_eips::{eip2718::Encodable2718, eip4844::BlobTransactionValidationError};
-    use alloy_primitives::{hex, Signature, TxKind, B256, U256};
+    use alloy_consensus::{Transaction as _, TxEip1559, TxEip8141, TxLegacy};
+    use alloy_eips::{
+        eip1559::MIN_PROTOCOL_BASE_FEE,
+        eip2718::Encodable2718,
+        eip4844::BlobTransactionValidationError,
+        eip8141::{Frame, FrameMode, TransactionFees},
+    };
+    use alloy_primitives::{hex, Address, Sealable, Signature, TxKind, B256, U256};
     use alloy_rlp::Decodable;
     use futures::FutureExt;
     use reth_chainspec::MIN_TRANSACTION_GAS;
@@ -2425,6 +2449,7 @@ mod tests {
         error::{RequestError, RequestResult},
         sync::{NetworkSyncUpdater, SyncState},
     };
+    use reth_primitives_traits::Recovered;
     use reth_storage_api::noop::NoopProvider;
     use reth_tasks::Runtime;
     use reth_transaction_pool::{
@@ -2435,7 +2460,9 @@ mod tests {
             testing_pool, MockTransaction, MockTransactionFactory, OkValidator, TestPool,
             TransactionGenerator,
         },
-        CoinbaseTipOrdering, EthPooledTransaction, Pool, TransactionOrigin, ValidPoolTransaction,
+        validate::{FrameValidation, ValidTransaction},
+        CoinbaseTipOrdering, EthPooledTransaction, Pool, TransactionOrigin,
+        TransactionValidationOutcome, ValidPoolTransaction,
     };
     use secp256k1::SecretKey;
     use std::{
@@ -3592,5 +3619,102 @@ mod tests {
         );
 
         network_service_handle.abort();
+    }
+
+    #[tokio::test]
+    async fn manual_frame_propagation_requires_public_admission() {
+        let (mut manager, network) = new_eth_tx_manager().await;
+        network.handle().update_sync_state(SyncState::Idle);
+
+        for (propagate, validated) in [(false, false), (false, true), (true, false), (true, true)] {
+            let sender = Address::random();
+            let consensus = TransactionSigned::Eip8141(
+                TxEip8141 {
+                    sender,
+                    frames: vec![Frame { mode: FrameMode::Verify, flags: 3, ..Default::default() }],
+                    fees: TransactionFees {
+                        max_fee_per_gas: U256::from(MIN_PROTOCOL_BASE_FEE),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }
+                .seal_slow(),
+            );
+            let mut transaction = EthPooledTransaction::try_from_consensus(
+                Recovered::new_unchecked(consensus.clone(), sender),
+            )
+            .unwrap();
+            if validated {
+                transaction
+                    .set_frame_validation(Arc::new(FrameValidation {
+                        sender,
+                        sender_nonce: 0,
+                        nonce_keys: None,
+                        state_nonce: 0,
+                        sender_balance: U256::MAX,
+                        sender_code_hash: None,
+                        payer: sender,
+                        max_cost: *transaction.cost(),
+                        payer_balance: U256::MAX,
+                        head_hash: manager.pool.block_info().last_seen_block_hash,
+                        dependencies: Default::default(),
+                        expires_at: None,
+                        recent_root_dependencies: vec![],
+                        exclusive_payer: false,
+                    }))
+                    .unwrap();
+            }
+            let hash = *transaction.hash();
+            manager.pool.inner().add_transactions(
+                if propagate { TransactionOrigin::External } else { TransactionOrigin::Private },
+                [TransactionValidationOutcome::Valid {
+                    balance: U256::MAX,
+                    state_nonce: 0,
+                    bytecode_hash: None,
+                    transaction: ValidTransaction::Valid(transaction),
+                    propagate,
+                    authorities: None,
+                }],
+            )[0]
+            .as_ref()
+            .unwrap();
+
+            for route in 0..4 {
+                manager.peers.clear();
+                let peer_id = PeerId::random();
+                let (peer, _rx) = new_mock_session(peer_id, EthVersion::Eth68);
+                manager.peers.insert(peer_id, peer);
+                match route {
+                    0 => {
+                        manager.propagate_full_transactions_to_peer(
+                            vec![hash],
+                            peer_id,
+                            PropagationMode::Forced,
+                        );
+                    }
+                    1 => manager.propagate_hashes_to(vec![hash], peer_id, PropagationMode::Forced),
+                    2 => manager.propagate_all(vec![hash]),
+                    _ => {
+                        manager.propagate_transactions(
+                            vec![PropagateTransaction::new(consensus.clone())],
+                            PropagationMode::Forced,
+                        );
+                    }
+                }
+                assert_eq!(
+                    manager.peers[&peer_id].seen_transactions.contains(&hash),
+                    propagate && validated,
+                    "route {route}, propagate {propagate}, validated {validated}",
+                );
+            }
+
+            manager.pool.remove_transactions(vec![hash]);
+            assert!(manager
+                .propagate_transactions(
+                    vec![PropagateTransaction::new(consensus)],
+                    PropagationMode::Forced,
+                )
+                .is_empty());
+        }
     }
 }

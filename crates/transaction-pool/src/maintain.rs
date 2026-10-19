@@ -5,6 +5,7 @@ use crate::{
     error::PoolError,
     metrics::MaintainPoolMetrics,
     traits::{CanonicalStateUpdate, EthPoolTransaction, TransactionPool, TransactionPoolExt},
+    validate::FrameDependencies,
     AllPoolTransactions, BlobTransactionSidecarVariant, BlockInfo, PoolTransaction, PoolUpdateKind,
     TransactionOrigin,
 };
@@ -515,12 +516,14 @@ pub async fn maintain_transaction_pool<N, Client, P, St>(
                     mined_transactions,
                     update_kind: PoolUpdateKind::Commit,
                 };
-                let touched = if chain_spec.is_amsterdam_active_at_timestamp(tip.timestamp()) {
-                    state.accounts_iter().map(|(address, _)| address).collect::<Vec<_>>()
+                if chain_spec.is_bogota_active_at_timestamp(tip.timestamp()) {
+                    pool.on_canonical_state_change_with_dependencies(
+                        update,
+                        &FrameDependencies::from(state.state()),
+                    );
                 } else {
-                    Vec::new()
-                };
-                pool.on_canonical_state_change_with_touched_accounts(update, &touched);
+                    pool.on_canonical_state_change(update);
+                }
                 pool.revalidate_frame_transactions().await;
 
                 // keep track of mined blob transactions
