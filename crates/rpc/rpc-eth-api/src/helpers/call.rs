@@ -171,15 +171,16 @@ pub trait EthCall: EstimateCall + LoadBlock + FullEthApiTypes {
                     // matching spec behavior where MixDigest is zero-initialized.
                     // If user provides an override, it will be applied by apply_block_overrides.
                     evm_env.block_env.inner_mut().prevrandao = Some(B256::ZERO);
-                    if !this
+                    let is_post_merge = this
                         .provider()
                         .chain_spec()
-                        .is_paris_active_at_block(evm_env.block_env.number().saturating_to())
-                    {
+                        .is_paris_active_at_block(evm_env.block_env.number().saturating_to());
+                    if !is_post_merge {
                         evm_env.block_env.inner_mut().difficulty = parent.difficulty();
                     }
 
                     if let Some(block_overrides) = block_overrides {
+                        simulate::validate_block_overrides(&block_overrides, is_post_merge)?;
                         // ensure we don't allow uncapped gas limit per block
                         if let Some(gas_limit_override) = block_overrides.gas_limit &&
                             gas_limit_override > evm_env.block_env.gas_limit() &&

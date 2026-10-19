@@ -10,7 +10,7 @@ use alloy_eips::eip2718::WithEncoded;
 use alloy_evm::{block::TxResult, precompiles::PrecompilesMap};
 use alloy_network::{NetworkTransactionBuilder, TransactionBuilder};
 use alloy_rpc_types_eth::{
-    simulate::{SimBlock, SimCallResult, SimulateError, SimulatedBlock},
+    simulate::{SimBlock, SimCallResult, SimulateError, SimulatePayload, SimulatedBlock},
     state::StateOverride,
     BlockId, BlockOverrides, BlockTransactionsKind,
 };
@@ -31,6 +31,8 @@ use revm::{
     primitives::{hardfork::SpecId, Address, Bytes, TxKind, U256},
     Database,
 };
+use serde::{Deserialize, Deserializer, Serialize};
+use serde_ignored::Path;
 
 /// Fallback seconds added between simulated block timestamps when neither the user nor the chain
 /// hint provides a value.
@@ -587,11 +589,81 @@ where
     Ok(SimulatedBlock { inner: block, calls })
 }
 
+/// RPC input for `eth_simulateV1` that rejects unsupported block override fields.
+///
+/// Serialization preserves Alloy's payload shape. Typed callers can convert an Alloy payload
+/// with [`From`], while wire input is checked before unsupported fields can be discarded.
+#[derive(Clone, Debug, Serialize)]
+#[serde(transparent)]
+pub struct SimulateV1Request<TxReq>(SimulatePayload<TxReq>);
+
+impl<TxReq> SimulateV1Request<TxReq> {
+    /// Returns the simulation payload after validating its wire input.
+    pub fn into_inner(self) -> SimulatePayload<TxReq> {
+        self.0
+    }
+}
+
+impl<TxReq> From<SimulatePayload<TxReq>> for SimulateV1Request<TxReq> {
+    fn from(payload: SimulatePayload<TxReq>) -> Self {
+        Self(payload)
+    }
+}
+
+impl<'de, TxReq: Deserialize<'de>> Deserialize<'de> for SimulateV1Request<TxReq> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let mut unsupported = None;
+        let payload = serde_ignored::deserialize(deserializer, |path| {
+            if unsupported.is_none() &&
+                let Path::Map { parent, key } = path &&
+                is_block_override_path(parent)
+            {
+                unsupported = Some(key);
+            }
+        })?;
+        if let Some(field) = unsupported {
+            return Err(serde::de::Error::custom(format!(
+                "unsupported block override field `{field}`"
+            )))
+        }
+        Ok(Self(payload))
+    }
+}
+
+/// Matches the override object without changing how transaction or payload extensions are decoded.
+fn is_block_override_path(mut path: &Path<'_>) -> bool {
+    while let Path::Some { parent } |
+    Path::NewtypeStruct { parent } |
+    Path::NewtypeVariant { parent } = path
+    {
+        path = parent;
+    }
+    if let Path::Map { parent, key } = path &&
+        key == "blockOverrides" &&
+        let Path::Seq { parent, .. } = parent &&
+        let Path::Map { parent, key } = parent
+    {
+        return key == "blockStateCalls" && matches!(parent, Path::Root)
+    }
+    false
+}
+
+/// Validates block overrides against the simulated block's Merge status.
+pub fn validate_block_overrides(
+    overrides: &BlockOverrides,
+    is_post_merge: bool,
+) -> Result<(), EthApiError> {
+    if is_post_merge && overrides.difficulty.is_some() {
+        return Err(EthApiError::InvalidParams(
+            "difficulty override is not allowed after the merge".to_owned(),
+        ))
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{
-        apply_precompile_overrides, sanitize_chain, EthSimulateError, INTERNAL_ERROR_CODE,
-    };
+    use super::*;
     use crate::{error::ToRpcError, EthApiError};
     use alloy_chains::Chain;
     use alloy_consensus::Header;
@@ -816,5 +888,142 @@ mod tests {
         let err = sanitize_chain(vec![block_with_number(257)], &parent, Chain::mainnet().id(), 256)
             .unwrap_err();
         assert!(matches!(err, EthApiError::Other(_)));
+    }
+
+    #[test]
+    fn simulate_request_rejects_unsupported_block_overrides() {
+        for value in [serde_json::json!(1), serde_json::Value::Null] {
+            let input = serde_json::json!({
+                "blockStateCalls": [{
+                    "blockOverrides": { "auditUnknownKey": value },
+                    "calls": [{}]
+                }]
+            });
+            let error =
+                serde_json::from_value::<SimulateV1Request<TransactionRequest>>(input).unwrap_err();
+            assert_eq!(error.to_string(), "unsupported block override field `auditUnknownKey`");
+        }
+    }
+
+    #[test]
+    fn simulate_request_checks_overrides_in_later_blocks() {
+        let input = serde_json::json!({
+            "blockStateCalls": [
+                { "calls": [{}] },
+                { "blockOverrides": { "gasLimti": "0x186a0" }, "calls": [{}] }
+            ]
+        });
+        let error =
+            serde_json::from_value::<SimulateV1Request<TransactionRequest>>(input).unwrap_err();
+        assert_eq!(error.to_string(), "unsupported block override field `gasLimti`");
+    }
+
+    #[test]
+    fn simulate_request_preserves_supported_overrides_and_options() {
+        let input = serde_json::json!({
+            "blockStateCalls": [{
+                "blockOverrides": {
+                    "blockNumber": "0x2",
+                    "timestamp": "0xc",
+                    "gasLimit": "0x186a0",
+                    "feeRecipient": Address::with_last_byte(1),
+                    "prevRandao": alloy_primitives::B256::with_last_byte(2),
+                    "baseFeePerGas": "0x3",
+                    "blobBaseFee": "0x4",
+                    "parentBeaconBlockRoot": alloy_primitives::B256::with_last_byte(5),
+                    "blockHash": { "1": alloy_primitives::B256::with_last_byte(6) }
+                },
+                "stateOverrides": { (Address::with_last_byte(7).to_string()): { "balance": "0x8" } },
+                "calls": [{ "to": Address::with_last_byte(8), "gas": "0x5208" }]
+            }],
+            "traceTransfers": true,
+            "validation": true,
+            "returnFullTransactions": true
+        });
+        let expected =
+            serde_json::from_value::<SimulatePayload<TransactionRequest>>(input.clone()).unwrap();
+        let parsed = serde_json::from_value::<SimulateV1Request<TransactionRequest>>(input)
+            .unwrap()
+            .into_inner();
+        assert_eq!(serde_json::to_value(parsed).unwrap(), serde_json::to_value(expected).unwrap());
+    }
+
+    #[test]
+    fn simulate_request_preserves_defaults_and_serialization() {
+        for input in [
+            serde_json::json!({}),
+            serde_json::json!({ "blockStateCalls": [{ "calls": [{}] }] }),
+            serde_json::json!({ "blockStateCalls": [{ "blockOverrides": null, "calls": [{}] }] }),
+        ] {
+            let expected =
+                serde_json::from_value::<SimulatePayload<TransactionRequest>>(input.clone())
+                    .unwrap();
+            let parsed =
+                serde_json::from_value::<SimulateV1Request<TransactionRequest>>(input).unwrap();
+            assert_eq!(
+                serde_json::to_value(parsed).unwrap(),
+                serde_json::to_value(SimulateV1Request::from(expected)).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn simulate_block_overrides_reject_post_merge_difficulty() {
+        for difficulty in [U256::ZERO, U256::ONE] {
+            let overrides = BlockOverrides { difficulty: Some(difficulty), ..Default::default() };
+            let error: jsonrpsee_types::ErrorObjectOwned =
+                validate_block_overrides(&overrides, true).unwrap_err().into();
+            assert_eq!(error.code(), -32602);
+            assert_eq!(error.message(), "difficulty override is not allowed after the merge");
+            assert!(validate_block_overrides(&overrides, false).is_ok());
+        }
+        assert!(validate_block_overrides(&BlockOverrides::default(), true).is_ok());
+    }
+
+    #[test]
+    fn simulate_request_preserves_duplicate_alias_rejection() {
+        let input = serde_json::json!({
+            "blockStateCalls": [{
+                "blockOverrides": { "number": "0x1", "blockNumber": "0x2" },
+                "calls": [{}]
+            }]
+        });
+        let error =
+            serde_json::from_value::<SimulateV1Request<TransactionRequest>>(input).unwrap_err();
+        assert_eq!(error.to_string(), "duplicate field `number`");
+    }
+
+    #[test]
+    fn simulate_request_preserves_account_override_validation() {
+        let input = serde_json::json!({
+            "blockStateCalls": [{
+                "stateOverrides": {
+                    (Address::with_last_byte(1).to_string()): { "auditUnknownKey": 1 }
+                },
+                "calls": [{}]
+            }]
+        });
+        let expected = serde_json::from_value::<SimulatePayload<TransactionRequest>>(input.clone())
+            .unwrap_err();
+        let error =
+            serde_json::from_value::<SimulateV1Request<TransactionRequest>>(input).unwrap_err();
+        assert_eq!(error.to_string(), expected.to_string());
+    }
+
+    #[test]
+    fn simulate_request_only_checks_block_override_fields() {
+        let input = serde_json::json!({
+            "auditUnknownKey": 1,
+            "blockStateCalls": [{
+                "auditUnknownKey": 2,
+                "calls": [{ "auditUnknownKey": 3 }]
+            }]
+        });
+        let expected =
+            serde_json::from_value::<SimulatePayload<TransactionRequest>>(input.clone()).unwrap();
+        let parsed = serde_json::from_value::<SimulateV1Request<TransactionRequest>>(input)
+            .unwrap()
+            .into_inner();
+        assert_eq!(serde_json::to_value(parsed).unwrap(), serde_json::to_value(expected).unwrap());
     }
 }

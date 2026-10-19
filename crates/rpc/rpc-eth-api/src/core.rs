@@ -9,7 +9,7 @@ use alloy_eips::{eip2930::AccessListResult, BlockId, BlockNumberOrTag};
 use alloy_json_rpc::RpcObject;
 use alloy_primitives::{Address, Bytes, B256, B64, U256, U64};
 use alloy_rpc_types_eth::{
-    simulate::{SimulatePayload, SimulatedBlock},
+    simulate::SimulatedBlock,
     state::{EvmOverrides, StateOverride},
     BlockOverrides, Bundle, EIP1186AccountProofResponse, EthCallResponse, FeeHistory, Index,
     StateContext, SyncStatus, Work,
@@ -18,7 +18,9 @@ use alloy_serde::JsonStorageKey;
 use jsonrpsee::{core::RpcResult, proc_macros::rpc};
 use reth_primitives_traits::TxTy;
 use reth_rpc_convert::RpcTxReq;
-use reth_rpc_eth_types::{EthApiError, EthCapabilities, FillTransaction};
+use reth_rpc_eth_types::{
+    simulate::SimulateV1Request, EthApiError, EthCapabilities, FillTransaction,
+};
 use reth_rpc_server_types::{result::internal_rpc_err, ToRpcResult};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -242,10 +244,11 @@ pub trait EthApi<
 
     /// `eth_simulateV1` executes an arbitrary number of transactions on top of the requested state.
     /// The transactions are packed into individual blocks. Overrides can be provided.
+    /// Unsupported block override fields and post-Merge difficulty overrides are invalid params.
     #[method(name = "simulateV1")]
     async fn simulate_v1(
         &self,
-        opts: SimulatePayload<TxReq>,
+        opts: SimulateV1Request<TxReq>,
         block_number: Option<BlockId>,
     ) -> RpcResult<Vec<SimulatedBlock<B>>>;
 
@@ -751,12 +754,12 @@ where
     /// Handler for: `eth_simulateV1`
     async fn simulate_v1(
         &self,
-        payload: SimulatePayload<RpcTxReq<T::NetworkTypes>>,
+        payload: SimulateV1Request<RpcTxReq<T::NetworkTypes>>,
         block_number: Option<BlockId>,
     ) -> RpcResult<Vec<SimulatedBlock<RpcBlock<T::NetworkTypes>>>> {
         trace!(target: "rpc::eth", ?block_number, "Serving eth_simulateV1");
         let _permit = self.tracing_task_guard().clone().acquire_owned().await;
-        Ok(EthCall::simulate_v1(self, payload, block_number).await?)
+        Ok(EthCall::simulate_v1(self, payload.into_inner(), block_number).await?)
     }
 
     /// Handler for: `eth_call`

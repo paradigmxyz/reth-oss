@@ -342,3 +342,49 @@ async fn test_simulate_v1_too_many_blocks_error() -> eyre::Result<()> {
 
     Ok(())
 }
+
+#[tokio::test]
+async fn test_simulate_v1_rejects_unsupported_block_overrides() -> eyre::Result<()> {
+    let (node, _) = EthereumNode::test_setup_for(EthereumHardfork::Cancun).build_single().await?;
+    let provider = node.rpc_provider();
+    let control = serde_json::json!({
+        "blockStateCalls": [{
+            "calls": [{ "to": Address::with_last_byte(4), "gas": "0x186a0" }]
+        }]
+    });
+    let result: Vec<SimulatedBlock> =
+        provider.raw_request("eth_simulateV1".into(), (&control, "latest")).await?;
+    assert_eq!(result.len(), 1);
+    assert!(result[0].calls[0].status);
+
+    for value in [serde_json::json!(1), serde_json::Value::Null] {
+        let mut payload = control.clone();
+        payload["blockStateCalls"][0]["blockOverrides"] =
+            serde_json::json!({ "auditUnknownKey": value });
+        let error = provider
+            .raw_request::<_, Vec<SimulatedBlock>>("eth_simulateV1".into(), (&payload, "latest"))
+            .await
+            .unwrap_err();
+        assert_eq!(error.as_error_resp().expect("expected JSON-RPC error").code, -32602);
+    }
+
+    for validation in [false, true] {
+        for difficulty in ["0x0", "0x1"] {
+            let mut payload = control.clone();
+            payload["validation"] = validation.into();
+            payload["blockStateCalls"][0]["blockOverrides"] =
+                serde_json::json!({ "difficulty": difficulty });
+            let error = provider
+                .raw_request::<_, Vec<SimulatedBlock>>(
+                    "eth_simulateV1".into(),
+                    (&payload, "latest"),
+                )
+                .await
+                .unwrap_err();
+            let error = error.as_error_resp().expect("expected JSON-RPC error");
+            assert_eq!(error.code, -32602);
+            assert_eq!(error.message, "difficulty override is not allowed after the merge");
+        }
+    }
+    Ok(())
+}
