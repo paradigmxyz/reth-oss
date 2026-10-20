@@ -342,3 +342,53 @@ async fn test_simulate_v1_too_many_blocks_error() -> eyre::Result<()> {
 
     Ok(())
 }
+
+#[tokio::test]
+async fn test_simulate_v1_rejects_invalid_block_overrides() -> eyre::Result<()> {
+    let (node, _) = EthereumNode::test_setup_for(EthereumHardfork::Cancun).build_single().await?;
+    let provider = node.rpc_provider();
+    let mut payload = serde_json::json!({
+        "blockStateCalls": [{
+            "blockOverrides": {
+                "blockNumber": "0x1", "timestamp": "0xc",
+                "blockHash": { "0": alloy_primitives::B256::ZERO }
+            },
+            "calls": []
+        }]
+    });
+    let result: Vec<SimulatedBlock> =
+        provider.raw_request("eth_simulateV1".into(), (&payload, "latest")).await?;
+    assert_eq!(result.len(), 1);
+
+    for (field, values, message) in [
+        (
+            "bogusField",
+            [serde_json::json!("0x1"), serde_json::Value::Null],
+            "invalid argument 0: unknown field \"bogusField\" in block override",
+        ),
+        (
+            "difficulty",
+            [serde_json::json!("0x0"), serde_json::json!("0x1")],
+            "block 1: difficulty override is not allowed after the merge",
+        ),
+    ] {
+        for value in values {
+            payload["blockStateCalls"][0]["blockOverrides"] = serde_json::json!({ (field): value });
+            for validation in [false, true] {
+                payload["validation"] = validation.into();
+                let error = provider
+                    .raw_request::<_, Vec<SimulatedBlock>>(
+                        "eth_simulateV1".into(),
+                        (&payload, "latest"),
+                    )
+                    .await
+                    .unwrap_err();
+                let error = error.as_error_resp().expect("expected JSON-RPC error");
+                assert_eq!(error.code, -32602);
+                assert_eq!(error.message, message);
+                assert!(error.data.is_none());
+            }
+        }
+    }
+    Ok(())
+}

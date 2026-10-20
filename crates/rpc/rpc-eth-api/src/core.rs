@@ -9,7 +9,7 @@ use alloy_eips::{eip2930::AccessListResult, BlockId, BlockNumberOrTag};
 use alloy_json_rpc::RpcObject;
 use alloy_primitives::{Address, Bytes, B256, B64, U256, U64};
 use alloy_rpc_types_eth::{
-    simulate::{SimulatePayload, SimulatedBlock},
+    simulate::SimulatedBlock,
     state::{EvmOverrides, StateOverride},
     BlockOverrides, Bundle, EIP1186AccountProofResponse, EthCallResponse, FeeHistory, Index,
     StateContext, SyncStatus, Work,
@@ -20,7 +20,7 @@ use reth_primitives_traits::TxTy;
 use reth_rpc_convert::RpcTxReq;
 use reth_rpc_eth_types::{EthApiError, EthCapabilities, FillTransaction};
 use reth_rpc_server_types::{result::internal_rpc_err, ToRpcResult};
-use serde_json::Value;
+use serde_json::{value::RawValue, Value};
 use std::collections::HashMap;
 use tracing::trace;
 
@@ -242,10 +242,11 @@ pub trait EthApi<
 
     /// `eth_simulateV1` executes an arbitrary number of transactions on top of the requested state.
     /// The transactions are packed into individual blocks. Overrides can be provided.
+    /// Raw JSON preserves override keys until unsupported fields have been rejected.
     #[method(name = "simulateV1")]
     async fn simulate_v1(
         &self,
-        opts: SimulatePayload<TxReq>,
+        opts: Box<RawValue>,
         block_number: Option<BlockId>,
     ) -> RpcResult<Vec<SimulatedBlock<B>>>;
 
@@ -751,10 +752,45 @@ where
     /// Handler for: `eth_simulateV1`
     async fn simulate_v1(
         &self,
-        payload: SimulatePayload<RpcTxReq<T::NetworkTypes>>,
+        payload: Box<RawValue>,
         block_number: Option<BlockId>,
     ) -> RpcResult<Vec<SimulatedBlock<RpcBlock<T::NetworkTypes>>>> {
         trace!(target: "rpc::eth", ?block_number, "Serving eth_simulateV1");
+        {
+            let value = serde_json::from_str::<Value>(payload.get())
+                .map_err(|error| EthApiError::InvalidParams(error.to_string()))?;
+            for block in value["blockStateCalls"].as_array().into_iter().flatten() {
+                if let Some(overrides) = block["blockOverrides"].as_object() &&
+                    let Some(field) = overrides.keys().find(|field| {
+                        !matches!(
+                            field.as_str(),
+                            "number" |
+                                "blockNumber" |
+                                "difficulty" |
+                                "time" |
+                                "timestamp" |
+                                "gasLimit" |
+                                "coinbase" |
+                                "feeRecipient" |
+                                "random" |
+                                "prevRandao" |
+                                "baseFee" |
+                                "baseFeePerGas" |
+                                "blobBaseFee" |
+                                "beaconRoot" |
+                                "parentBeaconBlockRoot" |
+                                "blockHash"
+                        )
+                    })
+                {
+                    return Err(EthApiError::InvalidParams(format!(
+                        "invalid argument 0: unknown field \"{field}\" in block override"
+                    ))
+                    .into())
+                }
+            }
+        }
+        let payload = jsonrpsee_types::Params::new(Some(payload.get())).parse()?;
         let _permit = self.tracing_task_guard().clone().acquire_owned().await;
         Ok(EthCall::simulate_v1(self, payload, block_number).await?)
     }
