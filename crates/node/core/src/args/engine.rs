@@ -1,4 +1,4 @@
-//! clap [`Args`] for engine purposes.
+//! clap [`clap::Args`] for engine purposes.
 
 use clap::{
     builder::{RangedU64ValueParser, Resettable},

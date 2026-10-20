@@ -1,4 +1,4 @@
-//! clap [`Args`] for network related arguments.
+//! clap [`clap::Args`] for network related arguments.
 
 use alloy_eips::BlockNumHash;
 use alloy_primitives::B256;
