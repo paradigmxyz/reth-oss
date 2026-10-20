@@ -47,7 +47,7 @@ pub(super) struct InclusionListGas {
 
 impl InclusionListGas {
     /// Adds the block gas charged by a standard or frame transaction result.
-    pub(super) fn record<H>(&mut self, result: &ExecutionResult<H>) {
+    pub(super) const fn record<H>(&mut self, result: &ExecutionResult<H>) {
         self.execution += result.block_regular_gas_used();
         self.state += result.gas().block_state_gas_used();
     }
