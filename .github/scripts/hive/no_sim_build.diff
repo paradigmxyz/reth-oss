@@ -1,7 +1,8 @@
 diff --git a/internal/libdocker/builder.go b/internal/libdocker/builder.go
+index 20f5060..50a9194 100644
 --- a/internal/libdocker/builder.go
 +++ b/internal/libdocker/builder.go
-@@ -8,7 +8,6 @@
+@@ -8,7 +8,6 @@ import (
  	"io"
  	"io/fs"
  	"log/slog"
@@ -9,7 +10,7 @@ diff --git a/internal/libdocker/builder.go b/internal/libdocker/builder.go
  	"path/filepath"
  	"regexp"
  	"slices"
-@@ -50,25 +49,8 @@
+@@ -50,25 +49,8 @@ func (b *Builder) BuildClientImage(ctx context.Context, client libhive.ClientDes
  
  // BuildSimulatorImage builds a docker image of a simulator.
  func (b *Builder) BuildSimulatorImage(ctx context.Context, sim libhive.SimulatorDesignator) (string, error) {
@@ -29,8 +30,7 @@ diff --git a/internal/libdocker/builder.go b/internal/libdocker/builder.go
 -			buildDockerfile = p
 -		}
 -	}
--	tag := fmt.Sprintf("hive/simulators/%s:latest", sim.Simulator)
-+	tag := fmt.Sprintf("hive/simulators/%s:latest", sim.Simulator)
+ 	tag := fmt.Sprintf("hive/simulators/%s:latest", sim.Simulator)
 -	err := b.buildImage(ctx, buildContextPath, buildDockerfile, tag, sim.BuildArgs)
 -	return tag, err
 +	return tag, nil
@@ -38,9 +38,10 @@ diff --git a/internal/libdocker/builder.go b/internal/libdocker/builder.go
  
  // BuildImage creates a container by archiving the given file system,
 diff --git a/internal/libdocker/proxy.go b/internal/libdocker/proxy.go
+index 386b422..7545fda 100644
 --- a/internal/libdocker/proxy.go
 +++ b/internal/libdocker/proxy.go
-@@ -16,10 +16,6 @@
+@@ -16,10 +16,6 @@ const hiveproxyTag = "hive/hiveproxy"
  
  // Build builds the hiveproxy image.
  func (cb *ContainerBackend) Build(ctx context.Context, b libhive.Builder) error {
