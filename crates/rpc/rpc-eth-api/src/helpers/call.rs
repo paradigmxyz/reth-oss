@@ -69,6 +69,7 @@ pub trait EthCall: EstimateCall + LoadBlock + FullEthApiTypes {
 
     /// `eth_simulateV1` executes an arbitrary number of transactions on top of the requested state.
     /// The transactions are packed into individual blocks. Overrides can be provided.
+    /// Difficulty overrides are rejected for post-Merge blocks.
     ///
     /// See also: <https://github.com/ethereum/go-ethereum/pull/27720>
     fn simulate_v1(
@@ -177,6 +178,15 @@ pub trait EthCall: EstimateCall + LoadBlock + FullEthApiTypes {
                         .is_paris_active_at_block(evm_env.block_env.number().saturating_to())
                     {
                         evm_env.block_env.inner_mut().difficulty = parent.difficulty();
+                    } else if block_overrides
+                        .as_ref()
+                        .is_some_and(|overrides| overrides.difficulty.is_some())
+                    {
+                        return Err(EthApiError::InvalidParams(format!(
+                            "block {}: difficulty override is not allowed after the merge",
+                            evm_env.block_env.number()
+                        ))
+                        .into())
                     }
 
                     if let Some(block_overrides) = block_overrides {

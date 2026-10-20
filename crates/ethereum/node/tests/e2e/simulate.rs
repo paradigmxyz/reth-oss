@@ -342,3 +342,36 @@ async fn test_simulate_v1_too_many_blocks_error() -> eyre::Result<()> {
 
     Ok(())
 }
+
+#[tokio::test]
+async fn test_simulate_v1_rejects_post_merge_difficulty() -> eyre::Result<()> {
+    let (node, _) = EthereumNode::test_setup_for(EthereumHardfork::Cancun).build_single().await?;
+    let provider = node.rpc_provider();
+    let mut payload = SimulatePayload::default().extend(SimBlock::<TransactionRequest>::default());
+    let result: Vec<SimulatedBlock> =
+        provider.raw_request("eth_simulateV1".into(), (&payload, "latest")).await?;
+    assert_eq!(result.len(), 1);
+
+    for validation in [false, true] {
+        payload.validation = validation;
+        for difficulty in [U256::ZERO, U256::ONE] {
+            payload.block_state_calls[0].block_overrides =
+                Some(BlockOverrides::default().with_difficulty(difficulty));
+            let error = provider
+                .raw_request::<_, Vec<SimulatedBlock>>(
+                    "eth_simulateV1".into(),
+                    (&payload, "latest"),
+                )
+                .await
+                .unwrap_err();
+            let error = error.as_error_resp().expect("expected JSON-RPC error");
+            assert_eq!(error.code, -32602);
+            assert_eq!(
+                error.message,
+                "block 1: difficulty override is not allowed after the merge"
+            );
+            assert!(error.data.is_none());
+        }
+    }
+    Ok(())
+}
