@@ -4,8 +4,8 @@ use alloy_consensus::TxEip8141;
 use alloy_eips::{
     eip8141::{Frame, FrameMode, MAX_VERIFY_GAS, MAX_VERIFY_STATE_GAS},
     eip8272::{
-        MAX_RECENT_ROOT_REFERENCES, RECENT_ROOT_ADDRESS, RECENT_ROOT_ENTRY_DOMAIN,
-        RECENT_ROOT_LENGTH, RECENT_ROOT_STORAGE_DOMAIN, RECENT_ROOT_TUPLE_BYTES,
+        MAX_RECENT_ROOT_REFERENCES, RECENT_ROOT_ADDRESS, RECENT_ROOT_LENGTH,
+        RECENT_ROOT_STORAGE_DOMAIN, RECENT_ROOT_TUPLE_BYTES,
     },
 };
 use alloy_primitives::{keccak256, Address, B256, U256};
@@ -30,27 +30,18 @@ impl RecentRootReference {
         storage_preimage[32..64].copy_from_slice(self.source_id.as_slice());
         storage_preimage[64..].copy_from_slice(&index.to_be_bytes());
 
-        let mut entry_preimage = [0u8; 104];
-        entry_preimage[..32].copy_from_slice(RECENT_ROOT_ENTRY_DOMAIN.as_slice());
-        entry_preimage[32..64].copy_from_slice(self.source_id.as_slice());
-        entry_preimage[64..72].copy_from_slice(&self.slot.to_be_bytes());
-        entry_preimage[72..].copy_from_slice(self.root.as_slice());
-
         RecentRootDependency {
             storage_key: U256::from_be_slice(keccak256(storage_preimage).as_slice()),
-            entry_hash: keccak256(entry_preimage),
             expires_at_slot: self.slot.saturating_add(RECENT_ROOT_LENGTH),
         }
     }
 }
 
-/// A distinct recent-root storage predicate retained for public-pool revalidation.
+/// A recent-root storage location and age retained for public-pool revalidation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RecentRootDependency {
     /// Storage slot in the recent-root contract.
     pub storage_key: U256,
-    /// Expected committed `(source_id, slot, root)` entry.
-    pub entry_hash: B256,
     /// First `current_slot` for which this dependency is expired.
     pub expires_at_slot: u64,
 }
@@ -458,16 +449,17 @@ mod tests {
         };
         let dependency = reference.dependency();
         assert_eq!(
-            dependency.entry_hash,
-            b256!("0a0d1254c851be5a133b4c9a9e300f5602fc0f43dbe65aa6a66930d4ca0a51b8")
-        );
-        assert_eq!(
             dependency.storage_key,
             U256::from_be_bytes(
                 b256!("5f027aa1cbe2df279bf6518edd4b44ea5409fd800189ec35224e10ab05e574c3").0
             )
         );
         assert_eq!(dependency.expires_at_slot, RECENT_ROOT_LENGTH + 1);
+        // Root contents are checked by the EVM; withdrawal only needs the slot and age.
+        assert_eq!(
+            RecentRootReference { root: B256::repeat_byte(3), ..reference }.dependency(),
+            dependency,
+        );
 
         let policy = FrameValidationPolicy::new(
             &tx(vec![

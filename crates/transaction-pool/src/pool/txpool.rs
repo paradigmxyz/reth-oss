@@ -416,78 +416,30 @@ impl<T: TransactionOrdering> TxPool<T> {
     /// valid with the new fees.
     pub(crate) fn best_transactions_with_attributes(
         &self,
-        best_transactions_attributes: BestTransactionsAttributes,
+        attributes: BestTransactionsAttributes,
     ) -> Box<dyn crate::traits::BestTransactions<Item = Arc<ValidPoolTransaction<T::Transaction>>>>
     {
-        // First we need to check if the given base fee is different than what's currently being
-        // tracked
-        match best_transactions_attributes.basefee.cmp(&self.all_transactions.pending_fees.base_fee)
-        {
-            Ordering::Equal => {
-                // for EIP-4844 transactions we also need to check if the blob fee is now lower than
-                // what's currently being tracked, if so we need to include transactions from the
-                // blob pool that are valid with the lower blob fee
-                let new_blob_fee = best_transactions_attributes.blob_fee.unwrap_or_default();
-                match new_blob_fee.cmp(&(self.all_transactions.pending_fees.blob_fee as u64)) {
-                    Ordering::Less => {
-                        // it's possible that this swing unlocked more blob transactions
-                        let unlocked =
-                            self.blob_pool.satisfy_attributes(best_transactions_attributes);
-                        Box::new(self.pending_pool.best_with_unlocked_and_attributes(
-                            unlocked,
-                            best_transactions_attributes.basefee,
-                            new_blob_fee,
-                        ))
-                    }
-                    Ordering::Equal => Box::new(self.pending_pool.best()),
-                    Ordering::Greater => {
-                        // no additional transactions unlocked
-                        Box::new(self.pending_pool.best_with_basefee_and_blobfee(
-                            best_transactions_attributes.basefee,
-                            best_transactions_attributes.blob_fee.unwrap_or_default(),
-                        ))
-                    }
-                }
-            }
-            Ordering::Greater => {
-                // base fee increased, we need to check how the blob fee moved
-                let new_blob_fee = best_transactions_attributes.blob_fee.unwrap_or_default();
-                match new_blob_fee.cmp(&(self.all_transactions.pending_fees.blob_fee as u64)) {
-                    Ordering::Less => {
-                        // it's possible that this swing unlocked more blob transactions
-                        let unlocked =
-                            self.blob_pool.satisfy_attributes(best_transactions_attributes);
-                        Box::new(self.pending_pool.best_with_unlocked_and_attributes(
-                            unlocked,
-                            best_transactions_attributes.basefee,
-                            new_blob_fee,
-                        ))
-                    }
-                    Ordering::Equal | Ordering::Greater => {
-                        // no additional transactions unlocked
-                        Box::new(self.pending_pool.best_with_basefee_and_blobfee(
-                            best_transactions_attributes.basefee,
-                            new_blob_fee,
-                        ))
-                    }
-                }
-            }
-            Ordering::Less => {
-                // base fee decreased, we need to move transactions from the basefee + blob pool to
-                // the pending pool that might be unlocked by the lower base fee
-                let mut unlocked = self
-                    .basefee_pool
-                    .satisfy_base_fee_transactions(best_transactions_attributes.basefee);
+        let fees = self.all_transactions.pending_fees;
+        let blob_fee = attributes.blob_fee.unwrap_or_default();
+        let lower_base_fee = attributes.basefee < fees.base_fee;
+        let lower_blob_fee = blob_fee < fees.blob_fee as u64;
 
-                // also include blob pool transactions that are now unlocked
-                unlocked.extend(self.blob_pool.satisfy_attributes(best_transactions_attributes));
-
-                Box::new(self.pending_pool.best_with_unlocked_and_attributes(
-                    unlocked,
-                    best_transactions_attributes.basefee,
-                    best_transactions_attributes.blob_fee.unwrap_or_default(),
-                ))
-            }
+        if lower_base_fee || lower_blob_fee {
+            let mut unlocked = if lower_base_fee {
+                self.basefee_pool.satisfy_base_fee_transactions(attributes.basefee)
+            } else {
+                Vec::new()
+            };
+            unlocked.extend(self.blob_pool.satisfy_attributes(attributes));
+            Box::new(self.pending_pool.best_with_unlocked_and_attributes(
+                unlocked,
+                attributes.basefee,
+                blob_fee,
+            ))
+        } else if attributes.basefee == fees.base_fee && blob_fee == fees.blob_fee as u64 {
+            Box::new(self.pending_pool.best())
+        } else {
+            Box::new(self.pending_pool.best_with_basefee_and_blobfee(attributes.basefee, blob_fee))
         }
     }
 
@@ -777,15 +729,14 @@ impl<T: TransactionOrdering> TxPool<T> {
 
         self.validate_auth(&tx, on_chain_nonce, on_chain_code_hash)?;
 
-        // Update sender info with balance and nonce
-        self.all_transactions
-            .sender_info
-            .entry(tx.sender_id())
-            .or_default()
-            .update(on_chain_nonce, on_chain_balance);
-
+        let sender_id = tx.sender_id();
         match self.all_transactions.insert_tx(tx, on_chain_balance, on_chain_nonce) {
             Ok(InsertOk { transaction, move_to, replaced_tx, mut updates, state }) => {
+                self.all_transactions
+                    .sender_info
+                    .entry(sender_id)
+                    .or_default()
+                    .update(on_chain_nonce, on_chain_balance);
                 // Interleave update processing and new-tx insertion so that live
                 // `BestTransactions` iterators always receive transactions in nonce order.
                 // Updates are already in nonce-ascending order, so we split them around
@@ -1442,7 +1393,7 @@ pub(crate) struct AllTransactions<T: PoolTransaction> {
     /// Tracks the number of transactions by sender that are currently in the pool.
     tx_counter: FxHashMap<SenderId, usize>,
     /// Sender IDs currently represented in the pool, indexed by address for payer accounting.
-    sender_ids: FxHashMap<Address, SenderId>,
+    sender_lanes: FxHashMap<Address, SmallVec<[SenderId; 1]>>,
     /// Indexed state reservations for publicly validated frame transactions.
     frame_reservations: FrameReservations,
     /// The current block number the pool keeps track of.
@@ -1515,7 +1466,7 @@ impl<T: PoolTransaction> AllTransactions<T> {
     pub(crate) fn tx_inc(&mut self, sender: SenderId, address: Address) {
         let count = self.tx_counter.entry(sender).or_default();
         if *count == 0 {
-            self.sender_ids.insert(address, sender);
+            self.sender_lanes.entry(address).or_default().push(sender);
         }
         *count += 1;
         self.metrics.all_transactions_by_all_senders.increment(1.0);
@@ -1528,7 +1479,12 @@ impl<T: PoolTransaction> AllTransactions<T> {
             if *count == 1 {
                 entry.remove();
                 self.sender_info.remove(&sender);
-                self.sender_ids.remove(&address);
+                if let Some(lanes) = self.sender_lanes.get_mut(&address) {
+                    lanes.retain(|id| *id != sender);
+                    if lanes.is_empty() {
+                        self.sender_lanes.remove(&address);
+                    }
+                }
                 self.metrics.all_transactions_by_all_senders.decrement(1.0);
                 return
             }
@@ -2090,8 +2046,11 @@ impl<T: PoolTransaction> AllTransactions<T> {
         payer: Address,
         excluding: Option<TransactionId>,
     ) -> Option<U256> {
-        let Some(sender) = self.sender_ids.get(&payer).copied() else { return Some(U256::ZERO) };
-        self.txs_iter(sender)
+        self.sender_lanes
+            .get(&payer)
+            .into_iter()
+            .flatten()
+            .flat_map(|sender| self.txs_iter(*sender))
             .filter(|(id, tx)| {
                 Some(**id) != excluding && tx.transaction.transaction.frame_validation().is_none()
             })
@@ -2447,7 +2406,7 @@ impl<T: PoolTransaction> Default for AllTransactions<T> {
             txs: Default::default(),
             sender_info: Default::default(),
             tx_counter: Default::default(),
-            sender_ids: Default::default(),
+            sender_lanes: Default::default(),
             frame_reservations: Default::default(),
             last_seen_block_number: Default::default(),
             last_seen_block_hash: Default::default(),
@@ -2682,6 +2641,17 @@ mod tests {
             origin: TransactionOrigin::External,
             authority_ids: None,
         }
+    }
+
+    #[test]
+    fn rejected_insert_does_not_retain_sender_state() {
+        let mut pool = TxPool::new(crate::CoinbaseTipOrdering::default(), PoolConfig::default());
+        let mut tx = validated_frame(Address::repeat_byte(1), SenderId::from(1), 0, 100, 5);
+        Arc::make_mut(tx.transaction.frame_validation.as_mut().unwrap()).head_hash =
+            B256::repeat_byte(1);
+        assert!(pool.add_transaction(tx, U256::from(100), 0, None).is_err());
+        assert!(pool.all_transactions.sender_info.is_empty());
+        assert!(pool.all_transactions.sender_lanes.is_empty());
     }
 
     #[test]

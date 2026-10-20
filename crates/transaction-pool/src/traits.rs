@@ -1877,7 +1877,9 @@ impl<T: InMemorySize> InMemorySize for EthPooledTransaction<T> {
                     metadata.dependencies.accounts.capacity() * std::mem::size_of::<Address>() +
                     metadata.dependencies.code.capacity() * std::mem::size_of::<Address>() +
                     metadata.dependencies.storage.capacity() *
-                        std::mem::size_of::<(Address, U256)>()
+                        std::mem::size_of::<(Address, U256)>() +
+                    metadata.recent_root_dependencies.capacity() *
+                        std::mem::size_of::<crate::validate::RecentRootDependency>()
             })
     }
 }

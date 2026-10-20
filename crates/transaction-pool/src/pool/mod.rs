@@ -223,10 +223,7 @@ where
             let mut pool = self.pool.write();
             if pool.block_info().last_seen_block_hash != info.last_seen_block_hash {
                 let hashes = pool.frame_transaction_hashes();
-                let mut queue = self.frame_revalidation.lock();
-                for tx in pool.remove_transactions(hashes) {
-                    queue.insert(tx);
-                }
+                self.withdraw_frame_transactions(&mut pool, hashes, &[]);
             }
             pool.set_block_info(info)
         };
@@ -613,18 +610,7 @@ where
                 }
                 _ => pool.frame_transaction_hashes(),
             };
-            let mut queue = self.frame_revalidation.lock();
-            for hash in &mined_transactions {
-                queue.cancel(hash);
-            }
-            if !affected.is_empty() {
-                let mined: HashSet<_> = mined_transactions.iter().copied().collect();
-                for tx in pool.remove_transactions(affected) {
-                    if !mined.contains(tx.hash()) {
-                        queue.insert(tx);
-                    }
-                }
-            }
+            self.withdraw_frame_transactions(&mut pool, affected, &mined_transactions);
             pool.on_canonical_state_change(
                 block_info,
                 mined_transactions,
@@ -638,6 +624,28 @@ where
 
         // notify listeners about updates
         self.notify_on_new_state(outcome);
+    }
+
+    /// Transfers ownership while the pool write lock keeps head updates and admission atomic.
+    fn withdraw_frame_transactions(
+        &self,
+        pool: &mut TxPool<T>,
+        hashes: Vec<TxHash>,
+        mined: &[TxHash],
+    ) {
+        let mut queue = self.frame_revalidation.lock();
+        for hash in mined {
+            queue.cancel(hash);
+        }
+        if hashes.is_empty() {
+            return
+        }
+        let mined: HashSet<_> = mined.iter().copied().collect();
+        for tx in pool.remove_transactions(hashes) {
+            if !mined.contains(tx.hash()) {
+                queue.insert(tx);
+            }
+        }
     }
 
     /// Revalidates withdrawn transactions without restoring cancelled attempts.
@@ -654,7 +662,12 @@ where
                 if !self.frame_revalidation.lock().take_current(&candidate) {
                     continue
                 }
-                let (_, meta) = self.add_transaction(&mut pool, candidate.origin, validation);
+                let (_, meta) = self.add_transaction(
+                    &mut pool,
+                    candidate.origin,
+                    validation,
+                    candidate.timestamp,
+                );
                 let discarded = if meta.is_some() {
                     let discarded = pool.discard_worst();
                     pool.update_size_metrics();
@@ -692,10 +705,7 @@ where
         let UpdateOutcome { promoted, discarded } = {
             let mut pool = self.pool.write();
             let affected = pool.affected_frame_transactions(&dependencies, 0, None);
-            let mut queue = self.frame_revalidation.lock();
-            for tx in pool.remove_transactions(affected) {
-                queue.insert(tx);
-            }
+            self.withdraw_frame_transactions(&mut pool, affected, &[]);
             pool.update_accounts(changed_senders)
         };
 
@@ -714,6 +724,7 @@ where
         pool: &mut RwLockWriteGuard<'_, TxPool<T>>,
         origin: TransactionOrigin,
         tx: TransactionValidationOutcome<T::Transaction>,
+        timestamp: Instant,
     ) -> (PoolResult<AddedTransactionOutcome>, Option<AddedTransactionMeta<T::Transaction>>) {
         match tx {
             TransactionValidationOutcome::Valid {
@@ -737,67 +748,70 @@ where
                     }
                 };
 
-                let sender_id = match transaction.eip8250_nonce_keys() {
-                    Some(keys) if keys != [alloy_primitives::U256::ZERO] => {
-                        self.identifiers.write().keyed_sender_id_or_create(
-                            sender,
-                            alloy_eips::eip8141::nonce_keys_hash(keys),
+                let withdrawn = {
+                    let queue = self.frame_revalidation.lock();
+                    let existing = queue.replacement(&transaction).cloned();
+                    if transaction.eip8250_nonce_keys().is_some() &&
+                        queue.contains_sender(sender) &&
+                        existing.is_none()
+                    {
+                        return (
+                            Err(PoolError::other(
+                                *transaction.hash(),
+                                "sender frame transaction awaits revalidation",
+                            )),
+                            None,
                         )
                     }
-                    _ => self.get_sender_id(sender),
+                    existing
                 };
-                let transaction_id = TransactionId::new(sender_id, transaction.nonce());
-
-                let tx = ValidPoolTransaction {
-                    transaction,
-                    transaction_id,
-                    propagate,
-                    timestamp: Instant::now(),
-                    origin,
-                    authority_ids: authorities.map(|auths| self.get_sender_ids(auths)),
+                let (sender_id, allocated_key) = match transaction.eip8250_nonce_keys() {
+                    Some(keys) if keys != [alloy_primitives::U256::ZERO] => {
+                        let key = alloy_eips::eip8141::nonce_keys_hash(keys);
+                        let mut identifiers = self.identifiers.write();
+                        let existing = identifiers.keyed_sender_id(sender, key);
+                        let id = identifiers.keyed_sender_id_or_create(sender, key);
+                        (id, existing.is_none().then_some(key))
+                    }
+                    _ => (self.get_sender_id(sender), None),
                 };
-
-                if tx.transaction.eip8250_nonce_keys().is_some() &&
-                    self.frame_revalidation.lock().contains_sender(sender)
-                {
-                    return (
-                        Err(PoolError::other(
-                            *tx.hash(),
-                            "sender frame transaction awaits revalidation",
-                        )),
-                        None,
-                    );
-                }
-                let tx_sender = tx.sender();
-                let tx_id = *tx.id();
-                let nonce_keys = tx.transaction.eip8250_nonce_keys().map(<[_]>::to_vec);
-                // Withdrawal must not provide a window to bypass normal replacement fees.
-                let underpriced =
-                    self.frame_revalidation.lock().get(tx_sender, &tx_id).is_some_and(|existing| {
+                let outcome = (|| {
+                    let tx = ValidPoolTransaction {
+                        transaction_id: TransactionId::new(sender_id, transaction.nonce()),
+                        transaction,
+                        propagate,
+                        timestamp,
+                        origin,
+                        authority_ids: authorities.map(|auths| self.get_sender_ids(auths)),
+                    };
+                    // Withdrawal must not provide a window to bypass normal replacement fees.
+                    if withdrawn.as_ref().is_some_and(|existing| {
                         existing.hash() != tx.hash() &&
                             existing.is_underpriced(&tx, &self.config.price_bumps)
-                    });
-                if underpriced {
-                    return (
-                        Err(PoolError::new(*tx.hash(), PoolErrorKind::ReplacementUnderpriced)),
-                        None,
-                    )
+                    }) {
+                        return (
+                            Err(PoolError::new(*tx.hash(), PoolErrorKind::ReplacementUnderpriced)),
+                            None,
+                        )
+                    }
+                    let added = match pool.add_transaction(tx, balance, state_nonce, bytecode_hash)
+                    {
+                        Ok(added) => added,
+                        Err(err) => return (Err(err), None),
+                    };
+                    let hash = *added.hash();
+                    let state = added.transaction_state();
+                    let cancelled_frame = withdrawn
+                        .filter(|candidate| self.frame_revalidation.lock().take_current(candidate));
+                    let meta = AddedTransactionMeta { added, blob_sidecar, cancelled_frame };
+                    (Ok(AddedTransactionOutcome { hash, state }), Some(meta))
+                })();
+                if outcome.0.is_err() &&
+                    let Some(key) = allocated_key
+                {
+                    self.identifiers.write().remove_keyed_sender_id(sender, key, sender_id);
                 }
-                let added = match pool.add_transaction(tx, balance, state_nonce, bytecode_hash) {
-                    Ok(added) => added,
-                    Err(err) => return (Err(err), None),
-                };
-                let hash = *added.hash();
-                let cancelled_frame = self.frame_revalidation.lock().cancel_replaced(
-                    tx_sender,
-                    &tx_id,
-                    nonce_keys.as_deref(),
-                );
-                let state = added.transaction_state();
-
-                let meta = AddedTransactionMeta { added, blob_sidecar, cancelled_frame };
-
-                (Ok(AddedTransactionOutcome { hash, state }), Some(meta))
+                outcome
             }
             TransactionValidationOutcome::Invalid(tx, err) => {
                 self.with_event_listener(|listener| listener.invalid(tx.hash()));
@@ -855,7 +869,8 @@ where
             let results = transactions
                 .into_iter()
                 .map(|(origin, tx)| {
-                    let (result, meta) = self.add_transaction(&mut pool, origin, tx);
+                    let (result, meta) =
+                        self.add_transaction(&mut pool, origin, tx, Instant::now());
 
                     // Only collect metadata for successful insertions
                     if result.is_ok() &&
@@ -1241,12 +1256,14 @@ where
         &self,
         sender: Address,
     ) -> AllPoolTransactions<T::Transaction> {
-        let Some(sender_id) = self.sender_id(&sender) else { return Default::default() };
+        let lanes = self.identifiers.read().sender_lanes(sender);
         let pool = self.get_pool_data();
-        AllPoolTransactions {
-            pending: pool.pending_txs_by_sender(sender_id),
-            queued: pool.queued_txs_by_sender(sender_id),
+        let mut transactions = AllPoolTransactions::default();
+        for id in lanes {
+            transactions.pending.extend(pool.pending_txs_by_sender(id));
+            transactions.queued.extend(pool.queued_txs_by_sender(id));
         }
+        transactions
     }
 
     /// Returns _all_ transactions in the pool
@@ -2390,6 +2407,7 @@ mod tests {
                 bytecode_hash: None,
                 authorities: None,
             },
+            Instant::now(),
         )
         .0
     }
@@ -2498,5 +2516,36 @@ mod tests {
         assert_eq!(snapshot.len(), 2);
         assert_eq!(snapshot[0].nonce(), 0);
         assert_eq!(snapshot[1].nonce(), 1);
+    }
+
+    #[test]
+    fn rejected_keyed_candidates_do_not_retain_sender_domains() {
+        let pool = pool();
+        let sender = Address::repeat_byte(10);
+        for key in 1..=100 {
+            let original = frame(sender, 0, 100, 10, false);
+            let mut tx = original.transaction.as_eip8141().unwrap().clone().into_inner();
+            tx.nonce_keys = Some(vec![U256::from(key)]);
+            let mut metadata = Arc::unwrap_or_clone(original.frame_validation.unwrap());
+            metadata.nonce_keys = tx.nonce_keys.clone();
+            let mut tx = EthPooledTransaction::new(
+                Recovered::new_unchecked(TransactionSigned::Eip8141(tx.seal_slow()), sender),
+                0,
+            );
+            tx.set_frame_validation(Arc::new(metadata)).unwrap();
+            assert_eq!(admit(&pool, tx).is_ok(), key == 1);
+        }
+
+        let identifiers = pool.identifiers.read();
+        assert_eq!(identifiers.sender_lanes(sender).len(), 1);
+        for key in 2..=100 {
+            assert_eq!(
+                identifiers.keyed_sender_id(
+                    sender,
+                    alloy_eips::eip8141::nonce_keys_hash(&[U256::from(key)]),
+                ),
+                None,
+            );
+        }
     }
 }

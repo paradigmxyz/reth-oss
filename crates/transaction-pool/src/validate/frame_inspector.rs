@@ -30,12 +30,24 @@ pub struct FrameValidationInspector {
     accounts: BTreeSet<Address>,
     code: BTreeSet<Address>,
     storage: BTreeSet<(Address, U256)>,
+    recent_root_storage: BTreeSet<U256>,
     expiry: Option<u64>,
 }
 
 impl FrameValidationInspector {
     /// Creates a fresh inspector for one structurally checked transaction.
-    pub const fn new(sender: Address, policy: FrameValidationPolicy) -> Self {
+    pub fn new(sender: Address, policy: FrameValidationPolicy) -> Self {
+        let recent_root_storage = policy
+            .recent_root
+            .as_ref()
+            .map(|verifier| {
+                verifier
+                    .dependencies()
+                    .into_iter()
+                    .map(|dependency| dependency.storage_key)
+                    .collect()
+            })
+            .unwrap_or_default();
         Self {
             sender,
             policy,
@@ -44,6 +56,7 @@ impl FrameValidationInspector {
             accounts: BTreeSet::new(),
             code: BTreeSet::new(),
             storage: BTreeSet::new(),
+            recent_root_storage,
             expiry: None,
         }
     }
@@ -61,7 +74,8 @@ impl FrameValidationInspector {
     /// Returns the state dependencies observed during prefix execution.
     pub fn dependencies(&self) -> FrameDependencies {
         FrameDependencies {
-            accounts: self.accounts.iter().copied().chain([self.sender]).collect(),
+            // Sender and payer account dependencies are indexed from FrameValidation itself.
+            accounts: self.accounts.iter().copied().collect(),
             code: self.code.iter().copied().collect(),
             storage: self.storage.iter().copied().collect(),
         }
@@ -94,12 +108,6 @@ impl FrameValidationInspector {
                     interp.input.bytecode_address() == Some(&RECENT_ROOT_ADDRESS) &&
                     interp.bytecode.bytecode_slice() == RECENT_ROOT_CODE.as_ref()
             })
-    }
-
-    fn is_recent_root_storage_slot(&self, slot: U256) -> bool {
-        self.policy.recent_root.as_ref().is_some_and(|verifier| {
-            verifier.references.iter().any(|reference| reference.dependency().storage_key == slot)
-        })
     }
 
     /// Read through the journal without changing warm/cold access accounting.
@@ -213,7 +221,7 @@ where
                     if opcode == 0x55 {
                         self.reject("recent root verifier attempted a storage write")
                     } else if let Some(slot) = interp.stack.data().last() {
-                        if self.is_recent_root_storage_slot(*slot) {
+                        if self.recent_root_storage.contains(slot) {
                             self.storage.insert((RECENT_ROOT_ADDRESS, *slot));
                         } else {
                             self.reject("recent root verifier accessed an undeclared storage slot")
@@ -477,9 +485,10 @@ mod tests {
                     ..Default::default()
                 };
                 let policy = FrameValidationPolicy::new(&frame_tx, 0).unwrap();
+                let prefix_end = policy.prefix_end;
                 let payload = FrameTransaction {
                     nonce_keys: None,
-                    nonce_calldata: Bytes::new(),
+                    nonce_calldata: Vec::new(),
                     frames: frame_tx.frames.clone(),
                     signatures: frame_tx.signatures.clone(),
                     signature_hash: frame_tx.signature_hash(),
@@ -516,7 +525,7 @@ mod tests {
                     revm::context::result::EVMError<core::convert::Infallible>,
                     _,
                 > = MainnetHandler::default();
-                let result = handler.inspect_validate_prefix(&mut evm, policy.prefix_end);
+                let result = handler.inspect_validate_prefix(&mut evm, prefix_end);
                 if endowment == 0 {
                     assert!(result.is_ok(), "{result:?}");
                     assert!(evm.inspector.error().is_none());

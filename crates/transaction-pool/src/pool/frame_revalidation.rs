@@ -85,18 +85,16 @@ impl<T: PoolTransaction> FrameRevalidationQueue<T> {
         self.senders.contains_key(&sender)
     }
 
-    pub(super) fn cancel_replaced(
-        &mut self,
-        sender: Address,
-        id: &TransactionId,
-        keys: Option<&[U256]>,
-    ) -> Option<Arc<ValidPoolTransaction<T>>> {
-        let old = self.get(sender, id)?;
-        if old.transaction.eip8250_nonce_keys() != keys {
-            return None;
-        }
-        let hash = *old.hash();
-        self.remove(&hash)
+    pub(super) fn replacement(&self, tx: &T) -> Option<&Arc<ValidPoolTransaction<T>>> {
+        self.senders.get(&tx.sender())?.iter().find_map(|(id, hash)| {
+            let existing = self.transactions.get(hash)?;
+            let keys = existing.transaction.eip8250_nonce_keys();
+            // Ordinary transactions share the legacy lane with key-zero frames, including
+            // replacement fees and cancellation of an in-flight revalidation.
+            let same_domain = keys == tx.eip8250_nonce_keys() ||
+                (!tx.is_eip8141() && keys == Some(&[U256::ZERO][..]));
+            (id.nonce == tx.nonce() && same_domain).then_some(existing)
+        })
     }
 
     pub(super) fn snapshot(&self) -> Vec<Arc<ValidPoolTransaction<T>>> {
