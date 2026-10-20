@@ -2503,9 +2503,9 @@ dependencies = [
 
 [[package]]
 name = "coins-core"
-version = "0.14.1"
+version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b67d9ac2d80efdddc12b69cde110a26c9372d23f2914f604a6c3c906ba3d9b2f"
+checksum = "6d62ff0c75506614a8076f25e211b9960d398694e770f42a27400c50a6b9dba8"
 dependencies = [
  "base64 0.21.7",
  "bech32",
