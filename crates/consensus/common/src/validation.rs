@@ -3,11 +3,11 @@
 use alloy_consensus::{BlockHeader as _, EMPTY_OMMER_ROOT_HASH};
 use alloy_eips::{eip4844::DATA_GAS_PER_BLOB, eip7840::BlobParams};
 use alloy_primitives::B256;
-use reth_chainspec::{EthChainSpec, EthereumHardfork, EthereumHardforks};
-use reth_consensus::ConsensusError;
+use reth_chainspec::{EthChainSpec, EthereumHardfork, EthereumHardforks, MAX_TX_TOTAL_GAS_LIMIT};
+use reth_consensus::{ConsensusError, TxGasLimitTooHighErr};
 use reth_primitives_traits::{
     constants::{GAS_LIMIT_BOUND_DIVISOR, MAXIMUM_GAS_LIMIT_BLOCK, MINIMUM_GAS_LIMIT},
-    Block, BlockBody, BlockHeader, GotExpected, SealedBlock, SealedHeader,
+    Block, BlockBody, BlockHeader, GotExpected, SealedBlock, SealedHeader, SignedTransaction,
 };
 
 /// The maximum RLP length of a block, defined in [EIP-7934](https://eips.ethereum.org/EIPS/eip-7934).
@@ -168,6 +168,11 @@ where
     ChainSpec: EthChainSpec + EthereumHardforks,
 {
     post_merge_hardfork_fields(block, chain_spec)?;
+
+    validate_transaction_gas_limits(
+        block.body().transactions(),
+        chain_spec.is_amsterdam_active_at_timestamp(block.timestamp()),
+    )?;
 
     // Check transaction root
     let expected_transaction_root = block.header().transactions_root();
@@ -450,16 +455,58 @@ pub fn validate_against_parent_4844<H: BlockHeader>(
     Ok(())
 }
 
+// Frame transactions validate their execution and state reservations separately in the VM.
+fn validate_transaction_gas_limits<T: SignedTransaction>(
+    transactions: &[T],
+    amsterdam_active: bool,
+) -> Result<(), ConsensusError> {
+    if amsterdam_active {
+        for tx in transactions {
+            if !tx.is_eip8141() && tx.gas_limit() > MAX_TX_TOTAL_GAS_LIMIT {
+                return Err(TxGasLimitTooHighErr {
+                    tx_hash: *tx.tx_hash(),
+                    gas_limit: tx.gas_limit(),
+                    max_allowed: MAX_TX_TOTAL_GAS_LIMIT,
+                }
+                .into())
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_consensus::{BlockBody, Header, TxEip4844};
+    use alloy_consensus::{BlockBody, Header, TxEip4844, TxLegacy};
     use alloy_eips::{eip4844::DATA_GAS_PER_BLOB, eip4895::Withdrawals};
     use alloy_primitives::{Address, Bytes, Signature, U256};
     use rand::Rng;
     use reth_chainspec::ChainSpecBuilder;
     use reth_ethereum_primitives::{Transaction, TransactionSigned};
     use reth_primitives_traits::proofs;
+
+    #[test]
+    fn amsterdam_total_transaction_gas_limit() {
+        for gas_limit in [MAX_TX_TOTAL_GAS_LIMIT, MAX_TX_TOTAL_GAS_LIMIT + 1] {
+            let tx = TransactionSigned::new_unhashed(
+                Transaction::Legacy(TxLegacy { gas_limit, ..Default::default() }),
+                Signature::new(U256::ZERO, U256::ZERO, false),
+            );
+            assert!(validate_transaction_gas_limits(std::slice::from_ref(&tx), false).is_ok());
+            let tx_hash = *tx.tx_hash();
+            let result = validate_transaction_gas_limits(&[tx], true);
+            if gas_limit > MAX_TX_TOTAL_GAS_LIMIT {
+                assert!(matches!(result,
+                    Err(ConsensusError::TransactionGasLimitTooHigh(err))
+                        if err.tx_hash == tx_hash && err.gas_limit == gas_limit &&
+                            err.max_allowed == MAX_TX_TOTAL_GAS_LIMIT
+                ));
+            } else {
+                assert!(result.is_ok());
+            }
+        }
+    }
 
     fn mock_blob_tx(nonce: u64, num_blobs: usize) -> TransactionSigned {
         let mut rng = rand::rng();

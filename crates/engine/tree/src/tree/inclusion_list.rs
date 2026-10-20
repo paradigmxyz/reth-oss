@@ -9,13 +9,13 @@ use alloy_primitives::{
     map::{AddressMap, B256Map, B256Set},
     Bytes, B256, U256,
 };
+use reth_chainspec::MAX_TX_TOTAL_GAS_LIMIT;
 use reth_errors::ProviderResult;
 use reth_primitives_traits::{BlockBody as _, NodePrimitives, RecoveredBlock, SignedTransaction};
 use reth_provider::StateProviderBox;
 use revm::{
-    context_interface::cfg::gas_params::Eip2780TxInfo,
-    interpreter::gas::calculate_initial_tx_gas,
-    primitives::{eip8037::MAX_TX_TOTAL_GAS_LIMIT, hardfork::SpecId},
+    context_interface::cfg::gas_params::Eip2780TxInfo, interpreter::gas::calculate_initial_tx_gas,
+    primitives::hardfork::SpecId,
 };
 use std::collections::VecDeque;
 use tracing::{debug, info};

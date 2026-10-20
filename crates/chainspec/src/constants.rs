@@ -5,6 +5,9 @@ use alloy_primitives::b256;
 /// Gas per transaction not creating a contract.
 pub const MIN_TRANSACTION_GAS: u64 = 21_000u64;
 
+/// Maximum total EIP-8037 transaction gas, including the state-gas reservoir.
+pub const MAX_TX_TOTAL_GAS_LIMIT: u64 = u32::MAX as u64;
+
 /// Mainnet prune delete limit.
 pub const MAINNET_PRUNE_DELETE_LIMIT: usize = 20000;
 

@@ -18,7 +18,7 @@
 extern crate alloc;
 
 use alloc::{borrow::Cow, sync::Arc};
-use alloy_consensus::Header;
+use alloy_consensus::{Header, TxEip8141};
 use alloy_evm::{
     eth::{EthBlockExecutionCtx, EthBlockExecutorFactory},
     EthEvmFactory, FromRecoveredTx, FromTxWithEncoded,
@@ -142,6 +142,7 @@ where
     EvmF: EvmFactory<
             Tx: TransactionEnvMut
                     + FromRecoveredTx<TransactionSigned>
+                    + FromRecoveredTx<TxEip8141>
                     + FromTxWithEncoded<TransactionSigned>,
             Spec = SpecId,
             BlockEnv = BlockEnv,
@@ -207,12 +208,13 @@ where
     }
 
     fn evm_env(&self, header: &Header) -> Result<EvmEnv<SpecId>, Self::Error> {
-        Ok(EvmEnv::for_eth_block(
+        let env = EvmEnv::for_eth_block(
             header,
             self.chain_spec(),
             self.chain_spec().chain().id(),
             self.chain_spec().blob_params_at_timestamp(header.timestamp),
-        ))
+        );
+        Ok(env)
     }
 
     fn next_evm_env(
@@ -220,7 +222,7 @@ where
         parent: &Header,
         attributes: &NextBlockEnvAttributes,
     ) -> Result<EvmEnv, Self::Error> {
-        Ok(EvmEnv::for_eth_next_block(
+        let env = EvmEnv::for_eth_next_block(
             parent,
             NextEvmEnvAttributes {
                 timestamp: attributes.timestamp,
@@ -233,7 +235,8 @@ where
             self.chain_spec(),
             self.chain_spec().chain().id(),
             self.chain_spec().blob_params_at_timestamp(attributes.timestamp),
-        ))
+        );
+        Ok(env)
     }
 
     fn context_for_block<'a>(
@@ -275,6 +278,7 @@ where
     EvmF: EvmFactory<
             Tx: TransactionEnvMut
                     + FromRecoveredTx<TransactionSigned>
+                    + FromRecoveredTx<TxEip8141>
                     + FromTxWithEncoded<TransactionSigned>,
             Spec = SpecId,
             BlockEnv = BlockEnv,
@@ -298,6 +302,8 @@ where
         let mut cfg_env = CfgEnv::new()
             .with_chain_id(self.chain_spec().chain().id())
             .with_spec_and_mainnet_gas_params(spec);
+
+        cfg_env.enable_eip8250 = self.chain_spec().is_bogota_active_at_timestamp(timestamp);
 
         if let Some(blob_params) = &blob_params {
             cfg_env.set_max_blobs_per_tx(blob_params.max_blobs_per_tx);
@@ -356,8 +362,18 @@ where
         let txs = payload.payload.transactions().clone();
         let sender_recovery_cache = self.sender_recovery_cache.clone();
         let convert = move |tx: Bytes| {
-            let tx =
-                TxTy::<Self::Primitives>::decode_2718_exact(tx.as_ref()).map_err(AnyError::new)?;
+            let encoded_len = tx.len();
+            let tx_type = tx.first().copied();
+            let tx = TxTy::<Self::Primitives>::decode_2718_exact(tx.as_ref()).map_err(|err| {
+                tracing::info!(
+                    target: "reth_ethereum_evm",
+                    ?err,
+                    ?tx_type,
+                    encoded_len,
+                    "Failed to decode execution payload transaction"
+                );
+                AnyError::new(err)
+            })?;
             let signer = if let Some(cache) = &sender_recovery_cache {
                 cache.recover(&tx)
             } else {
@@ -384,6 +400,42 @@ mod tests {
         database_interface::EmptyDBTyped,
         inspector::NoOpInspector,
     };
+
+    #[test]
+    fn keyed_nonce_activation_follows_frames() {
+        let spec = ChainSpec::builder()
+            .chain(Chain::mainnet())
+            .genesis(Genesis::default())
+            .bogota_activated()
+            .with_bogota_at(10)
+            .build();
+        let config = EthEvmConfig::new(Arc::new(spec));
+        for timestamp in [9, 10, 11] {
+            let header = Header { timestamp, ..Default::default() };
+            let env = config.evm_env(&header).unwrap();
+            assert_eq!(env.cfg_env.enable_eip8250, timestamp >= 10);
+            let env = config
+                .next_evm_env(
+                    &Header::default(),
+                    &NextBlockEnvAttributes {
+                        timestamp,
+                        suggested_fee_recipient: Default::default(),
+                        prev_randao: Default::default(),
+                        gas_limit: 30_000_000,
+                        parent_beacon_block_root: None,
+                        withdrawals: None,
+                        extra_data: Default::default(),
+                        slot_number: None,
+                    },
+                )
+                .unwrap();
+            assert_eq!(env.cfg_env.enable_eip8250, timestamp >= 10);
+            let block = Block { header, body: Default::default() };
+            let payload = ExecutionData::from_block_unchecked(Default::default(), &block);
+            let env = config.evm_env_for_payload(&payload).unwrap();
+            assert_eq!(env.cfg_env.enable_eip8250, timestamp >= 10);
+        }
+    }
 
     #[test]
     fn test_fill_cfg_and_block_env() {
