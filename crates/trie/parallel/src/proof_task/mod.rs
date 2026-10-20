@@ -10,11 +10,12 @@
 //!
 //! # Message Flow
 //!
-//! 1. [`ProofWorkerHandle::dispatch`] splits proof targets into storage and account jobs and queues
-//!    each job for the matching worker pool.
-//! 2. A worker receives a job, runs the proof, and sends one [`ProofWorkerResult`] to the handle's
-//!    result channel.
-//! 3. The owner of the handle receives the results through [`ProofWorkerHandle::results`].
+//! 1. [`ProofWorkerHandle::dispatch`](crate::proof_task::ProofWorkerHandle::dispatch) splits proof
+//!    targets into storage and account jobs and queues each job for the matching worker pool.
+//! 2. A worker receives a job, runs the proof, and sends one
+//!    [`ProofWorkerResult`](crate::proof_task::ProofWorkerResult) to the handle's result channel.
+//! 3. The owner of the handle receives the results through
+//!    [`ProofWorkerHandle::results`](crate::proof_task::ProofWorkerHandle::results).
 //!
 //! ```text
 //! ProofWorkerHandle::dispatch -> Storage/Account Worker
