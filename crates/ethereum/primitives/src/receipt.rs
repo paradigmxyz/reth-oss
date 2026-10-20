@@ -444,6 +444,7 @@ pub fn calculate_receipt_root_no_memo(receipts: &[Receipt]) -> B256 {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
     use crate::TransactionSigned;
     use alloy_consensus::{ReceiptWithBloom, TxType};
@@ -451,10 +452,8 @@ mod tests {
         eip2718::{Decodable2718, Encodable2718},
         eip8141::{FrameGasUsed, FrameReceipt, FrameStatus},
     };
-    #[cfg(feature = "reth-codec")]
-    use alloy_primitives::Bytes;
     use alloy_primitives::{
-        address, b256, bloom, bytes, hex_literal::hex, Address, Bloom, Log, LogData,
+        address, b256, bytes, hex_literal::hex, Address, Bloom, Bytes, Log, LogData,
     };
     use alloy_rlp::{Decodable, Encodable};
     #[cfg(feature = "reth-codec")]
@@ -856,9 +855,7 @@ mod tests {
             address: Address::ZERO,
             data: LogData::new_unchecked(vec![], Default::default()),
         }];
-        let bloom = bloom!(
-            "00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001"
-        );
+        let bloom = Bloom::with_last_byte(1);
         let receipt = ReceiptWithBloom {
             receipt: Receipt::standard(TxType::Eip2930, true, 102068, logs),
             logs_bloom: bloom,

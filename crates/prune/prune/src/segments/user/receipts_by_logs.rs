@@ -6,9 +6,7 @@ use crate::{
 use alloy_consensus::TxReceipt;
 use reth_db_api::{table::Value, tables, transaction::DbTxMut};
 use reth_primitives_traits::NodePrimitives;
-use reth_provider::{
-    BlockReader, DBProvider, NodePrimitivesProvider, PruneCheckpointWriter, TransactionsProvider,
-};
+use reth_provider::{BlockReader, DBProvider, NodePrimitivesProvider, PruneCheckpointWriter};
 use reth_prune_types::{
     PruneCheckpoint, PruneMode, PrunePurpose, PruneSegment, ReceiptsLogPruneConfig, SegmentOutput,
     MINIMUM_UNWIND_SAFE_DISTANCE,
@@ -29,7 +27,6 @@ impl<Provider> Segment<Provider> for ReceiptsByLogs
 where
     Provider: DBProvider<Tx: DbTxMut>
         + PruneCheckpointWriter
-        + TransactionsProvider
         + BlockReader
         + NodePrimitivesProvider<Primitives: NodePrimitives<Receipt: Value>>,
 {
@@ -240,6 +237,7 @@ mod tests {
     use alloy_primitives::B256;
     use assert_matches::assert_matches;
     use reth_db_api::{cursor::DbCursorRO, tables, transaction::DbTx};
+    use reth_ethereum_primitives::Receipt;
     use reth_primitives_traits::InMemorySize;
     use reth_provider::{BlockReader, DBProvider, DatabaseProviderFactory, PruneCheckpointReader};
     use reth_prune_types::{
@@ -282,7 +280,12 @@ mod tests {
                     .map(|(id, tx)| {
                         let mut receipt = random_receipt(&mut rng, tx, Some(0), None);
                         if id == 0 && retain_first {
-                            receipt.logs.push(random_log(&mut rng, Some(address), Some(1)));
+                            receipt = Receipt::standard(
+                                receipt.tx_type(),
+                                receipt.success(),
+                                receipt.cumulative_gas_used(),
+                                vec![random_log(&mut rng, Some(address), Some(1))],
+                            );
                         }
                         (id as u64, receipt)
                     })

@@ -110,8 +110,11 @@ where
         &env.cfg_env.gas_params,
     );
     let inspector = FrameValidationInspector::new(frame.sender, prefix.clone());
-    let mut evm =
-        evm_config.evm_with_env_and_inspector(StateProviderDatabase::new(&state), env, inspector);
+    let mut evm = evm_config.evm_with_env_and_inspector(
+        StateProviderDatabase::new((&state).into_evm_state_provider()),
+        env,
+        inspector,
+    );
     let result = match evm.validate_frame_transaction(tx, prefix.prefix_end) {
         Some(Ok(result)) => result,
         Some(Err(error)) => {

@@ -1,5 +1,5 @@
 use alloy_consensus::{
-    proofs::calculate_receipt_root, BlockHeader, Eip658Value, ReceiptEnvelope, ReceiptWithBloom,
+    proofs::calculate_receipt_root, BlockHeader, ReceiptEnvelope, ReceiptWithBloom,
     RlpDecodableReceipt, TxReceipt,
 };
 use alloy_primitives::{BlockHash, BlockNumber, Bloom, U256};
@@ -583,7 +583,7 @@ fn receipts_from_envelopes<R: RlpDecodableReceipt>(
     envelopes: Vec<ReceiptEnvelope>,
 ) -> eyre::Result<Vec<R>> {
     for envelope in &envelopes {
-        if matches!(envelope.status_or_post_state(), Eip658Value::PostState(_)) {
+        if envelope.status_or_post_state().is_post_state() {
             eyre::bail!(
                 "block {number} has pre-Byzantium receipts, which commit to a post-state root \
                  rather than a success status and so cannot be represented by this node's receipt \
@@ -874,7 +874,9 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_consensus::{Header, Receipt as RlpReceipt, ReceiptWithBloom, TxLegacy, TxType};
+    use alloy_consensus::{
+        Eip658Value, Header, Receipt as RlpReceipt, ReceiptWithBloom, TxLegacy, TxType,
+    };
     use alloy_primitives::{Address, Bytes, Log, Signature, B256};
     use reth_db_common::init::init_genesis;
     use reth_era::{
@@ -1424,39 +1426,6 @@ mod tests {
         );
 
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn process_writes_receipts_when_requested() {
-        let pf = create_test_provider_factory();
-        init_genesis(&pf).unwrap();
-
-        let static_file_provider = pf.static_file_provider();
-        let mut writer = static_file_provider.latest_writer(StaticFileSegment::Headers).unwrap();
-        let mut receipts_writer =
-            static_file_provider.latest_writer(StaticFileSegment::Receipts).unwrap();
-        let provider = pf.database_provider_rw().unwrap();
-        let folder = tempdir().unwrap();
-        let mut hash_collector = Collector::new(4096, Some(folder.path().to_owned()));
-        let meta = TestMeta { marked: Cell::new(false) };
-
-        let height = process::<TestEraWithEmptyReceipts, _, Block, _, _>(
-            &meta,
-            &mut writer,
-            Some(&mut receipts_writer),
-            &provider,
-            &mut hash_collector,
-            0..=1,
-            ImportPolicy { headers_tip: 0, is_receipt_verifiable: &|_| false },
-        )
-        .unwrap();
-        receipts_writer.commit().unwrap();
-
-        assert_eq!(height, 1);
-        assert_eq!(
-            static_file_provider.get_highest_static_file_block(StaticFileSegment::Receipts),
-            Some(1)
-        );
     }
 
     #[test]

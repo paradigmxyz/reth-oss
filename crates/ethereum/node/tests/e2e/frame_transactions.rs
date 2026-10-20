@@ -1,7 +1,6 @@
 //! End-to-end EIP-8141 pool coverage using externally submitted frame envelopes.
 
-use crate::utils::eth_payload_attributes_amsterdam;
-use alloy_consensus::{BlockHeader, TxEip8141};
+use alloy_consensus::TxEip8141;
 use alloy_eips::eip8141::{
     Frame, FrameAddress, FrameLimits, FrameMode, FrameSignature, SignatureScheme, TransactionFees,
     ATOMIC_BATCH_FLAG, EXPIRY_VERIFIER, EXPIRY_VERIFIER_RUNTIME, NONCE_MANAGER, NONCE_MANAGER_CODE,
@@ -10,7 +9,7 @@ use alloy_primitives::{Address, Bytes, U256};
 use alloy_signer::SignerSync;
 use alloy_signer_local::PrivateKeySigner;
 use reth_chainspec::{ChainSpecBuilder, MAINNET};
-use reth_e2e_test_utils::{setup_engine, wallet::Wallet};
+use reth_e2e_test_utils::{test_genesis, wait::poll_until, wallet::Wallet, E2ETestSetupExt};
 use reth_node_ethereum::EthereumNode;
 use reth_transaction_pool::TransactionPool;
 use std::sync::Arc;
@@ -24,8 +23,7 @@ const fn recipient() -> Address {
 }
 
 fn chain_spec() -> Arc<reth_chainspec::ChainSpec> {
-    let mut genesis: alloy_genesis::Genesis =
-        serde_json::from_str(include_str!("../assets/genesis.json")).unwrap();
+    let mut genesis = test_genesis();
     // Devnet contracts are ordinary genesis allocations, not fork-installed code. The nonce
     // manager must be nonempty so EIP-161 does not clear its keyed-nonce storage after execution.
     for (address, code) in [
@@ -137,30 +135,8 @@ async fn assert_mined_from_pool(
         eprintln!("EIP-8141 E2E payload inclusion confirmed: hash={hash:#x}");
     }
 
-    let block_number = payload.block().number();
-    let block_hash = node.submit_payload(payload).await?;
-    node.update_forkchoice(block_hash, block_hash).await?;
-
-    // The transaction pool is maintained by a separate task subscribed to the canonical-state
-    // stream. Wait until the block is persisted before checking that task's asynchronous removal.
-    tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        node.wait_block(block_number, block_hash, false),
-    )
-    .await
-    .map_err(|_| eyre::eyre!("timed out waiting for the frame block to become canonical"))??;
-
-    let removed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        loop {
-            if expected.iter().all(|hash| !node.inner.pool.contains(hash)) {
-                break true;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .unwrap_or(false);
-    eyre::ensure!(removed, "canonical frame transaction remained in pool");
+    node.import_payload(payload).await?;
+    node.wait_for_pool_removal(expected.iter().copied()).await?;
     for hash in expected {
         eprintln!("EIP-8141 E2E canonical removal confirmed: hash={hash:#x}");
     }
@@ -171,15 +147,7 @@ async fn assert_mined_from_pool(
 async fn self_verify_frame_is_admitted_and_mined() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
     let signer = Wallet::default().wallet_gen().into_iter().next().unwrap();
-    let (mut nodes, _) = setup_engine::<EthereumNode>(
-        1,
-        chain_spec(),
-        false,
-        Default::default(),
-        eth_payload_attributes_amsterdam,
-    )
-    .await?;
-    let mut node = nodes.pop().unwrap();
+    let (mut node, _) = EthereumNode::test_setup(1, chain_spec()).build_single().await?;
     let raw = frame_tx(&signer, 0, vec![self_verify_frame(), sender_frame(recipient())]);
     let hash = node.rpc.inject_tx(raw).await?;
 
@@ -190,15 +158,7 @@ async fn self_verify_frame_is_admitted_and_mined() -> eyre::Result<()> {
 async fn post_tx_suffix_is_admitted_and_mined() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
     let signer = Wallet::default().wallet_gen().into_iter().next().unwrap();
-    let (mut nodes, _) = setup_engine::<EthereumNode>(
-        1,
-        chain_spec(),
-        false,
-        Default::default(),
-        eth_payload_attributes_amsterdam,
-    )
-    .await?;
-    let mut node = nodes.pop().unwrap();
+    let (mut node, _) = EthereumNode::test_setup(1, chain_spec()).build_single().await?;
     let raw = frame_tx(
         &signer,
         0,
@@ -213,15 +173,7 @@ async fn post_tx_suffix_is_admitted_and_mined() -> eyre::Result<()> {
 async fn expiry_prefix_frame_is_admitted_and_mined() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
     let signer = Wallet::default().wallet_gen().into_iter().next().unwrap();
-    let (mut nodes, _) = setup_engine::<EthereumNode>(
-        1,
-        chain_spec(),
-        false,
-        Default::default(),
-        eth_payload_attributes_amsterdam,
-    )
-    .await?;
-    let mut node = nodes.pop().unwrap();
+    let (mut node, _) = EthereumNode::test_setup(1, chain_spec()).build_single().await?;
     let deadline = node.payload.timestamp.saturating_add(600).to_be_bytes();
     let expiry = Frame {
         mode: FrameMode::Verify,
@@ -240,15 +192,7 @@ async fn expiry_prefix_frame_is_admitted_and_mined() -> eyre::Result<()> {
 async fn atomic_frame_body_is_admitted_and_mined() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
     let signer = Wallet::default().wallet_gen().into_iter().next().unwrap();
-    let (mut nodes, _) = setup_engine::<EthereumNode>(
-        1,
-        chain_spec(),
-        false,
-        Default::default(),
-        eth_payload_attributes_amsterdam,
-    )
-    .await?;
-    let mut node = nodes.pop().unwrap();
+    let (mut node, _) = EthereumNode::test_setup(1, chain_spec()).build_single().await?;
     let mut first = sender_frame(recipient());
     first.flags = ATOMIC_BATCH_FLAG;
     let mut second = sender_frame(recipient());
@@ -264,15 +208,7 @@ async fn atomic_frame_body_is_admitted_and_mined() -> eyre::Result<()> {
 async fn sequential_frames_wait_for_the_current_sequence() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
     let signer = Wallet::default().wallet_gen().into_iter().next().unwrap();
-    let (mut nodes, _) = setup_engine::<EthereumNode>(
-        1,
-        chain_spec(),
-        false,
-        Default::default(),
-        eth_payload_attributes_amsterdam,
-    )
-    .await?;
-    let mut node = nodes.pop().unwrap();
+    let (mut node, _) = EthereumNode::test_setup(1, chain_spec()).build_single().await?;
     let first = node
         .rpc
         .inject_tx(frame_tx(&signer, 0, vec![self_verify_frame(), sender_frame(recipient())]))
@@ -293,15 +229,7 @@ async fn keyed_nonce_rpc_and_pool_roundtrip() -> eyre::Result<()> {
     use serde_json::json;
     let signer = Wallet::default().wallet_gen().into_iter().next().unwrap();
     let spec = chain_spec();
-    let (mut nodes, _) = setup_engine::<EthereumNode>(
-        1,
-        spec,
-        false,
-        Default::default(),
-        eth_payload_attributes_amsterdam,
-    )
-    .await?;
-    let mut node = nodes.pop().unwrap();
+    let (mut node, _) = EthereumNode::test_setup(1, spec).build_single().await?;
     let client = reqwest::Client::new();
     let url = node.rpc_url();
     let rpc = |method: &'static str, params: serde_json::Value| {
@@ -390,20 +318,13 @@ async fn keyed_nonce_rpc_and_pool_roundtrip() -> eyre::Result<()> {
     let mut raw = Vec::new();
     tx.eip2718_encode(&mut raw);
     let hash = node.rpc.inject_tx(raw.into()).await?;
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        loop {
-            let pending = rpc(
-                "eth_getTransactionCount",
-                json!([signer.address(), "pending", ["0x1", "0x2"]]),
-            )
-            .await?;
-            if pending == "0x1" {
-                break Ok::<_, eyre::Report>(());
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        }
+    poll_until("pending keyed nonce to advance", || async {
+        let pending =
+            rpc("eth_getTransactionCount", json!([signer.address(), "pending", ["0x1", "0x2"]]))
+                .await?;
+        Ok((pending == "0x1").then_some(()))
     })
-    .await??;
+    .await?;
     assert_eq!(
         rpc("eth_getTransactionCount", json!([signer.address(), "latest", ["0x1", "0x2"]])).await?,
         "0x0"
@@ -481,20 +402,12 @@ async fn keyed_nonce_query_requires_activation() -> eyre::Result<()> {
     let spec = Arc::new(
         ChainSpecBuilder::default()
             .chain(MAINNET.chain)
-            .genesis(serde_json::from_str(include_str!("../assets/genesis.json"))?)
+            .genesis(test_genesis())
             .bogota_activated()
             .with_bogota_at(u64::MAX)
             .build(),
     );
-    let (mut nodes, _) = setup_engine::<EthereumNode>(
-        1,
-        spec,
-        false,
-        Default::default(),
-        eth_payload_attributes_amsterdam,
-    )
-    .await?;
-    let node = nodes.pop().unwrap();
+    let (node, _) = EthereumNode::test_setup(1, spec).build_single().await?;
     let client = reqwest::Client::new();
     for block in ["latest", "0x0", "pending"] {
         for (keys, expected_error) in

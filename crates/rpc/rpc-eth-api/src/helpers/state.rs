@@ -11,7 +11,6 @@ use alloy_primitives::{keccak256, Address, Bytes, B256, U256};
 use alloy_rpc_types_eth::{Account, AccountInfo, EIP1186AccountProofResponse};
 use alloy_serde::JsonStorageKey;
 use futures::Future;
-use reth_chain_state::BlockState;
 use reth_errors::RethError;
 use reth_evm::{ConfigureEvm, EvmEnvFor};
 use reth_primitives_traits::{BlockTy, RecoveredBlock, SealedHeaderFor};
@@ -79,8 +78,14 @@ pub trait EthState: LoadState + SpawnBlocking {
                 let (env, state): (_, StateProviderBox) = if let Some(pending) = pending {
                     let env =
                         this.evm_env_for_header(pending.block().sealed_block().sealed_header())?;
-                    let parent_state = this.state_at_hash(pending.parent_hash())?;
-                    (env, Box::new(BlockState::from(pending).state_provider(parent_state)))
+                    let state = this
+                        .provider()
+                        .state_with_block_appended(
+                            pending.block().parent_hash(),
+                            pending.executed_block,
+                        )
+                        .map_err(Self::Error::from_eth_err)?;
+                    (env, state)
                 } else {
                     let (env, at) = this.evm_env_at(at).await?;
                     (env, this.state_at_block_id(at).await?)
@@ -139,12 +144,11 @@ pub trait EthState: LoadState + SpawnBlocking {
         block_id: Option<BlockId>,
     ) -> impl Future<Output = Result<B256, Self::Error>> + Send {
         self.spawn_blocking_io_with_state(block_id.unwrap_or_default(), move |_, state| {
-            Ok(B256::new(
+            Ok(B256::from(
                 state
                     .storage(address, index.as_b256())
                     .map_err(Self::Error::from_eth_err)?
-                    .unwrap_or_default()
-                    .to_be_bytes(),
+                    .unwrap_or_default(),
             ))
         })
     }
@@ -182,7 +186,7 @@ pub trait EthState: LoadState + SpawnBlocking {
                             .storage(address, slot.as_b256())
                             .map_err(Self::Error::from_eth_err)?
                             .unwrap_or_default();
-                        values.push(B256::new(value.to_be_bytes()));
+                        values.push(B256::from(value));
                     }
                     result.insert(address, values);
                 }
@@ -302,23 +306,20 @@ pub trait EthState: LoadState + SpawnBlocking {
                 let account = state.basic_account(&address).map_err(Self::Error::from_eth_err)?;
                 let Some(account) = account else { return Ok(None) };
 
-                let balance = account.balance;
-                let nonce = account.nonce;
-                let code_hash = account.bytecode_hash.unwrap_or(KECCAK_EMPTY);
-
                 // Provide a default `HashedStorage` value in order to
                 // get the storage root hash of the current state.
                 let storage_root = state
                     .storage_root(address, Default::default())
                     .map_err(Self::Error::from_eth_err)?;
 
-                Ok(Some(Account { balance, nonce, code_hash, storage_root }))
+                Ok(Some(account.into_trie_account(storage_root)))
             })
             .await
         }
     }
 
     /// Retrieves the account's balance, nonce, and code for a given address.
+    #[allow(clippy::needless_update)]
     fn get_account_info(
         &self,
         address: Address,
@@ -342,7 +343,14 @@ pub trait EthState: LoadState + SpawnBlocking {
                     .original_bytes()
             };
 
-            Ok(AccountInfo { balance, nonce, code })
+            Ok(AccountInfo {
+                balance,
+                nonce,
+                code,
+                #[cfg(feature = "account-ext")]
+                extension: account.extension,
+                ..Default::default()
+            })
         })
     }
 }
@@ -516,7 +524,7 @@ pub trait LoadState:
         >,
     > + Send
     where
-        Self: SpawnBlocking + LoadBlock,
+        Self: LoadBlock,
     {
         async move {
             if at.is_pending() {

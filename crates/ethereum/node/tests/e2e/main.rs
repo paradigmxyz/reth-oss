@@ -5,6 +5,7 @@ mod custom_genesis;
 mod dev;
 mod eip6780;
 mod eth;
+mod finality;
 mod forkchoice;
 mod frame_transactions;
 mod inclusion_list;
@@ -12,9 +13,12 @@ mod invalid_payload;
 mod p2p;
 mod pool;
 mod prestate;
+mod reorg;
+mod restart;
 mod rpc;
 mod selfdestruct;
 mod simulate;
+mod snap;
 mod utils;
 
 const fn main() {}

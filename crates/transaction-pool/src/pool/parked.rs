@@ -540,10 +540,11 @@ impl<T: PoolTransaction> Ord for QueuedOrd<T> {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
     use crate::test_utils::{MockTransaction, MockTransactionFactory, MockTransactionSet};
     use alloy_consensus::{Transaction, TxType};
-    use alloy_primitives::address;
+    use alloy_primitives::Address;
     use std::collections::HashSet;
 
     #[test]
@@ -617,10 +618,10 @@ mod tests {
         let mut f = MockTransactionFactory::default();
         let mut pool = ParkedPool::<BasefeeOrd<_>>::default();
 
-        let a_sender = address!("0x000000000000000000000000000000000000000a");
-        let b_sender = address!("0x000000000000000000000000000000000000000b");
-        let c_sender = address!("0x000000000000000000000000000000000000000c");
-        let d_sender = address!("0x000000000000000000000000000000000000000d");
+        let a_sender = Address::with_last_byte(0x0a);
+        let b_sender = Address::with_last_byte(0x0b);
+        let c_sender = Address::with_last_byte(0x0c);
+        let d_sender = Address::with_last_byte(0x0d);
 
         // create a chain of transactions by sender A, B, C
         let mut tx_set = MockTransactionSet::dependent(a_sender, 0, 4, TxType::Eip1559);
@@ -694,7 +695,7 @@ mod tests {
 
         // create a chain of transactions by sender A
         // make sure they are all one over half the limit
-        let a_sender = address!("0x000000000000000000000000000000000000000a");
+        let a_sender = Address::with_last_byte(0x0a);
 
         // 2 txs, that should put the pool over the size limit but not max txs
         let a_txs = MockTransactionSet::dependent(a_sender, 0, 2, TxType::Eip1559)
@@ -721,10 +722,10 @@ mod tests {
         let mut f = MockTransactionFactory::default();
         let mut pool = ParkedPool::<BasefeeOrd<_>>::default();
 
-        let a_sender = address!("0x000000000000000000000000000000000000000a");
-        let b_sender = address!("0x000000000000000000000000000000000000000b");
-        let c_sender = address!("0x000000000000000000000000000000000000000c");
-        let d_sender = address!("0x000000000000000000000000000000000000000d");
+        let a_sender = Address::with_last_byte(0x0a);
+        let b_sender = Address::with_last_byte(0x0b);
+        let c_sender = Address::with_last_byte(0x0c);
+        let d_sender = Address::with_last_byte(0x0d);
 
         // create a chain of transactions by sender A, B, C
         let mut tx_set = MockTransactionSet::dependent(a_sender, 0, 4, TxType::Eip1559);
@@ -1093,8 +1094,8 @@ mod tests {
         let mut pool = ParkedPool::<BasefeeOrd<_>>::default();
 
         // Add multiple transactions across different fee ranges
-        let sender_a = address!("0x000000000000000000000000000000000000000a");
-        let sender_b = address!("0x000000000000000000000000000000000000000b");
+        let sender_a = Address::with_last_byte(0x0a);
+        let sender_b = Address::with_last_byte(0x0b);
 
         // Add transactions where nonce ordering allows proper processing:
         // Sender A: both transactions can afford basefee (500 >= 400, 600 >= 400)

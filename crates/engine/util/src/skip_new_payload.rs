@@ -42,6 +42,7 @@ where
             let next = ready!(this.stream.poll_next_unpin(cx));
             let item = match next {
                 Some(BeaconEngineMessage::NewPayload {
+                    cause,
                     payload,
                     inclusion_list_transactions,
                     tx,
@@ -61,6 +62,7 @@ where
                     }
                     *this.skipped = 0;
                     Some(BeaconEngineMessage::NewPayload {
+                        cause,
                         payload,
                         inclusion_list_transactions,
                         tx,

@@ -14,7 +14,8 @@ use reth_errors::ProviderResult;
 use reth_primitives_traits::{BlockBody as _, NodePrimitives, RecoveredBlock, SignedTransaction};
 use reth_provider::StateProviderBox;
 use revm::{
-    context_interface::cfg::gas_params::Eip2780TxInfo, interpreter::gas::calculate_initial_tx_gas,
+    context_interface::{cfg::gas_params::Eip2780TxInfo, result::ExecutionResult},
+    interpreter::gas::calculate_initial_tx_gas,
     primitives::hardfork::SpecId,
 };
 use std::collections::VecDeque;
@@ -42,6 +43,14 @@ pub(super) struct InclusionListContext {
 pub(super) struct InclusionListGas {
     pub(super) execution: u64,
     pub(super) state: u64,
+}
+
+impl InclusionListGas {
+    /// Adds the block gas charged by a standard or frame transaction result.
+    pub(super) fn record<H>(&mut self, result: &ExecutionResult<H>) {
+        self.execution += result.block_regular_gas_used();
+        self.state += result.gas().block_state_gas_used();
+    }
 }
 
 /// Inclusion-list status and gas accounting from authoritative block execution.
@@ -315,6 +324,7 @@ mod inclusion_list_tests {
         StateProviderFactory,
     };
     use reth_testing_utils::generators::{self, generate_key, sign_tx_with_key_pair};
+    use revm::context_interface::result::{HaltReason, ResultGas};
 
     const CHAIN_ID: u64 = 1;
     const BASE_FEE: u64 = 7;
@@ -697,5 +707,27 @@ mod inclusion_list_tests {
             retained.insert(B256::with_last_byte(i as u8 + 2), Vec::new());
         }
         assert_eq!(retained.gas(&hash), None);
+    }
+
+    #[test]
+    fn inclusion_list_gas_accumulates_frame_and_standard_dimensions() {
+        let mut gas = InclusionListGas::default();
+        gas.record(&ExecutionResult::<HaltReason>::FrameTransaction {
+            success: true,
+            gas: ResultGas::default()
+                .with_total_gas_spent(100_000)
+                .with_floor_gas(80_000)
+                .with_state_gas_spent(30_000),
+            payer: Address::ZERO,
+            logs: vec![],
+            frame_receipts: vec![],
+            frame_outputs: vec![],
+        });
+        gas.record(&ExecutionResult::<HaltReason>::Revert {
+            gas: ResultGas::default().with_total_gas_spent(21_000),
+            logs: vec![],
+            output: Bytes::new(),
+        });
+        assert_eq!(gas, InclusionListGas { execution: 101_000, state: 30_000 });
     }
 }

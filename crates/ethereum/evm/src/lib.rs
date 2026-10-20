@@ -18,22 +18,28 @@
 extern crate alloc;
 
 use alloc::{borrow::Cow, sync::Arc};
-use alloy_consensus::{Header, TxEip8141};
+use alloy_consensus::{Header, Transaction, TxEip8141};
+use alloy_eips::merge::SLOT_DURATION_SECS;
 use alloy_evm::{
-    eth::{EthBlockExecutionCtx, EthBlockExecutorFactory},
+    eth::{EthBlockExecutionCtx, EthBlockExecutorFactory, EthTxResult},
     EthEvmFactory, FromRecoveredTx, FromTxWithEncoded,
 };
+use alloy_primitives::{Address, B256};
 #[cfg(feature = "jit")]
 use core::any::Any;
-use core::{convert::Infallible, fmt::Debug};
+use core::{any::TypeId, convert::Infallible, fmt::Debug};
 use reth_chainspec::{ChainSpec, EthChainSpec, MAINNET};
 use reth_ethereum_primitives::{Block, EthPrimitives, TransactionSigned};
 use reth_evm::{
     eth::NextEvmEnvAttributes, precompiles::PrecompilesMap, ConfigureEvm, EvmEnv, EvmFactory,
-    JitBackend, NextBlockEnvAttributes, SenderRecoveryCache, TransactionEnvMut,
+    HaltReasonFor, JitBackend, NextBlockEnvAttributes, SenderRecoveryCache, TransactionEnvMut,
+    TxExecutionResultFor,
 };
 use reth_primitives_traits::{SealedBlock, SealedHeader};
-use revm::{context::BlockEnv, primitives::hardfork::SpecId};
+use revm::{
+    context::{result::ResultAndState, BlockEnv},
+    primitives::hardfork::SpecId,
+};
 
 #[cfg(feature = "std")]
 use reth_evm::{ConfigureEngineEvm, ExecutableTxIterator};
@@ -269,6 +275,50 @@ where
             slot_number: attributes.slot_number,
         })
     }
+
+    fn reuses_prewarm_results(&self) -> bool {
+        // Custom factories may change transaction validation or read state outside the database.
+        let factory = TypeId::of::<EvmF>();
+        factory == TypeId::of::<EthEvmFactory>() ||
+            factory == TypeId::of::<factory::RethEvmFactory>()
+    }
+
+    fn prewarm_tx_result(
+        &self,
+        tx: &TransactionSigned,
+        result: ResultAndState<HaltReasonFor<Self>>,
+    ) -> Option<TxExecutionResultFor<Self>> {
+        // Frame receipts also depend on execution data retained in the EVM context.
+        if matches!(tx, TransactionSigned::Eip8141(_)) {
+            return None;
+        }
+        Some(EthTxResult {
+            result,
+            blob_gas_used: tx.blob_gas_used().unwrap_or_default(),
+            tx_type: tx.tx_type(),
+        })
+    }
+
+    fn speculative_next_evm_env(
+        &self,
+        parent: &SealedHeader,
+        beneficiary: Address,
+    ) -> Option<EvmEnv> {
+        let Ok(evm_env) = self.next_evm_env(
+            parent,
+            &NextBlockEnvAttributes {
+                timestamp: parent.timestamp + SLOT_DURATION_SECS,
+                suggested_fee_recipient: beneficiary,
+                prev_randao: B256::ZERO,
+                gas_limit: parent.gas_limit,
+                parent_beacon_block_root: None,
+                withdrawals: None,
+                extra_data: Bytes::new(),
+                slot_number: None,
+            },
+        );
+        Some(evm_env)
+    }
 }
 
 #[cfg(feature = "std")]
@@ -390,15 +440,24 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_consensus::Header;
+    use alloy_consensus::{Header, TxLegacy};
+    use alloy_evm::{
+        eth::{EthEvm, EthEvmContext},
+        Database,
+    };
     use alloy_genesis::Genesis;
+    use alloy_primitives::{Sealable, Signature};
     use reth_chainspec::{Chain, ChainSpec};
     use reth_evm::{execute::ProviderError, EvmEnv};
     use revm::{
-        context::{BlockEnv, CfgEnv},
+        context::{
+            result::{EVMError, ExecutionResult, HaltReason},
+            BlockEnv, CfgEnv, TxEnv,
+        },
         database::CacheDB,
-        database_interface::EmptyDBTyped,
+        database_interface::{DBErrorMarker, EmptyDBTyped},
         inspector::NoOpInspector,
+        Inspector,
     };
 
     #[test]
@@ -605,6 +664,54 @@ mod tests {
         assert_eq!(evm.tx, Default::default());
     }
 
+    #[test]
+    fn test_reuses_prewarm_results_only_for_known_factories() {
+        assert!(EthEvmConfig::mainnet().reuses_prewarm_results());
+        assert!(EthEvmConfig::new_with_evm_factory(
+            MAINNET.clone(),
+            factory::RethEvmFactory::default()
+        )
+        .reuses_prewarm_results());
+
+        #[derive(Debug, Clone)]
+        struct CustomFactory(EthEvmFactory);
+
+        impl EvmFactory for CustomFactory {
+            type Evm<DB: Database, I: Inspector<Self::Context<DB>>> =
+                EthEvm<DB, I, Self::Precompiles>;
+            type Context<DB: Database> = EthEvmContext<DB>;
+            type Tx = TxEnv;
+            type Error<DBError: DBErrorMarker> = EVMError<DBError>;
+            type HaltReason = HaltReason;
+            type Spec = SpecId;
+            type BlockEnv = BlockEnv;
+            type Precompiles = PrecompilesMap;
+
+            fn create_evm<DB: Database>(
+                &self,
+                db: DB,
+                input: EvmEnv,
+            ) -> Self::Evm<DB, NoOpInspector> {
+                self.0.create_evm(db, input)
+            }
+
+            fn create_evm_with_inspector<DB: Database, I: Inspector<Self::Context<DB>>>(
+                &self,
+                db: DB,
+                input: EvmEnv,
+                inspector: I,
+            ) -> Self::Evm<DB, I> {
+                self.0.create_evm_with_inspector(db, input, inspector)
+            }
+        }
+
+        assert!(!EthEvmConfig::new_with_evm_factory(
+            MAINNET.clone(),
+            CustomFactory(EthEvmFactory::default())
+        )
+        .reuses_prewarm_results());
+    }
+
     #[cfg(feature = "jit")]
     #[test]
     fn test_jit_support_downcast_updates_reth_factory() {
@@ -632,5 +739,25 @@ mod tests {
 
         let evm_config = evm_config.with_jit_support();
         assert!(evm_config.jit_backend().is_none());
+    }
+
+    #[test]
+    fn prewarm_results_require_context_for_frame_receipts() {
+        let config = EthEvmConfig::mainnet();
+        let result = ResultAndState {
+            result: ExecutionResult::Revert {
+                gas: Default::default(),
+                logs: vec![],
+                output: Bytes::new(),
+            },
+            state: Default::default(),
+        };
+        let standard = TransactionSigned::new_unhashed(
+            TxLegacy::default().into(),
+            Signature::test_signature(),
+        );
+        assert!(config.prewarm_tx_result(&standard, result.clone()).is_some());
+        let frame = TransactionSigned::Eip8141(TxEip8141::default().seal_slow());
+        assert!(config.prewarm_tx_result(&frame, result).is_none());
     }
 }
