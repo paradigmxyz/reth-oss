@@ -45,6 +45,14 @@ eels_fixtures="/fixtures"
 eels_build_args=(--sim.buildarg fixtures="${eels_fixtures}" --sim.buildarg branch="${eels_branch}")
 eels_blob_build_args=(--sim.buildarg branch="${eels_branch}")
 
+# The Heze simulator's V5 payload builder omits the required inclusion list.
+if [[ "${fixture_variant}" == "heze" ]]; then
+    cp ../.github/scripts/hive/eels_payload_attributes.diff \
+        simulators/ethereum/eels/execute-blobs/
+    sed -i '/^RUN uv sync$/i COPY eels_payload_attributes.diff /eels_payload_attributes.diff\nRUN git -C /execution-specs apply /eels_payload_attributes.diff' \
+        simulators/ethereum/eels/execute-blobs/Dockerfile
+fi
+
 go build .
 
 ./hive -client reth # first builds and caches the client

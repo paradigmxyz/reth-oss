@@ -1,0 +1,40 @@
+diff --git a/packages/testing/src/execution_testing/rpc/rpc_types.py b/packages/testing/src/execution_testing/rpc/rpc_types.py
+--- a/packages/testing/src/execution_testing/rpc/rpc_types.py
++++ b/packages/testing/src/execution_testing/rpc/rpc_types.py
+@@ -226,6 +226,7 @@
+     max_blobs_per_block: HexNumber | None = None
+     slot_number: HexNumber | None = None
+     target_gas_limit: HexNumber | None = None
++    inclusion_list_transactions: List[Bytes] | None = None
+ 
+     @classmethod
+     def for_fork(
+@@ -279,6 +280,11 @@
+                 if fork.engine_payload_attribute_max_blobs_per_block()
+                 else None
+             ),
++            inclusion_list_transactions=(
++                []
++                if fork.engine_new_payload_inclusion_list_transactions()
++                else None
++            ),
+             slot_number=attributes_slot_number,
+             target_gas_limit=(
+                 HexNumber(target_gas_limit)
+diff --git a/packages/testing/src/execution_testing/rpc/tests/test_payload_attributes.py b/packages/testing/src/execution_testing/rpc/tests/test_payload_attributes.py
+--- a/packages/testing/src/execution_testing/rpc/tests/test_payload_attributes.py
++++ b/packages/testing/src/execution_testing/rpc/tests/test_payload_attributes.py
+@@ -86,6 +86,13 @@
+         assert attributes.slot_number == 7
+     if fork.engine_payload_attribute_target_gas_limit():
+         assert attributes.target_gas_limit == 30_000_000
++    serialized = attributes.model_dump(
++        mode="json", by_alias=True, exclude_none=True
++    )
++    if fork.engine_new_payload_inclusion_list_transactions():
++        assert serialized["inclusionListTransactions"] == []
++    else:
++        assert "inclusionListTransactions" not in serialized
+ 
+ 
+ @pytest.mark.parametrize("fork", ENGINE_FORKS, ids=lambda fork: fork.name())

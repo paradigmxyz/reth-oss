@@ -877,11 +877,6 @@ impl From<Genesis> for ChainSpec {
             None
         };
 
-        // Bogota activates EIP-8141 and the EIP-8250 keyed-nonce schema together on this
-        // frames devnet. Keep accepting genesis files that only contain Amsterdam, as older Hive
-        // genesis mappers do not emit a separate Bogota timestamp.
-        let bogota_time = genesis.config.bogota_time.or(genesis.config.amsterdam_time);
-
         // Time-based hardforks
         let time_hardfork_opts = [
             (EthereumHardfork::Shanghai.boxed(), genesis.config.shanghai_time),
@@ -894,7 +889,7 @@ impl From<Genesis> for ChainSpec {
             (EthereumHardfork::Bpo4.boxed(), genesis.config.bpo4_time),
             (EthereumHardfork::Bpo5.boxed(), genesis.config.bpo5_time),
             (EthereumHardfork::Amsterdam.boxed(), genesis.config.amsterdam_time),
-            (EthereumHardfork::Bogota.boxed(), bogota_time),
+            (EthereumHardfork::Bogota.boxed(), genesis.config.bogota_time),
         ];
 
         let mut time_hardforks = time_hardfork_opts
@@ -1404,9 +1399,9 @@ mod tests {
                 .build();
             let mut amsterdam_only_genesis = genesis.clone();
             amsterdam_only_genesis.config.bogota_time = None;
-            let fallback = ChainSpec::from(amsterdam_only_genesis.clone());
+            let amsterdam = ChainSpec::from(amsterdam_only_genesis.clone());
             for (spec, original) in
-                [(parsed, &genesis), (built, &genesis), (fallback, &amsterdam_only_genesis)]
+                [(parsed, &genesis), (built, &genesis), (amsterdam, &amsterdam_only_genesis)]
             {
                 assert_eq!(spec.genesis.alloc, original.alloc);
                 let expected = make_genesis_header(original, &spec.hardforks);
@@ -3353,5 +3348,33 @@ Post-merge hard forks (timestamp based):
         let spec = ChainSpec::from_genesis(genesis);
         assert_eq!(spec.blob_params_at_timestamp(15_000), Some(BOGOTA_BLOB_PARAMS));
         assert_eq!(spec.blob_params_at_timestamp(16_000).unwrap().max_blob_count, 14);
+    }
+
+    #[test]
+    fn amsterdam_genesis_does_not_enable_bogota() {
+        let parent = Header {
+            gas_limit: 30_000_000,
+            gas_used: 0,
+            base_fee_per_gas: Some(1_000_000_000),
+            timestamp: 560,
+            ..Default::default()
+        };
+        for bogota_time in [None, Some(600)] {
+            let mut genesis = Genesis::default();
+            genesis.config.london_block = Some(0);
+            genesis.config.amsterdam_time = Some(570);
+            genesis.config.bogota_time = bogota_time;
+            let spec = ChainSpec::from_genesis(genesis);
+            assert!(spec.is_amsterdam_active_at_timestamp(570));
+            assert!(!spec.is_bogota_active_at_timestamp(570));
+            assert_eq!(spec.next_block_base_fee(&parent, 570), Some(875_000_000));
+            assert_eq!(spec.next_block_base_fee(&parent, 599), Some(875_000_000));
+            if bogota_time.is_some() {
+                assert!(spec.is_bogota_active_at_timestamp(600));
+                assert_eq!(spec.next_block_base_fee(&parent, 600), Some(895_833_334));
+            } else {
+                assert!(!spec.is_bogota_active_at_timestamp(600));
+            }
+        }
     }
 }
