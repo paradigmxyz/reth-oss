@@ -243,7 +243,9 @@ jobs:
           path: /tmp
 
       - name: Load Docker images
-        run: .github/scripts/hive/load_images.sh
+        env:
+          SCENARIO_SIM: ${{ matrix.scenario.sim }}
+        run: .github/scripts/hive/load_images.sh "$SCENARIO_SIM"
 
       - name: Move hive binary
         run: |
@@ -433,7 +435,9 @@ jobs:
           path: /tmp
 
       - name: Load Docker images
-        run: .github/scripts/hive/load_images.sh
+        env:
+          SCENARIO_SIM: ${{ matrix.scenario.sim }}
+        run: .github/scripts/hive/load_images.sh "$SCENARIO_SIM"
 
       - name: Move hive binary
         run: |
@@ -889,7 +893,9 @@ jobs:
           path: /tmp
 
       - name: Load Docker images
-        run: .github/scripts/hive/load_images.sh
+        env:
+          SCENARIO_SIM: ${{ matrix.scenario.sim }}
+        run: .github/scripts/hive/load_images.sh "$SCENARIO_SIM"
 
       - name: Move hive binary
         run: |
