@@ -510,6 +510,18 @@ pub trait TransactionPool: Clone + Debug + Send + Sync {
         hashes: Vec<TxHash>,
     ) -> Vec<Arc<ValidPoolTransaction<Self::Transaction>>>;
 
+    /// Records whether a public frame transaction approved payment during block building.
+    ///
+    /// Failed attempts count towards the pool's unpaid-validation limit; approval resets the
+    /// count. Implementations must ignore results for transactions that have since left the pool
+    /// or been replaced or revalidated. Custom pools may supply their own eviction policy.
+    fn on_frame_validation_result(
+        &self,
+        _transaction: &Arc<ValidPoolTransaction<Self::Transaction>>,
+        _approved: bool,
+    ) {
+    }
+
     /// Removes all transactions corresponding to the given hashes.
     ///
     /// Also removes all _dependent_ transactions.

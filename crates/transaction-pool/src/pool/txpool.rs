@@ -1015,6 +1015,59 @@ impl<T: TransactionOrdering> TxPool<T> {
         txs
     }
 
+    /// Withdraws frames without forgetting unpaid work already spent during block building.
+    pub(crate) fn remove_frame_transactions_for_revalidation(
+        &mut self,
+        hashes: Vec<TxHash>,
+    ) -> Vec<(Arc<ValidPoolTransaction<T::Transaction>>, usize)> {
+        let transactions = hashes
+            .into_iter()
+            .filter_map(|hash| {
+                let tx = self.all_transactions.by_hash.get(&hash)?;
+                let attempts = self.all_transactions.txs.get(tx.id())?.unpaid_validation_attempts;
+                self.remove_transaction_by_hash(&hash).map(|tx| (tx, attempts))
+            })
+            .collect();
+        self.update_size_metrics();
+        transactions
+    }
+
+    /// Restores the attempt count after a temporarily withdrawn transaction is revalidated.
+    pub(crate) fn restore_frame_validation_attempts(&mut self, hash: &TxHash, attempts: usize) {
+        if let Some(tx) = self.all_transactions.by_hash.get(hash) &&
+            let Some(entry) = self.all_transactions.txs.get_mut(tx.id())
+        {
+            entry.unpaid_validation_attempts = attempts;
+        }
+    }
+
+    /// Applies a build result only to the pool entry that was selected for that build.
+    pub(crate) fn on_frame_validation_result(
+        &mut self,
+        transaction: &Arc<ValidPoolTransaction<T::Transaction>>,
+        approved: bool,
+    ) -> Vec<Arc<ValidPoolTransaction<T::Transaction>>> {
+        let Some(entry) = self.all_transactions.txs.get_mut(transaction.id()) else {
+            return Vec::new()
+        };
+        if !Arc::ptr_eq(&entry.transaction, transaction) ||
+            transaction.transaction.frame_validation().is_none()
+        {
+            return Vec::new()
+        }
+        if approved {
+            entry.unpaid_validation_attempts = 0;
+            return Vec::new()
+        }
+        entry.unpaid_validation_attempts = entry.unpaid_validation_attempts.saturating_add(1);
+        if entry.unpaid_validation_attempts <
+            self.config.max_frame_unpaid_validation_attempts.max(1)
+        {
+            return Vec::new()
+        }
+        self.remove_transactions(vec![*transaction.hash()])
+    }
+
     /// Removes and returns all matching transactions and their descendants from the pool.
     pub(crate) fn remove_transactions_and_descendants(
         &mut self,
@@ -2253,6 +2306,7 @@ impl<T: PoolTransaction> AllTransactions<T> {
             subpool: state.into(),
             state,
             cumulative_cost,
+            unpaid_validation_attempts: 0,
         };
 
         // try to insert the transaction
@@ -2544,6 +2598,8 @@ pub(crate) struct PoolInternalTransaction<T: PoolTransaction> {
     /// This is the combined `cost` of all transactions from the same sender that currently
     /// come before this transaction.
     pub(crate) cumulative_cost: U256,
+    /// Consecutive block-building attempts that failed to approve payment.
+    unpaid_validation_attempts: usize,
 }
 
 // === impl PoolInternalTransaction ===

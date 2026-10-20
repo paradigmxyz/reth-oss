@@ -10,11 +10,16 @@ use std::{
 pub(super) struct FrameRevalidationQueue<T: PoolTransaction> {
     transactions: HashMap<B256, Arc<ValidPoolTransaction<T>>>,
     senders: HashMap<Address, BTreeMap<TransactionId, B256>>,
+    unpaid_validation_attempts: HashMap<B256, usize>,
 }
 
 impl<T: PoolTransaction> Default for FrameRevalidationQueue<T> {
     fn default() -> Self {
-        Self { transactions: HashMap::new(), senders: HashMap::new() }
+        Self {
+            transactions: HashMap::new(),
+            senders: HashMap::new(),
+            unpaid_validation_attempts: HashMap::new(),
+        }
     }
 }
 
@@ -24,13 +29,20 @@ impl<T: PoolTransaction> FrameRevalidationQueue<T> {
         self.transactions.is_empty()
     }
 
-    pub(super) fn insert(&mut self, tx: Arc<ValidPoolTransaction<T>>) {
+    pub(super) fn insert(&mut self, tx: Arc<ValidPoolTransaction<T>>, attempts: usize) {
         if let Some(existing) = self.get(tx.sender(), tx.id()) {
             let hash = *existing.hash();
             self.cancel(&hash);
         }
         self.senders.entry(tx.sender()).or_default().insert(*tx.id(), *tx.hash());
+        if attempts != 0 {
+            self.unpaid_validation_attempts.insert(*tx.hash(), attempts);
+        }
         self.transactions.insert(*tx.hash(), tx);
+    }
+
+    pub(super) fn unpaid_validation_attempts(&self, hash: &B256) -> usize {
+        self.unpaid_validation_attempts.get(hash).copied().unwrap_or_default()
     }
 
     pub(super) fn cancel(&mut self, hash: &B256) {
@@ -39,6 +51,7 @@ impl<T: PoolTransaction> FrameRevalidationQueue<T> {
 
     pub(super) fn remove(&mut self, hash: &B256) -> Option<Arc<ValidPoolTransaction<T>>> {
         let tx = self.transactions.remove(hash)?;
+        self.unpaid_validation_attempts.remove(hash);
         let nonces = self.senders.get_mut(&tx.sender())?;
         nonces.remove(tx.id());
         if nonces.is_empty() {
@@ -61,7 +74,10 @@ impl<T: PoolTransaction> FrameRevalidationQueue<T> {
             .remove(&sender)
             .into_iter()
             .flat_map(|nonces| nonces.into_values())
-            .filter_map(|hash| self.transactions.remove(&hash))
+            .filter_map(|hash| {
+                self.unpaid_validation_attempts.remove(&hash);
+                self.transactions.remove(&hash)
+            })
             .collect()
     }
 
@@ -135,7 +151,7 @@ mod tests {
         let mut factory = MockTransactionFactory::default();
         let tx = transaction(&mut factory, Address::repeat_byte(1), B256::repeat_byte(1), 0);
         let mut queue = FrameRevalidationQueue::default();
-        queue.insert(Arc::clone(&tx));
+        queue.insert(Arc::clone(&tx), 0);
         let snapshot = queue.snapshot();
 
         queue.cancel(tx.hash());
@@ -151,10 +167,10 @@ mod tests {
         let old = transaction(&mut factory, sender, B256::repeat_byte(1), 0);
         let new = transaction(&mut factory, sender, B256::repeat_byte(2), 0);
         let mut queue = FrameRevalidationQueue::default();
-        queue.insert(Arc::clone(&old));
+        queue.insert(Arc::clone(&old), 0);
         let snapshot = queue.snapshot();
 
-        queue.insert(Arc::clone(&new));
+        queue.insert(Arc::clone(&new), 0);
 
         assert!(!queue.take_current(&snapshot[0]));
         assert!(queue.take_current(&new));
@@ -169,8 +185,8 @@ mod tests {
         let old = transaction(&mut factory, sender, hash, 0);
         let new = transaction(&mut factory, sender, hash, 0);
         let mut queue = FrameRevalidationQueue::default();
-        queue.insert(Arc::clone(&old));
-        queue.insert(Arc::clone(&new));
+        queue.insert(Arc::clone(&old), 0);
+        queue.insert(Arc::clone(&new), 0);
 
         assert!(!queue.take_current(&old));
         assert!(queue.take_current(&new));
@@ -182,7 +198,7 @@ mod tests {
         let mut factory = MockTransactionFactory::default();
         let tx = transaction(&mut factory, Address::repeat_byte(4), B256::repeat_byte(4), 0);
         let mut queue = FrameRevalidationQueue::default();
-        queue.insert(Arc::clone(&tx));
+        queue.insert(Arc::clone(&tx), 0);
 
         assert!(queue.take_current(&tx));
         assert!(!queue.take_current(&tx));
@@ -196,8 +212,8 @@ mod tests {
         let first = transaction(&mut factory, sender, B256::repeat_byte(1), 0);
         let second = transaction(&mut factory, sender, B256::repeat_byte(2), 1);
         let mut queue = FrameRevalidationQueue::default();
-        queue.insert(Arc::clone(&second));
-        queue.insert(Arc::clone(&first));
+        queue.insert(Arc::clone(&second), 0);
+        queue.insert(Arc::clone(&first), 0);
 
         let snapshot = queue.snapshot();
         assert_eq!(snapshot.len(), 2);
@@ -217,7 +233,7 @@ mod tests {
         let other = transaction(&mut factory, Address::repeat_byte(7), B256::repeat_byte(3), 0);
         let mut queue = FrameRevalidationQueue::default();
         for tx in [&first, &second, &other] {
-            queue.insert(Arc::clone(tx));
+            queue.insert(Arc::clone(tx), 0);
         }
 
         assert_eq!(queue.cancel_descendants(sender, second.id()).len(), 1);
@@ -240,7 +256,7 @@ mod tests {
             crate::identifier::SenderId::from(100);
         let mut queue = FrameRevalidationQueue::default();
         for tx in [&first, &second, &other_domain] {
-            queue.insert(Arc::clone(tx));
+            queue.insert(Arc::clone(tx), 0);
         }
 
         assert_eq!(queue.snapshot().len(), 3);

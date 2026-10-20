@@ -283,10 +283,11 @@ pub use crate::{
     blobstore::{BlobStore, BlobStoreError},
     config::{
         LocalTransactionConfig, PoolConfig, PriceBumpConfig, SubPoolLimit,
-        DEFAULT_MAX_INFLIGHT_DELEGATED_SLOTS, DEFAULT_PRICE_BUMP,
-        DEFAULT_TXPOOL_ADDITIONAL_VALIDATION_TASKS, MAX_NEW_PENDING_TXS_NOTIFICATIONS,
-        REPLACE_BLOB_PRICE_BUMP, TXPOOL_MAX_ACCOUNT_SLOTS_PER_SENDER,
-        TXPOOL_SUBPOOL_MAX_SIZE_MB_DEFAULT, TXPOOL_SUBPOOL_MAX_TXS_DEFAULT,
+        DEFAULT_MAX_FRAME_UNPAID_VALIDATION_ATTEMPTS, DEFAULT_MAX_INFLIGHT_DELEGATED_SLOTS,
+        DEFAULT_PRICE_BUMP, DEFAULT_TXPOOL_ADDITIONAL_VALIDATION_TASKS,
+        MAX_NEW_PENDING_TXS_NOTIFICATIONS, REPLACE_BLOB_PRICE_BUMP,
+        TXPOOL_MAX_ACCOUNT_SLOTS_PER_SENDER, TXPOOL_SUBPOOL_MAX_SIZE_MB_DEFAULT,
+        TXPOOL_SUBPOOL_MAX_TXS_DEFAULT,
     },
     error::{PoolResult, RawPoolTransactionError},
     ordering::{CoinbaseTipOrdering, Priority, TransactionOrdering},
@@ -657,6 +658,14 @@ where
         hashes: Vec<TxHash>,
     ) -> Vec<Arc<ValidPoolTransaction<Self::Transaction>>> {
         self.pool.remove_transactions(hashes)
+    }
+
+    fn on_frame_validation_result(
+        &self,
+        transaction: &Arc<ValidPoolTransaction<Self::Transaction>>,
+        approved: bool,
+    ) {
+        self.pool.on_frame_validation_result(transaction, approved)
     }
 
     fn remove_transactions_and_descendants(

@@ -641,9 +641,9 @@ where
             return
         }
         let mined: HashSet<_> = mined.iter().copied().collect();
-        for tx in pool.remove_transactions(hashes) {
+        for (tx, attempts) in pool.remove_frame_transactions_for_revalidation(hashes) {
             if !mined.contains(tx.hash()) {
-                queue.insert(tx);
+                queue.insert(tx, attempts);
             }
         }
     }
@@ -659,15 +659,23 @@ where
             let (meta, discarded) = {
                 let mut pool = self.pool.write();
                 // Explicit removal or a replacement at the same nonce cancels this exact attempt.
-                if !self.frame_revalidation.lock().take_current(&candidate) {
-                    continue
-                }
+                let attempts = {
+                    let mut queue = self.frame_revalidation.lock();
+                    let attempts = queue.unpaid_validation_attempts(candidate.hash());
+                    if !queue.take_current(&candidate) {
+                        continue
+                    }
+                    attempts
+                };
                 let (_, meta) = self.add_transaction(
                     &mut pool,
                     candidate.origin,
                     validation,
                     candidate.timestamp,
                 );
+                if let Some(meta) = &meta {
+                    pool.restore_frame_validation_attempts(meta.added.hash(), attempts);
+                }
                 let discarded = if meta.is_some() {
                     let discarded = pool.discard_worst();
                     pool.update_size_metrics();
@@ -1296,6 +1304,28 @@ where
         self.with_event_listener(|listener| listener.discarded_many(&removed));
 
         removed
+    }
+
+    /// Evicts public frames after the configured number of failed unpaid validation attempts.
+    pub fn on_frame_validation_result(
+        &self,
+        transaction: &Arc<ValidPoolTransaction<T::Transaction>>,
+        approved: bool,
+    ) {
+        if approved && self.config.max_frame_unpaid_validation_attempts <= 1 {
+            return
+        }
+        let removed = self.pool.write().on_frame_validation_result(transaction, approved);
+        if !removed.is_empty() {
+            debug!(
+                target: "reth::eip8141::pool",
+                tx_hash = ?transaction.hash(),
+                max_attempts = self.config.max_frame_unpaid_validation_attempts.max(1),
+                "Evicting frame transaction after unpaid validation attempts"
+            );
+            self.delete_discarded_blobs(removed.iter());
+            self.with_event_listener(|listener| listener.discarded_many(&removed));
+        }
     }
 
     /// Removes and returns all matching transactions and their dependent transactions from the
@@ -2391,7 +2421,7 @@ mod tests {
             origin: TransactionOrigin::External,
             authority_ids: None,
         });
-        pool.frame_revalidation.lock().insert(Arc::clone(&tx));
+        pool.frame_revalidation.lock().insert(Arc::clone(&tx), 0);
         tx
     }
 

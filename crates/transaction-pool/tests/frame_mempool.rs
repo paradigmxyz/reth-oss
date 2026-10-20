@@ -40,11 +40,15 @@ impl TransactionValidator for Validator {
 type AuditPool = Pool<Validator, CoinbaseTipOrdering<EthPooledTransaction>, InMemoryBlobStore>;
 
 fn pool() -> AuditPool {
+    pool_with_config(PoolConfig::default())
+}
+
+fn pool_with_config(config: PoolConfig) -> AuditPool {
     Pool::new(
         Validator::default(),
         CoinbaseTipOrdering::default(),
         InMemoryBlobStore::default(),
-        PoolConfig::default(),
+        config,
     )
 }
 
@@ -238,6 +242,99 @@ fn revalidate(pool: &AuditPool) {
     let mut future = std::pin::pin!(future);
     let mut context = std::task::Context::from_waker(std::task::Waker::noop());
     assert!(std::future::Future::poll(future.as_mut(), &mut context).is_ready());
+}
+
+#[test]
+fn unpaid_validation_default_evicts_and_releases_payer_exposure() {
+    let pool = pool();
+    let sender = Address::repeat_byte(30);
+    let payer = Address::repeat_byte(31);
+    let hash = admit(&pool, frame(sender, payer, 1, 100_000_000, 100)).unwrap();
+    let tx = pool.get(&hash).unwrap();
+    assert!(admit(&pool, frame(Address::repeat_byte(32), payer, 1, 1, 100)).is_err());
+
+    pool.on_frame_validation_result(&tx, false);
+
+    assert!(!pool.contains(&hash));
+    assert!(admit(&pool, frame(Address::repeat_byte(32), payer, 1, 100_000_000, 100)).is_ok());
+}
+
+#[test]
+fn unpaid_validation_limit_counts_consecutive_failures() {
+    let pool = pool_with_config(PoolConfig {
+        max_frame_unpaid_validation_attempts: 2,
+        ..Default::default()
+    });
+    let sender = Address::repeat_byte(33);
+    let hash = admit(&pool, frame(sender, sender, 1, 2_000_000, 100)).unwrap();
+    let tx = pool.best_transactions().next().expect("frame is pending");
+    let other_builder = pool.clone();
+
+    pool.on_frame_validation_result(&tx, false);
+    assert!(pool.contains(&hash));
+    other_builder.on_frame_validation_result(&tx, true);
+    pool.on_frame_validation_result(&tx, false);
+    assert!(pool.contains(&hash));
+    other_builder.on_frame_validation_result(&tx, false);
+    assert!(!pool.contains(&hash));
+}
+
+#[test]
+fn unpaid_validation_count_survives_revalidation_and_ignores_old_builds() {
+    let pool = pool_with_config(PoolConfig {
+        max_frame_unpaid_validation_attempts: 2,
+        ..Default::default()
+    });
+    let sender = Address::repeat_byte(34);
+    let hash = admit(&pool, frame(sender, sender, 1, 2_000_000, 100)).unwrap();
+    let old = pool.get(&hash).unwrap();
+    pool.on_frame_validation_result(&old, false);
+
+    let head = B256::repeat_byte(1);
+    *pool.inner().validator().0.lock().unwrap() = head;
+    pool.set_block_info(BlockInfo { last_seen_block_hash: head, ..pool.block_info() });
+    pool.on_frame_validation_result(&old, false);
+    revalidate(&pool);
+    let current = pool.get(&hash).unwrap();
+    assert!(!Arc::ptr_eq(&old, &current));
+    pool.on_frame_validation_result(&old, true);
+    pool.on_frame_validation_result(&current, false);
+    assert!(!pool.contains(&hash));
+}
+
+#[test]
+fn unpaid_validation_replacement_and_readmission_start_fresh() {
+    let pool = pool_with_config(PoolConfig {
+        max_frame_unpaid_validation_attempts: 2,
+        ..Default::default()
+    });
+    let sender = Address::repeat_byte(35);
+    let hash = admit(&pool, frame(sender, sender, 1, 2_000_000, 100)).unwrap();
+    let old = pool.get(&hash).unwrap();
+    pool.on_frame_validation_result(&old, false);
+    let replacement = frame(sender, sender, 1, 2_000_000, 200);
+    let replaced_hash = admit(&pool, replacement.clone()).unwrap();
+    let replaced = pool.get(&replaced_hash).unwrap();
+    pool.on_frame_validation_result(&old, false);
+    pool.on_frame_validation_result(&replaced, false);
+    assert!(pool.contains(&replaced_hash));
+    pool.remove_transaction(replaced_hash).unwrap();
+    admit(&pool, replacement).unwrap();
+    let readmitted = pool.get(&replaced_hash).unwrap();
+    pool.on_frame_validation_result(&replaced, false);
+    pool.on_frame_validation_result(&readmitted, false);
+    assert!(pool.contains(&replaced_hash));
+    pool.on_frame_validation_result(&readmitted, false);
+    assert!(!pool.contains(&replaced_hash));
+}
+
+#[test]
+fn unpaid_validation_does_not_evict_ordinary_transactions() {
+    let pool = pool();
+    let hash = admit(&pool, ordinary(Address::repeat_byte(36))).unwrap();
+    let tx = pool.get(&hash).unwrap();
+    pool.on_frame_validation_result(&tx, false);
+    assert!(pool.contains(&hash));
 }
 
 #[test]
