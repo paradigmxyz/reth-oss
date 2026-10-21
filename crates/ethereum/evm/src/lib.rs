@@ -18,7 +18,7 @@
 extern crate alloc;
 
 use alloc::{borrow::Cow, sync::Arc};
-use alloy_consensus::{Header, Transaction};
+use alloy_consensus::{Header, Transaction, TxEip8141};
 use alloy_eips::merge::SLOT_DURATION_SECS;
 use alloy_evm::{
     eth::{EthBlockExecutionCtx, EthBlockExecutorFactory, EthTxResult},
@@ -148,6 +148,7 @@ where
     EvmF: EvmFactory<
             Tx: TransactionEnvMut
                     + FromRecoveredTx<TransactionSigned>
+                    + FromRecoveredTx<TxEip8141>
                     + FromTxWithEncoded<TransactionSigned>,
             Spec = SpecId,
             BlockEnv = BlockEnv,
@@ -213,12 +214,13 @@ where
     }
 
     fn evm_env(&self, header: &Header) -> Result<EvmEnv<SpecId>, Self::Error> {
-        Ok(EvmEnv::for_eth_block(
+        let env = EvmEnv::for_eth_block(
             header,
             self.chain_spec(),
             self.chain_spec().chain().id(),
             self.chain_spec().blob_params_at_timestamp(header.timestamp),
-        ))
+        );
+        Ok(env)
     }
 
     fn next_evm_env(
@@ -226,7 +228,7 @@ where
         parent: &Header,
         attributes: &NextBlockEnvAttributes,
     ) -> Result<EvmEnv, Self::Error> {
-        Ok(EvmEnv::for_eth_next_block(
+        let env = EvmEnv::for_eth_next_block(
             parent,
             NextEvmEnvAttributes {
                 timestamp: attributes.timestamp,
@@ -239,7 +241,8 @@ where
             self.chain_spec(),
             self.chain_spec().chain().id(),
             self.chain_spec().blob_params_at_timestamp(attributes.timestamp),
-        ))
+        );
+        Ok(env)
     }
 
     fn context_for_block<'a>(
@@ -285,6 +288,10 @@ where
         tx: &TransactionSigned,
         result: ResultAndState<HaltReasonFor<Self>>,
     ) -> Option<TxExecutionResultFor<Self>> {
+        // Frame receipts also depend on execution data retained in the EVM context.
+        if matches!(tx, TransactionSigned::Eip8141(_)) {
+            return None;
+        }
         Some(EthTxResult {
             result,
             blob_gas_used: tx.blob_gas_used().unwrap_or_default(),
@@ -321,6 +328,7 @@ where
     EvmF: EvmFactory<
             Tx: TransactionEnvMut
                     + FromRecoveredTx<TransactionSigned>
+                    + FromRecoveredTx<TxEip8141>
                     + FromTxWithEncoded<TransactionSigned>,
             Spec = SpecId,
             BlockEnv = BlockEnv,
@@ -344,6 +352,8 @@ where
         let mut cfg_env = CfgEnv::new()
             .with_chain_id(self.chain_spec().chain().id())
             .with_spec_and_mainnet_gas_params(spec);
+
+        cfg_env.enable_eip8250 = self.chain_spec().is_bogota_active_at_timestamp(timestamp);
 
         if let Some(blob_params) = &blob_params {
             cfg_env.set_max_blobs_per_tx(blob_params.max_blobs_per_tx);
@@ -402,8 +412,18 @@ where
         let txs = payload.payload.transactions().clone();
         let sender_recovery_cache = self.sender_recovery_cache.clone();
         let convert = move |tx: Bytes| {
-            let tx =
-                TxTy::<Self::Primitives>::decode_2718_exact(tx.as_ref()).map_err(AnyError::new)?;
+            let encoded_len = tx.len();
+            let tx_type = tx.first().copied();
+            let tx = TxTy::<Self::Primitives>::decode_2718_exact(tx.as_ref()).map_err(|err| {
+                tracing::info!(
+                    target: "reth_ethereum_evm",
+                    ?err,
+                    ?tx_type,
+                    encoded_len,
+                    "Failed to decode execution payload transaction"
+                );
+                AnyError::new(err)
+            })?;
             let signer = if let Some(cache) = &sender_recovery_cache {
                 cache.recover(&tx)
             } else {
@@ -420,17 +440,18 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_consensus::Header;
+    use alloy_consensus::{Header, TxLegacy};
     use alloy_evm::{
         eth::{EthEvm, EthEvmContext},
         Database,
     };
     use alloy_genesis::Genesis;
+    use alloy_primitives::{Sealable, Signature};
     use reth_chainspec::{Chain, ChainSpec};
     use reth_evm::{execute::ProviderError, EvmEnv};
     use revm::{
         context::{
-            result::{EVMError, HaltReason},
+            result::{EVMError, ExecutionResult, HaltReason},
             BlockEnv, CfgEnv, TxEnv,
         },
         database::CacheDB,
@@ -438,6 +459,42 @@ mod tests {
         inspector::NoOpInspector,
         Inspector,
     };
+
+    #[test]
+    fn keyed_nonce_activation_follows_frames() {
+        let spec = ChainSpec::builder()
+            .chain(Chain::mainnet())
+            .genesis(Genesis::default())
+            .bogota_activated()
+            .with_bogota_at(10)
+            .build();
+        let config = EthEvmConfig::new(Arc::new(spec));
+        for timestamp in [9, 10, 11] {
+            let header = Header { timestamp, ..Default::default() };
+            let env = config.evm_env(&header).unwrap();
+            assert_eq!(env.cfg_env.enable_eip8250, timestamp >= 10);
+            let env = config
+                .next_evm_env(
+                    &Header::default(),
+                    &NextBlockEnvAttributes {
+                        timestamp,
+                        suggested_fee_recipient: Default::default(),
+                        prev_randao: Default::default(),
+                        gas_limit: 30_000_000,
+                        parent_beacon_block_root: None,
+                        withdrawals: None,
+                        extra_data: Default::default(),
+                        slot_number: None,
+                    },
+                )
+                .unwrap();
+            assert_eq!(env.cfg_env.enable_eip8250, timestamp >= 10);
+            let block = Block { header, body: Default::default() };
+            let payload = ExecutionData::from_block_unchecked(Default::default(), &block);
+            let env = config.evm_env_for_payload(&payload).unwrap();
+            assert_eq!(env.cfg_env.enable_eip8250, timestamp >= 10);
+        }
+    }
 
     #[test]
     fn test_fill_cfg_and_block_env() {
@@ -682,5 +739,25 @@ mod tests {
 
         let evm_config = evm_config.with_jit_support();
         assert!(evm_config.jit_backend().is_none());
+    }
+
+    #[test]
+    fn prewarm_results_require_context_for_frame_receipts() {
+        let config = EthEvmConfig::mainnet();
+        let result = ResultAndState {
+            result: ExecutionResult::Revert {
+                gas: Default::default(),
+                logs: vec![],
+                output: Bytes::new(),
+            },
+            state: Default::default(),
+        };
+        let standard = TransactionSigned::new_unhashed(
+            TxLegacy::default().into(),
+            Signature::test_signature(),
+        );
+        assert!(config.prewarm_tx_result(&standard, result.clone()).is_some());
+        let frame = TransactionSigned::Eip8141(TxEip8141::default().seal_slow());
+        assert!(config.prewarm_tx_result(&frame, result).is_none());
     }
 }

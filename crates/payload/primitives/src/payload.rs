@@ -2,7 +2,10 @@
 
 use crate::{MessageValidationKind, PayloadAttributes};
 use alloc::vec::Vec;
-use alloy_eips::{eip1898::BlockWithParent, eip4895::Withdrawal, eip7685::Requests, BlockNumHash};
+use alloy_eips::{
+    eip1898::BlockWithParent, eip2718::EIP8141_TX_TYPE_ID, eip4895::Withdrawal, eip7685::Requests,
+    BlockNumHash,
+};
 use alloy_primitives::{Bytes, B256};
 use alloy_rpc_types_engine::ExecutionData;
 use core::fmt::Debug;
@@ -59,12 +62,30 @@ pub trait ExecutionPayload:
     /// Returns the total gas limit for this block.
     fn gas_limit(&self) -> u64;
 
+    /// Returns the total blob gas consumed by all transactions in this block.
+    ///
+    /// Returns `None` for pre-Cancun blocks.
+    fn blob_gas_used(&self) -> Option<u64>;
+
     /// Returns the number of transactions in the payload.
     fn transaction_count(&self) -> usize;
+
+    /// Returns whether this payload contains an EIP-8141 frame transaction.
+    ///
+    /// Implementations that do not expose raw transaction bytes can use the default value.
+    fn has_eip8141_transactions(&self) -> bool {
+        false
+    }
+
     /// Returns the slot number included in this payload.
     ///
     /// Returns `None` for pre-Amsterdam blocks.
     fn slot_number(&self) -> Option<u64>;
+
+    /// Returns the EIP-7805 inclusion-list transactions supplied with this payload.
+    fn inclusion_list_transactions(&self) -> Option<&[Bytes]> {
+        None
+    }
 }
 
 impl ExecutionPayload for ExecutionData {
@@ -104,12 +125,28 @@ impl ExecutionPayload for ExecutionData {
         self.payload.as_v1().gas_limit
     }
 
+    fn blob_gas_used(&self) -> Option<u64> {
+        self.payload.blob_gas_used()
+    }
+
     fn transaction_count(&self) -> usize {
         self.payload.as_v1().transactions.len()
     }
 
+    fn has_eip8141_transactions(&self) -> bool {
+        self.payload
+            .as_v1()
+            .transactions
+            .iter()
+            .any(|tx| tx.first().copied() == Some(EIP8141_TX_TYPE_ID))
+    }
+
     fn slot_number(&self) -> Option<u64> {
         self.payload.slot_number()
+    }
+
+    fn inclusion_list_transactions(&self) -> Option<&[Bytes]> {
+        self.sidecar.inclusion_list_transactions().map(Vec::as_slice)
     }
 }
 
@@ -187,6 +224,14 @@ where
         match self {
             Self::ExecutionPayload(payload) => payload.slot_number(),
             Self::PayloadAttributes(attributes) => attributes.slot_number(),
+        }
+    }
+
+    /// Returns the EIP-7805 inclusion-list transactions from either the payload or attributes.
+    pub fn inclusion_list_transactions(&self) -> Option<&[Bytes]> {
+        match self {
+            Self::ExecutionPayload(payload) => payload.inclusion_list_transactions(),
+            Self::PayloadAttributes(attributes) => attributes.inclusion_list_transactions(),
         }
     }
 

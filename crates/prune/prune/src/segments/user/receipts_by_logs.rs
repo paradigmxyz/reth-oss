@@ -237,6 +237,7 @@ mod tests {
     use alloy_primitives::B256;
     use assert_matches::assert_matches;
     use reth_db_api::{cursor::DbCursorRO, tables, transaction::DbTx};
+    use reth_ethereum_primitives::Receipt;
     use reth_primitives_traits::InMemorySize;
     use reth_provider::{BlockReader, DBProvider, DatabaseProviderFactory, PruneCheckpointReader};
     use reth_prune_types::{
@@ -279,7 +280,12 @@ mod tests {
                     .map(|(id, tx)| {
                         let mut receipt = random_receipt(&mut rng, tx, Some(0), None);
                         if id == 0 && retain_first {
-                            receipt.logs.push(random_log(&mut rng, Some(address), Some(1)));
+                            receipt = Receipt::standard(
+                                receipt.tx_type(),
+                                receipt.success(),
+                                receipt.cumulative_gas_used(),
+                                vec![random_log(&mut rng, Some(address), Some(1))],
+                            );
                         }
                         (id as u64, receipt)
                     })
@@ -382,12 +388,19 @@ mod tests {
         for block in &blocks {
             receipts.reserve_exact(block.body().size());
             for (txi, transaction) in block.body().transactions.iter().enumerate() {
-                let mut receipt = random_receipt(&mut rng, transaction, Some(1), None);
-                receipt.logs.push(random_log(
+                let receipt = random_receipt(&mut rng, transaction, Some(1), None);
+                let mut logs = receipt.logs().to_vec();
+                logs.push(random_log(
                     &mut rng,
                     (txi == (block.transaction_count() - 1)).then_some(deposit_contract_addr),
                     Some(1),
                 ));
+                let receipt = reth_ethereum_primitives::Receipt::standard(
+                    receipt.tx_type(),
+                    receipt.success(),
+                    receipt.cumulative_gas_used(),
+                    logs,
+                );
                 receipts.push((receipts.len() as u64, receipt));
             }
         }
@@ -462,7 +475,7 @@ mod tests {
             // Either we only find our contract, or the receipt is part of the unprunable receipts
             // set by tip - 128
             assert!(
-                receipt.logs.iter().any(|l| l.address == deposit_contract_addr) ||
+                receipt.logs().iter().any(|l| l.address == deposit_contract_addr) ||
                     provider.block_by_transaction_id(tx_num).unwrap().unwrap() > tip - 128,
             );
         }

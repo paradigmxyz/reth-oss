@@ -2,17 +2,28 @@
 set -eo pipefail
 
 fixture_variant="${1:-amsterdam}"
+# Pin the mainnet fixtures and simulator source; tests@v21.0.1 covers Osaka, BPO and Amsterdam.
+eels_tag="v21.0.1"
+eels_fixtures="https://github.com/ethereum/execution-specs/releases/download/tests@${eels_tag}/fixtures.tar.gz"
+eels_branch="tests@${eels_tag}"
 
 case "${fixture_variant}" in
     amsterdam)
-        eels_fixtures="https://github.com/ethereum/execution-specs/releases/download/tests-glamsterdam-devnet@v7.2.1/fixtures_glamsterdam-devnet.tar.gz"
-        eels_branch="devnets/glamsterdam/7"
         eels_fork="Amsterdam"
         ;;
     osaka)
-        eels_fixtures="https://github.com/ethereum/execution-spec-tests/releases/download/v5.3.0/fixtures_develop.tar.gz"
-        eels_branch="mainnet"
         eels_fork="Osaka"
+        ;;
+    bogota)
+        # Bogota fixtures are not part of the mainnet simulator image release.
+        eels_fixtures="https://github.com/ethereum/execution-specs/releases/download/tests-bogota-devnet@v1.1.0/fixtures_bogota-devnet.tar.gz"
+        eels_branch="devnets/bogota/1"
+        eels_fork="Bogota"
+        ;;
+    heze)
+        eels_fixtures="https://github.com/ethereum/execution-specs/releases/download/tests-heze-devnet@v2.0.0/fixtures_heze-devnet.tar.gz"
+        eels_branch="devnets/heze/2"
+        eels_fork="Bogota"
         ;;
     *)
         echo "unknown hive fixture variant: ${fixture_variant}"
@@ -24,22 +35,30 @@ esac
 mkdir hive_assets/
 
 cd hivetests
+
+# Keep fixtures compressed in the images to avoid exhausting disk during builds.
+curl --fail --location --retry 3 "${eels_fixtures}" \
+    -o simulators/ethereum/eels/consume-engine/fixtures.tar.gz
+cp simulators/ethereum/eels/consume-engine/fixtures.tar.gz \
+    simulators/ethereum/eels/consume-rlp/fixtures.tar.gz
+eels_fixtures="/fixtures"
+eels_build_args=(--sim.buildarg fixtures="${eels_fixtures}" --sim.buildarg branch="${eels_branch}")
+eels_blob_build_args=(--sim.buildarg branch="${eels_branch}")
+
 go build .
 
 ./hive -client reth # first builds and caches the client
 
-# Run each hive command in the background for each simulator and wait
+# Build the fixture-heavy EELS images serially to avoid exhausting the runner.
 echo "Building images"
 ./hive -client reth --sim "ethereum/eels/consume-engine" \
-    --sim.buildarg fixtures="${eels_fixtures}" \
-    --sim.buildarg branch="${eels_branch}" \
-    --sim.timelimit 1s || true &
+    "${eels_build_args[@]}" \
+    --sim.timelimit 1s || true
 ./hive -client reth --sim "ethereum/eels/consume-rlp" \
-    --sim.buildarg fixtures="${eels_fixtures}" \
-    --sim.buildarg branch="${eels_branch}" \
-    --sim.timelimit 1s || true &
+    "${eels_build_args[@]}" \
+    --sim.timelimit 1s || true
 ./hive -client reth --sim "ethereum/eels/execute-blobs" \
-    --sim.buildarg branch="${eels_branch}" \
+    "${eels_blob_build_args[@]}" \
     --sim.buildarg fork="${eels_fork}" \
     --sim.timelimit 1s || true &
 ./hive -client reth --sim "ethereum/engine" -sim.timelimit 1s || true &
@@ -49,6 +68,12 @@ echo "Building images"
 ./hive -client reth --sim "smoke/network" -sim.timelimit 1s || true &
 ./hive -client reth --sim "ethereum/sync" -sim.timelimit 1s || true &
 wait
+
+for image in \
+    hive/simulators/ethereum/eels/consume-engine:latest \
+    hive/simulators/ethereum/eels/consume-rlp:latest; do
+    docker image inspect "${image}" >/dev/null
+done
 
 # Run docker save in parallel, wait and exit on error
 echo "Saving images"

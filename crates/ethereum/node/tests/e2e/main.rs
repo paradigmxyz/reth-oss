@@ -7,6 +7,8 @@ mod eip6780;
 mod eth;
 mod finality;
 mod forkchoice;
+mod frame_transactions;
+mod inclusion_list;
 mod invalid_payload;
 mod p2p;
 mod pool;

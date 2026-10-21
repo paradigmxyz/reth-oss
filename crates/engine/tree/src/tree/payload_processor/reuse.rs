@@ -1341,9 +1341,11 @@ mod tests {
                 match prewarm.results.take_valid(index, executor.evm_mut().db_mut()).unwrap() {
                     Ok(result) => {
                         changes.push(changed_accounts(&result.state));
-                        executor.commit_transaction(
-                            config.prewarm_tx_result(tx.inner(), result).unwrap(),
-                        );
+                        executor
+                            .commit_transaction(
+                                config.prewarm_tx_result(tx.inner(), result).unwrap(),
+                            )
+                            .unwrap();
                         Ok(())
                     }
                     Err(miss) => {

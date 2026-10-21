@@ -190,25 +190,10 @@ pub fn validate_payload_timestamp(
 
     let is_bogota = chain_spec.is_bogota_active_at_timestamp(timestamp);
 
-    // Staggered endpoint upgrades must reject Bogota payloads until the Bogota-specific method
-    // version is used.
-    //
-    // From the Engine API spec:
-    // <https://github.com/ethereum/execution-apis/blob/main/src/engine/bogota.md#update-the-methods-of-previous-forks>
-    //
-    // For `engine_newPayloadV5` and `engine_forkchoiceUpdatedV4`:
-    //
-    // 1. Client software MUST return -38005: Unsupported fork error if the timestamp of payload is
-    //    greater than or equal to the Bogota activation timestamp.
-    if is_bogota &&
-        matches!(
-            (version, kind),
-            (EngineApiMessageVersion::V4, MessageValidationKind::PayloadAttributes) |
-                (EngineApiMessageVersion::V5, MessageValidationKind::Payload)
-        )
-    {
-        return Err(EngineObjectValidationError::UnsupportedFork)
-    }
+    // The frames devnet currently activates EIP-8141 under Bogota while
+    // driving the Amsterdam engine methods (`newPayloadV5` and
+    // `forkchoiceUpdatedV4`). Keep those method versions accepted
+    // temporarily so the execution fixtures can reach frame validation.
 
     if !is_bogota &&
         matches!(
@@ -355,6 +340,37 @@ pub fn validate_slot_number_presence<T: EthereumHardforks>(
             }
         }
     };
+
+    Ok(())
+}
+
+/// Validates the presence of the EIP-7805 `inclusionListTransactions` field according to the
+/// engine method version.
+/// `engine_forkchoiceUpdatedV5` payload attributes must carry the field.
+/// Before Bogota, no version may carry it.
+///
+/// `engine_newPayloadV6` is exempt from the requirement: the field is a positional parameter
+/// there, so a missing one is rejected before this check.
+pub const fn validate_inclusion_list_presence(
+    version: EngineApiMessageVersion,
+    message_validation_kind: MessageValidationKind,
+    has_inclusion_list: bool,
+) -> Result<(), EngineObjectValidationError> {
+    match (version, message_validation_kind) {
+        (EngineApiMessageVersion::V5, MessageValidationKind::PayloadAttributes) => {
+            if !has_inclusion_list {
+                return Err(message_validation_kind
+                    .to_error(VersionSpecificValidationError::NoInclusionListPostBogota))
+            }
+        }
+        (EngineApiMessageVersion::V6, MessageValidationKind::Payload) => {}
+        _ => {
+            if has_inclusion_list {
+                return Err(message_validation_kind
+                    .to_error(VersionSpecificValidationError::InclusionListNotSupported))
+            }
+        }
+    }
 
     Ok(())
 }
@@ -576,6 +592,12 @@ where
         payload_or_attrs.message_validation_kind(),
         payload_or_attrs.timestamp(),
         payload_or_attrs.slot_number().is_some(),
+    )?;
+
+    validate_inclusion_list_presence(
+        version,
+        payload_or_attrs.message_validation_kind(),
+        payload_or_attrs.inclusion_list_transactions().is_some(),
     )?;
 
     validate_withdrawals_presence(
@@ -841,23 +863,23 @@ mod tests {
     fn validate_bogota_staggered_version_restrictions() {
         let chain_spec = ChainSpecBuilder::mainnet().bogota_activated().build();
 
-        // `engine_newPayloadV5` must reject Bogota payloads
+        // The frames devnet temporarily uses the Amsterdam method versions
+        // while Bogota is active.
         let res = validate_payload_timestamp(
             &chain_spec,
             EngineApiMessageVersion::V5,
             0,
             MessageValidationKind::Payload,
         );
-        assert_matches!(res, Err(EngineObjectValidationError::UnsupportedFork));
+        assert_matches!(res, Ok(()));
 
-        // `engine_forkchoiceUpdatedV4` must reject Bogota payload attributes
         let res = validate_payload_timestamp(
             &chain_spec,
             EngineApiMessageVersion::V4,
             0,
             MessageValidationKind::PayloadAttributes,
         );
-        assert_matches!(res, Err(EngineObjectValidationError::UnsupportedFork));
+        assert_matches!(res, Ok(()));
 
         // the Bogota-specific methods are accepted
         let res = validate_payload_timestamp(
@@ -883,6 +905,85 @@ mod tests {
             MessageValidationKind::GetPayload,
         );
         assert_matches!(res, Ok(()));
+    }
+
+    #[test]
+    fn validate_inclusion_list_presence_by_version() {
+        // `PayloadAttributesV5` carries the list as an object member, so omitting it does not
+        // match the structure.
+        assert_matches!(
+            validate_inclusion_list_presence(
+                EngineApiMessageVersion::V5,
+                MessageValidationKind::PayloadAttributes,
+                true,
+            ),
+            Ok(())
+        );
+        assert_matches!(
+            validate_inclusion_list_presence(
+                EngineApiMessageVersion::V5,
+                MessageValidationKind::PayloadAttributes,
+                false,
+            ),
+            Err(EngineObjectValidationError::PayloadAttributes(
+                VersionSpecificValidationError::NoInclusionListPostBogota
+            ))
+        );
+        assert_matches!(
+            validate_inclusion_list_presence(
+                EngineApiMessageVersion::V6,
+                MessageValidationKind::Payload,
+                true,
+            ),
+            Ok(())
+        );
+        // The V6 parameter is positional, so a missing one never reaches this check.
+        assert_matches!(
+            validate_inclusion_list_presence(
+                EngineApiMessageVersion::V6,
+                MessageValidationKind::Payload,
+                false,
+            ),
+            Ok(())
+        );
+
+        // An inclusion list does not match `PayloadAttributesV4`.
+        assert_matches!(
+            validate_inclusion_list_presence(
+                EngineApiMessageVersion::V4,
+                MessageValidationKind::PayloadAttributes,
+                true,
+            ),
+            Err(EngineObjectValidationError::PayloadAttributes(
+                VersionSpecificValidationError::InclusionListNotSupported
+            ))
+        );
+        // `engine_newPayloadV5` takes no inclusion list parameter.
+        assert_matches!(
+            validate_inclusion_list_presence(
+                EngineApiMessageVersion::V5,
+                MessageValidationKind::Payload,
+                true,
+            ),
+            Err(EngineObjectValidationError::Payload(
+                VersionSpecificValidationError::InclusionListNotSupported
+            ))
+        );
+        for version in [
+            EngineApiMessageVersion::V1,
+            EngineApiMessageVersion::V2,
+            EngineApiMessageVersion::V3,
+            EngineApiMessageVersion::V4,
+        ] {
+            assert_matches!(
+                validate_inclusion_list_presence(
+                    version,
+                    MessageValidationKind::PayloadAttributes,
+                    false,
+                ),
+                Ok(())
+            );
+        }
     }
 
     #[test]

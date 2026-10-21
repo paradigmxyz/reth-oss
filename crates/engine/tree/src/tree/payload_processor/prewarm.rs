@@ -1021,16 +1021,19 @@ pub struct PrewarmMetrics {
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
 
     use super::*;
     use alloy_consensus::{transaction::Recovered, TxLegacy};
+    use alloy_eip7928::{AccountChanges, BalanceChange, BlockAccessIndex};
     use alloy_eips::eip7702::constants::EIP7702_CLEARED_DELEGATION;
-    use alloy_primitives::{Address, Signature, TxKind, B256, U256};
+    use alloy_primitives::{address, Address, Signature, TxKind, B256, U256};
     use reth_chainspec::ChainSpec;
     use reth_ethereum_primitives::{EthPrimitives, TransactionSigned};
     use reth_evm::{execute::WithTxEnv, TxEnvFor};
     use reth_evm_ethereum::EthEvmConfig;
+    use reth_primitives_traits::Account;
     use reth_provider::test_utils::MockEthProvider;
     use reth_stages_api::{StageCheckpoint, StageId};
     use reth_storage_overlay::OverlayManager;
@@ -1465,5 +1468,34 @@ mod tests {
         for (valid, insert_error) in [(true, false), (false, false), (true, true)] {
             assert_save_cache_drops_removed_caches(CacheSlot::Empty, valid, insert_error);
         }
+    }
+
+    #[test]
+    fn bal_read_only_account_does_not_change_state_root() {
+        let changes = AccountChanges::new(address!("0000000000000000000000000000000000000001"))
+            .with_storage_read(U256::from(1));
+
+        assert!(!changes.account_info().changes_state_root(&changes));
+    }
+
+    #[test]
+    #[allow(clippy::needless_update)]
+    fn bal_account_uses_existing_fields_only_when_missing() {
+        let changes = AccountChanges::new(address!("0000000000000000000000000000000000000001"))
+            .with_balance_change(BalanceChange::new(BlockAccessIndex::new(1), U256::from(10)));
+        let info = changes.account_info();
+
+        assert!(!info.is_complete());
+        let mut account = Account {
+            balance: U256::from(1),
+            nonce: 3,
+            bytecode_hash: Some(B256::repeat_byte(0xaa)),
+            ..Default::default()
+        };
+        account.apply_bal_info(info);
+
+        assert_eq!(account.balance, U256::from(10));
+        assert_eq!(account.nonce, 3);
+        assert_eq!(account.bytecode_hash, Some(B256::repeat_byte(0xaa)));
     }
 }
