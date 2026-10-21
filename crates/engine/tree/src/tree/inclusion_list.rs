@@ -4,10 +4,10 @@
 //! was given, and the bounded store of lists retained from `engine_newPayloadV6`.
 
 use alloy_consensus::{constants::KECCAK_EMPTY, Transaction};
-use alloy_eips::eip2718::{Decodable2718, Typed2718};
+use alloy_eips::eip2718::Decodable2718;
 use alloy_primitives::{
     map::{AddressMap, B256Map, B256Set},
-    Bytes, B256, U256,
+    Address, Bytes, B256, U256,
 };
 use reth_chainspec::MAX_TX_TOTAL_GAS_LIMIT;
 use reth_errors::ProviderResult;
@@ -140,44 +140,57 @@ fn could_append_transaction<N: NodePrimitives>(
     ctx: &InclusionListContext,
     withdrawn: &AddressMap<U256>,
 ) -> ProviderResult<bool> {
-    if transaction.is_eip4844() {
+    if !transaction_fits_block(transaction, ctx) {
         return Ok(false)
+    }
+    let Ok(sender) = transaction.try_recover() else { return Ok(false) };
+    if !intrinsic_gas_fits(transaction, sender, ctx) {
+        return Ok(false)
+    }
+
+    sender_can_pay(transaction, sender, state, withdrawn)
+}
+
+/// Checks envelope validity and the block's remaining execution and state gas budgets.
+fn transaction_fits_block(transaction: &impl Transaction, ctx: &InclusionListContext) -> bool {
+    if transaction.is_eip4844() {
+        return false
     }
 
     // EIP-2681 reserves the maximum nonce; execution could not increment past it.
     if transaction.nonce() == u64::MAX {
-        return Ok(false)
+        return false
     }
 
     // EIP-7702 requires a non-empty authorization list.
     if transaction.authorization_list().is_some_and(|list| list.is_empty()) {
-        return Ok(false)
+        return false
     }
 
     // EIP-8037 admits the capped execution gas and the full gas limit against separate budgets.
     let gas_limit = transaction.gas_limit();
     let execution_gas = if ctx.spec_id >= SpecId::AMSTERDAM {
         if gas_limit > MAX_TX_TOTAL_GAS_LIMIT || gas_limit > ctx.available_state_gas {
-            return Ok(false)
+            return false
         }
         gas_limit.min(ctx.tx_gas_limit_cap)
     } else {
         gas_limit
     };
     if execution_gas > ctx.available_gas {
-        return Ok(false)
+        return false
     }
 
     // A legacy transaction without a chain id is replay-protected by omission, so only a
     // mismatch disqualifies.
     if transaction.chain_id().is_some_and(|chain_id| chain_id != ctx.chain_id) {
-        return Ok(false)
+        return false
     }
 
     // EIP-3860 init code bound. The limit is fork-dependent — EIP-7954 raises it in Amsterdam —
     // so it is taken from the block's own EVM environment.
     if transaction.is_create() && transaction.input().len() > ctx.max_initcode_size {
-        return Ok(false)
+        return false
     }
 
     // Base fee coverage and the EIP-1559 fee-cap ordering rule.
@@ -186,11 +199,18 @@ fn could_append_transaction<N: NodePrimitives>(
             .max_priority_fee_per_gas()
             .is_some_and(|tip| tip > transaction.max_fee_per_gas())
     {
-        return Ok(false)
+        return false
     }
 
-    let Ok(sender) = transaction.try_recover() else { return Ok(false) };
+    true
+}
 
+/// Checks the fork-specific intrinsic gas floor and regular gas cap.
+fn intrinsic_gas_fits(
+    transaction: &impl Transaction,
+    sender: Address,
+    ctx: &InclusionListContext,
+) -> bool {
     let intrinsic_gas = calculate_initial_tx_gas(
         ctx.spec_id,
         transaction.input(),
@@ -208,7 +228,7 @@ fn could_append_transaction<N: NodePrimitives>(
     if transaction.gas_limit() < intrinsic_gas.initial_total_gas() ||
         transaction.gas_limit() < intrinsic_gas.floor_gas
     {
-        return Ok(false)
+        return false
     }
 
     // EIP-8037 caps regular gas, not the transaction's gas limit: a limit above the cap is legal
@@ -216,9 +236,19 @@ fn could_append_transaction<N: NodePrimitives>(
     if ctx.spec_id >= SpecId::AMSTERDAM &&
         intrinsic_gas.initial_regular_gas().max(intrinsic_gas.floor_gas) > ctx.tx_gas_limit_cap
     {
-        return Ok(false)
+        return false
     }
 
+    true
+}
+
+/// Checks sender code, nonce and balance before this block's withdrawal credits.
+fn sender_can_pay(
+    transaction: &impl Transaction,
+    sender: Address,
+    state: &StateProviderBox,
+    withdrawn: &AddressMap<U256>,
+) -> ProviderResult<bool> {
     let account = state.basic_account(&sender)?.unwrap_or_default();
     // The balance the spec sees precedes this block's withdrawals; see `withdrawal_credits`.
     let balance =

@@ -5,7 +5,7 @@ use crate::{AsEthApiError, FromEthApiError, IntoEthApiError};
 use alloy_evm::overrides::{apply_block_overrides, apply_state_overrides};
 use alloy_network::{NetworkTransactionBuilder, TransactionBuilder, TransactionBuilder4844};
 use alloy_primitives::{TxKind, U256};
-use alloy_rpc_types_eth::{state::EvmOverrides, BlockId};
+use alloy_rpc_types_eth::{state::EvmOverrides, BlockId, TransactionRequest};
 use futures::Future;
 use reth_chainspec::MIN_TRANSACTION_GAS;
 use reth_errors::ProviderError;
@@ -367,104 +367,14 @@ pub trait EstimateCall: Call {
                 Self::Error::from_eth_err(EthApiError::InvalidParams(message.into()))
             };
             let (evm_env, at) = self.evm_env_at(at).await?;
-            if evm_env.cfg_env.is_eip8250_enabled() && request.as_ref().nonce_keys.is_none() {
-                if request.as_ref().signatures.as_ref().is_some_and(|signatures| {
-                    signatures.iter().any(|signature| {
-                        u8::from(signature.scheme) != 0 && !signature.signature.is_empty()
-                    })
-                }) {
-                    return Err(invalid("signed frame transactions must include nonceKeys"));
-                }
-                request.as_mut().nonce_keys = Some(vec![U256::ZERO]);
-            }
-            let frames =
-                request.as_ref().frames.as_ref().ok_or_else(|| invalid("missing frames"))?;
-            let missing: Vec<_> = frames
-                .iter()
-                .enumerate()
-                .flat_map(|(index, frame)| {
-                    [(index, false, frame.execution_gas), (index, true, frame.state_gas)]
-                        .into_iter()
-                        .filter_map(|(index, state, gas)| gas.is_none().then_some((index, state)))
-                })
-                .collect();
+            let missing =
+                prepare_frame_gas_request(request.as_mut(), evm_env.cfg_env.is_eip8250_enabled())?;
             if missing.is_empty() {
-                return Ok(request);
-            }
-            if frames.is_empty() || frames.len() > 64 {
-                return Err(invalid("expected between 1 and 64 frames"));
-            }
-            if request.as_ref().signatures.as_ref().is_some_and(|signatures| {
-                signatures.iter().any(|signature| {
-                    u8::from(signature.scheme) != 0 && !signature.signature.is_empty()
-                })
-            }) {
-                return Err(invalid("signed frame transactions must include both frame gas limits"));
+                return Ok(request)
             }
 
-            let block_limit = overrides
-                .block
-                .as_ref()
-                .and_then(|block| block.gas_limit)
-                .unwrap_or_else(|| evm_env.block_env.gas_limit());
-            let mut cap = block_limit;
-            if self.call_gas_limit() != 0 {
-                cap = cap.min(self.call_gas_limit());
-            }
-            for frame in request.as_mut().frames.as_mut().unwrap() {
-                frame.execution_gas.get_or_insert(0);
-                frame.state_gas.get_or_insert(0);
-            }
-            // Reserve transaction overhead and every explicit allocation before assigning defaults.
-            let tx_env = self.converter().tx_env(request.clone(), &evm_env)?;
-            let gas_params = &evm_env.cfg_env.gas_params;
-            let signature_bytes = request
-                .as_ref()
-                .signatures
-                .as_deref()
-                .unwrap_or_default()
-                .iter()
-                .filter(|signature| signature.signature.is_empty())
-                .filter_map(|signature| signature.scheme.signature_length())
-                .try_fold(0u64, |sum, length| sum.checked_add(length as u64))
-                .ok_or_else(|| invalid("signature gas overflows"))?;
-            let signature_gas = signature_bytes
-                .checked_mul(gas_params.tx_token_non_zero_byte_multiplier())
-                .and_then(|tokens| {
-                    tokens.checked_mul(
-                        gas_params.tx_token_cost().max(gas_params.tx_floor_cost_per_token()),
-                    )
-                })
-                .ok_or_else(|| invalid("signature gas overflows"))?;
-            let reserved = tx_env
-                .gas_limit()
-                .checked_add(signature_gas)
-                .ok_or_else(|| invalid("frame gas overflows"))?;
-            let allowance = cap
-                .checked_sub(reserved)
-                .ok_or_else(|| invalid("frame transaction exceeds the gas cap"))?;
-            let state_reserved = tx_env
-                .frame_transaction()
-                .unwrap()
-                .total_frame_state_gas_limit()
-                .ok_or_else(|| invalid("state gas overflows"))?;
-            let execution_allowance = evm_env
-                .cfg_env
-                .tx_gas_limit_cap()
-                .checked_sub(reserved - state_reserved)
-                .ok_or_else(|| invalid("frame transaction exceeds the execution gas cap"))?;
-            let execution_count = missing.iter().filter(|(_, state)| !state).count() as u64;
-            let initial = allowance / missing.len() as u64;
-            let execution_initial =
-                initial.min(execution_allowance.checked_div(execution_count).unwrap_or(0));
-            for &(index, state) in &missing {
-                let frame = &mut request.as_mut().frames.as_mut().unwrap()[index];
-                if state {
-                    frame.state_gas = Some(initial);
-                } else {
-                    frame.execution_gas = Some(execution_initial);
-                }
-            }
+            let (initial, execution_initial) =
+                initialize_frame_gas(self, &mut request, &evm_env, &overrides, &missing)?;
             let _permit = self
                 .acquire_owned_blocking_io()
                 .await
@@ -638,4 +548,209 @@ pub fn update_estimated_gas_range<Halt>(
     };
 
     Ok(())
+}
+
+/// Defaults nonce keys and identifies the gas dimensions that can be filled without resigning.
+fn prepare_frame_gas_request(
+    request: &mut TransactionRequest,
+    keyed_nonces_enabled: bool,
+) -> Result<Vec<(usize, bool)>, EthApiError> {
+    let invalid = |message: &str| EthApiError::InvalidParams(message.into());
+    if keyed_nonces_enabled && request.nonce_keys.is_none() {
+        if has_frame_signatures(request) {
+            return Err(invalid("signed frame transactions must include nonceKeys"));
+        }
+        request.nonce_keys = Some(vec![U256::ZERO]);
+    }
+    let frames = request.frames.as_ref().ok_or_else(|| invalid("missing frames"))?;
+    let missing: Vec<_> = frames
+        .iter()
+        .enumerate()
+        .flat_map(|(index, frame)| {
+            [(index, false, frame.execution_gas), (index, true, frame.state_gas)]
+                .into_iter()
+                .filter_map(|(index, state, gas)| gas.is_none().then_some((index, state)))
+        })
+        .collect();
+    if missing.is_empty() {
+        return Ok(missing)
+    }
+    if frames.is_empty() || frames.len() > 64 {
+        return Err(invalid("expected between 1 and 64 frames"));
+    }
+    if has_frame_signatures(request) {
+        return Err(invalid("signed frame transactions must include both frame gas limits"));
+    }
+    Ok(missing)
+}
+
+/// Whether the request contains a non-placeholder signature that binds the frame limits.
+fn has_frame_signatures(request: &TransactionRequest) -> bool {
+    request.signatures.as_ref().is_some_and(|signatures| {
+        signatures
+            .iter()
+            .any(|signature| u8::from(signature.scheme) != 0 && !signature.signature.is_empty())
+    })
+}
+
+/// Reserves overhead and explicit limits before sharing the remaining gas among omitted limits.
+fn initialize_frame_gas<E: EstimateCall>(
+    api: &E,
+    request: &mut RpcTxReq<<E::RpcConvert as RpcConvert>::Network>,
+    evm_env: &EvmEnvFor<E::Evm>,
+    overrides: &EvmOverrides,
+    missing: &[(usize, bool)],
+) -> Result<(u64, u64), E::Error> {
+    let invalid =
+        |message: &str| E::Error::from_eth_err(EthApiError::InvalidParams(message.into()));
+    let block_limit = overrides
+        .block
+        .as_ref()
+        .and_then(|block| block.gas_limit)
+        .unwrap_or_else(|| evm_env.block_env.gas_limit());
+    let mut cap = block_limit;
+    if api.call_gas_limit() != 0 {
+        cap = cap.min(api.call_gas_limit());
+    }
+    for frame in request.as_mut().frames.as_mut().unwrap() {
+        frame.execution_gas.get_or_insert(0);
+        frame.state_gas.get_or_insert(0);
+    }
+    // Reserve transaction overhead and every explicit allocation before assigning defaults.
+    let tx_env = api.converter().tx_env((*request).clone(), evm_env)?;
+    let gas_params = &evm_env.cfg_env.gas_params;
+    let signature_bytes = request
+        .as_ref()
+        .signatures
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .filter(|signature| signature.signature.is_empty())
+        .filter_map(|signature| signature.scheme.signature_length())
+        .try_fold(0u64, |sum, length| sum.checked_add(length as u64))
+        .ok_or_else(|| invalid("signature gas overflows"))?;
+    let signature_gas = signature_bytes
+        .checked_mul(gas_params.tx_token_non_zero_byte_multiplier())
+        .and_then(|tokens| {
+            tokens.checked_mul(gas_params.tx_token_cost().max(gas_params.tx_floor_cost_per_token()))
+        })
+        .ok_or_else(|| invalid("signature gas overflows"))?;
+    let reserved = tx_env
+        .gas_limit()
+        .checked_add(signature_gas)
+        .ok_or_else(|| invalid("frame gas overflows"))?;
+    let allowance = cap
+        .checked_sub(reserved)
+        .ok_or_else(|| invalid("frame transaction exceeds the gas cap"))?;
+    let state_reserved = tx_env
+        .frame_transaction()
+        .unwrap()
+        .total_frame_state_gas_limit()
+        .ok_or_else(|| invalid("state gas overflows"))?;
+    let execution_allowance = evm_env
+        .cfg_env
+        .tx_gas_limit_cap()
+        .checked_sub(reserved - state_reserved)
+        .ok_or_else(|| invalid("frame transaction exceeds the execution gas cap"))?;
+    let execution_count = missing.iter().filter(|(_, state)| !state).count() as u64;
+    let initial = allowance / missing.len() as u64;
+    let execution_initial =
+        initial.min(execution_allowance.checked_div(execution_count).unwrap_or(0));
+    for &(index, state) in missing {
+        let frame = &mut request.as_mut().frames.as_mut().unwrap()[index];
+        if state {
+            frame.state_gas = Some(initial);
+        } else {
+            frame.execution_gas = Some(execution_initial);
+        }
+    }
+    Ok((initial, execution_initial))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy_eips::eip8141::{FrameSignature, SignatureScheme};
+    use alloy_primitives::Bytes;
+    use alloy_rpc_types_eth::FrameRequest;
+
+    #[test]
+    fn frame_gas_preparation_preserves_explicit_limits_and_keys() {
+        let mut request = TransactionRequest {
+            nonce_keys: Some(vec![U256::from(7)]),
+            frames: Some(vec![
+                FrameRequest { execution_gas: Some(0), ..Default::default() },
+                FrameRequest { state_gas: Some(42), ..Default::default() },
+            ]),
+            ..Default::default()
+        };
+        let original = request.clone();
+        assert_eq!(
+            prepare_frame_gas_request(&mut request, true).unwrap(),
+            vec![(0, true), (1, false)]
+        );
+        assert_eq!(request, original);
+    }
+
+    #[test]
+    fn frame_gas_preparation_defaults_keys_only_after_activation() {
+        for active in [false, true] {
+            let mut request = TransactionRequest {
+                frames: Some(vec![FrameRequest {
+                    execution_gas: Some(0),
+                    state_gas: Some(0),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            };
+            assert_eq!(prepare_frame_gas_request(&mut request, active).unwrap(), vec![]);
+            assert_eq!(request.nonce_keys, active.then(|| vec![U256::ZERO]));
+        }
+    }
+
+    #[test]
+    fn frame_gas_preparation_preserves_signed_fields() {
+        let mut request = TransactionRequest {
+            frames: Some(vec![FrameRequest::default()]),
+            signatures: Some(vec![FrameSignature {
+                scheme: SignatureScheme::Secp256k1,
+                signature: Bytes::from_static(&[1]),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        };
+        let original = request.clone();
+        assert_eq!(
+            prepare_frame_gas_request(&mut request, true).unwrap_err().to_string(),
+            "signed frame transactions must include nonceKeys"
+        );
+        assert_eq!(request, original);
+
+        request.nonce_keys = Some(vec![U256::ZERO]);
+        let original = request.clone();
+        assert_eq!(
+            prepare_frame_gas_request(&mut request, true).unwrap_err().to_string(),
+            "signed frame transactions must include both frame gas limits"
+        );
+        assert_eq!(request, original);
+    }
+
+    #[test]
+    fn frame_gas_preparation_allows_signature_placeholders_and_arbitrary_witnesses() {
+        for (scheme, signature) in [
+            (SignatureScheme::Secp256k1, Bytes::new()),
+            (SignatureScheme::Arbitrary, Bytes::from_static(&[1])),
+        ] {
+            let mut request = TransactionRequest {
+                frames: Some(vec![FrameRequest::default()]),
+                signatures: Some(vec![FrameSignature { scheme, signature, ..Default::default() }]),
+                ..Default::default()
+            };
+            assert_eq!(
+                prepare_frame_gas_request(&mut request, true).unwrap(),
+                vec![(0, false), (0, true)]
+            );
+            assert_eq!(request.nonce_keys, Some(vec![U256::ZERO]));
+        }
+    }
 }

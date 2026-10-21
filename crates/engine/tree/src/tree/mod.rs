@@ -3652,17 +3652,7 @@ where
         let Some(transactions) = self.state.inclusion_lists.get(&block_hash).cloned() else {
             return Ok(None)
         };
-        let block = if let Some(block) = self.state.tree_state.executed_block_by_hash(block_hash) {
-            block.recovered_block().clone()
-        } else {
-            let Some(block) = self
-                .provider
-                .sealed_block_with_senders(block_hash.into(), TransactionVariant::WithHash)?
-            else {
-                return Ok(None)
-            };
-            block
-        };
+        let Some(block) = self.inclusion_list_block(block_hash)? else { return Ok(None) };
         if transactions.is_empty() {
             self.state.inclusion_lists.cache_result(block_hash, true);
             return Ok(Some(true))
@@ -3674,7 +3664,30 @@ where
         let state: reth_provider::StateProviderBox = Box::new(
             reth_provider::DatabaseProviderROFactory::database_provider_ro(&provider_factory)?,
         );
+        let Some(ctx) = self.inclusion_list_context(&block)? else { return Ok(None) };
 
+        let result = inclusion_list_satisfied::<N>(&block, &state, &ctx, &transactions)?;
+        self.state.inclusion_lists.cache_result(block_hash, result);
+        Ok(Some(result))
+    }
+
+    /// Loads a retained payload from the execution tree or the database.
+    fn inclusion_list_block(
+        &self,
+        block_hash: B256,
+    ) -> ProviderResult<Option<RecoveredBlock<N::Block>>> {
+        if let Some(block) = self.state.tree_state.executed_block_by_hash(block_hash) {
+            return Ok(Some(block.recovered_block().clone()))
+        }
+        self.provider.sealed_block_with_senders(block_hash.into(), TransactionVariant::WithHash)
+    }
+
+    /// Builds the appendability context, retaining replayed gas totals for replacement lists.
+    fn inclusion_list_context(
+        &mut self,
+        block: &RecoveredBlock<N::Block>,
+    ) -> ProviderResult<Option<InclusionListContext>> {
+        let block_hash = block.hash();
         // The EVM environment supplies the chain id and the EIP-7825 gas cap the block was
         // executed under. The spec permits a null result, so a failure here reports nothing.
         let evm_env = match self.evm_config.evm_env(block.header()) {
@@ -3689,11 +3702,11 @@ where
         let gas = if let Some(gas) = self.state.inclusion_lists.gas(&block_hash) {
             gas
         } else {
-            let gas = self.inclusion_list_gas(&block)?;
+            let gas = self.inclusion_list_gas(block)?;
             self.state.inclusion_lists.cache_gas(block_hash, gas);
             gas
         };
-        let ctx = InclusionListContext {
+        Ok(Some(InclusionListContext {
             chain_id: evm_env.cfg_env.chain_id,
             spec_id: evm_env.cfg_env.spec.into(),
             base_fee_per_gas: block.base_fee_per_gas(),
@@ -3701,11 +3714,7 @@ where
             available_state_gas: block.gas_limit().saturating_sub(gas.state),
             tx_gas_limit_cap: evm_env.cfg_env.tx_gas_limit_cap(),
             max_initcode_size: evm_env.cfg_env.max_initcode_size(),
-        };
-
-        let result = inclusion_list_satisfied::<N>(&block, &state, &ctx, &transactions)?;
-        self.state.inclusion_lists.cache_result(block_hash, result);
-        Ok(Some(result))
+        }))
     }
 
     /// Recovers the gas budgets immediately after the transactions, before post-execution calls.

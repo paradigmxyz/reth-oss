@@ -48,12 +48,13 @@ use reth_rpc_eth_types::{
     },
     EthApiError, StateCacheDb,
 };
-use reth_storage_api::{BlockIdReader, ProviderTx, StateProvider};
+use reth_storage_api::{BlockIdReader, EvmStateProvider, ProviderTx, StateProvider};
 use reth_tasks::{cancel::is_cancelled, CancelOnDrop};
 use reth_transaction_pool::validate::{FrameValidationInspector, FrameValidationPolicy};
 use revm::{
     context::Block,
     context_interface::{result::ResultAndState, Cfg},
+    handler::eip8141::FrameValidationResult,
     Database, DatabaseCommit,
 };
 use revm_inspectors::{access_list::AccessListInspector, transfer::TransferInspector};
@@ -344,21 +345,7 @@ pub trait EthCall: EstimateCall + LoadBlock + FullEthApiTypes {
                 tx.sender,
                 &evm_env.cfg_env.gas_params,
             );
-            let max_cost = tx_env
-                .frame_transaction()
-                .and_then(|frame| {
-                    frame.checked_max_cost_with_params(
-                        tx_env.caller(),
-                        &evm_env.cfg_env.gas_params,
-                        tx_env.total_blob_gas(),
-                        evm_env.block_env.blob_gasprice().unwrap_or_default(),
-                    )
-                })
-                .ok_or_else(|| {
-                    Self::Error::from_eth_err(EthApiError::InvalidParams(
-                        "frame transaction maximum cost overflows".into(),
-                    ))
-                })?;
+            let max_cost = frame_simulation_max_cost::<Self::Evm>(&tx_env, &evm_env)?;
 
             let chain_id = self.provider().chain_spec().chain_id();
             if tx.chain_id != chain_id {
@@ -397,14 +384,6 @@ pub trait EthCall: EstimateCall + LoadBlock + FullEthApiTypes {
             } else {
                 None
             };
-            let prefix_shape = Some(
-                FrameSimulationPrefixShape::from_validation_prefix(
-                    policy.prefix_end,
-                    policy.deploy_index,
-                    policy.expiry_index,
-                )
-                .expect("frame validation policy accepted an unknown prefix shape"),
-            );
 
             if self.call_gas_limit() != 0 && tx_env.gas_limit() > self.call_gas_limit() {
                 return Err(EthApiError::other(EthSimulateError::GasLimitReached).into())
@@ -417,128 +396,15 @@ pub trait EthCall: EstimateCall + LoadBlock + FullEthApiTypes {
             }
 
             self.spawn_with_state_at_block(at, move |this, db| {
-                let state_provider = db.database.0;
-                let mut prefix_env = evm_env.clone();
-                // The transaction pool can validate a nonce-gapped transaction. This endpoint has
-                // the same public-prefix semantics, while full execution retains the configured
-                // nonce checks below.
-                prefix_env.cfg_env.disable_nonce_check = true;
-                if let Some(current_slot) = recent_root_current_slot {
-                    prefix_env.block_env.inner_mut().slot_num = current_slot;
-                }
-                let prefix_tx_env = TxEnvFor::<Self::Evm>::from_recovered_tx_with_gas_params(
+                simulate_frame_transaction_with_state(
+                    &this,
                     &tx,
-                    tx.sender,
-                    &prefix_env.cfg_env.gas_params,
-                );
-                let inspector = FrameValidationInspector::new(tx.sender, policy.clone());
-                let prefix_db = State::builder()
-                    .with_database(StateProviderDatabase::new(&state_provider))
-                    .build();
-                let mut prefix_evm =
-                    this.evm_config().evm_with_env_and_inspector(prefix_db, prefix_env, inspector);
-                let prefix_result =
-                    match prefix_evm.validate_frame_transaction(prefix_tx_env, policy.prefix_end) {
-                        Some(Ok(result)) => result,
-                        Some(Err(error)) if error.is_fatal() => {
-                            return Err(Self::Error::from_evm_err(error))
-                        }
-                        Some(Err(error)) => {
-                            return Ok(FrameSimulationResult::invalid(
-                                max_cost,
-                                prefix_shape,
-                                error.to_string(),
-                            ))
-                        }
-                        None => {
-                            return Err(Self::Error::from_eth_err(EthApiError::Unsupported(
-                                "frame transaction validation is unavailable",
-                            )))
-                        }
-                    };
-                let inspector_error = prefix_evm.components().1.error();
-                let expiry = prefix_evm.components().1.expiry();
-                drop(prefix_evm);
-
-                if let Some(reason) = inspector_error {
-                    return Ok(FrameSimulationResult::invalid(
-                        prefix_result.max_cost,
-                        prefix_shape,
-                        reason,
-                    ))
-                }
-                if !prefix_result.sender_approved || prefix_result.prefix_end != policy.prefix_end {
-                    return Ok(FrameSimulationResult::invalid(
-                        prefix_result.max_cost,
-                        prefix_shape,
-                        "validation prefix did not grant the required approvals",
-                    ))
-                }
-                if prefix_result.execution_gas > policy.declared_execution_gas {
-                    return Ok(FrameSimulationResult::invalid(
-                        prefix_result.max_cost,
-                        prefix_shape,
-                        "validation prefix exceeded its declared execution-gas budget",
-                    ))
-                }
-                if prefix_result.state_gas > policy.state_gas {
-                    return Ok(FrameSimulationResult::invalid(
-                        prefix_result.max_cost,
-                        prefix_shape,
-                        "validation prefix exceeded its declared state-gas budget",
-                    ))
-                }
-                if expiry.is_some_and(|deadline| deadline < timestamp) {
-                    return Ok(FrameSimulationResult::invalid(
-                        prefix_result.max_cost,
-                        prefix_shape,
-                        "frame transaction expired",
-                    ))
-                }
-
-                let execution_tx_env = TxEnvFor::<Self::Evm>::from_recovered_tx_with_gas_params(
-                    &tx,
-                    tx.sender,
-                    &evm_env.cfg_env.gas_params,
-                );
-                let execution_db = State::builder()
-                    .with_database(StateProviderDatabase::new(&state_provider))
-                    .build();
-                let mut evm = this.evm_config().evm_with_env(execution_db, evm_env);
-                let execution_result = match evm.transact(execution_tx_env) {
-                    Ok(result) => result.result,
-                    Err(error) => return Err(Self::Error::from_evm_err(error)),
-                };
-
-                let revm::context_interface::result::ExecutionResult::FrameTransaction {
-                    gas,
-                    payer,
-                    frame_receipts,
-                    ..
-                } = execution_result
-                else {
-                    return Err(Self::Error::from_eth_err(EthApiError::EvmCustom(
-                        "frame transaction execution returned a non-frame result".into(),
-                    )))
-                };
-                let frames = frame_receipts
-                    .into_iter()
-                    .map(|receipt| FrameSimulationFrameResult {
-                        execution_gas: receipt.gas_used.execution,
-                        state_gas: receipt.gas_used.state,
-                        status: receipt.status,
-                    })
-                    .collect::<Vec<_>>();
-
-                Ok(FrameSimulationResult {
-                    valid: true,
-                    max_cost: prefix_result.max_cost,
-                    prefix_shape,
-                    payer: Some(payer),
-                    violation: None,
-                    gas_used: Some(gas.frame_tx_gas_used()),
-                    frames: Some(frames),
-                })
+                    evm_env,
+                    &db.database.0,
+                    policy,
+                    recent_root_current_slot,
+                    max_cost,
+                )
             })
             .await
         }
@@ -1253,5 +1119,218 @@ pub trait Call:
         }
 
         Ok((evm_env, tx_env))
+    }
+}
+
+/// Computes the maximum charge using the selected block's gas schedule and blob price.
+fn frame_simulation_max_cost<C: ConfigureEvm>(
+    tx_env: &TxEnvFor<C>,
+    evm_env: &EvmEnvFor<C>,
+) -> Result<U256, EthApiError> {
+    tx_env
+        .frame_transaction()
+        .and_then(|frame| {
+            frame.checked_max_cost_with_params(
+                tx_env.caller(),
+                &evm_env.cfg_env.gas_params,
+                tx_env.total_blob_gas(),
+                evm_env.block_env.blob_gasprice().unwrap_or_default(),
+            )
+        })
+        .ok_or_else(|| {
+            EthApiError::InvalidParams("frame transaction maximum cost overflows".into())
+        })
+}
+
+/// Validates the public prefix on disposable state before executing the full transaction.
+fn simulate_frame_transaction_with_state<E: EthCall>(
+    api: &E,
+    tx: &TxEip8141,
+    evm_env: EvmEnvFor<E::Evm>,
+    state_provider: &impl EvmStateProvider,
+    policy: FrameValidationPolicy,
+    recent_root_current_slot: Option<u64>,
+    max_cost: U256,
+) -> Result<FrameSimulationResult, E::Error> {
+    let timestamp = evm_env.block_env.timestamp().saturating_to();
+    let prefix_shape = Some(
+        FrameSimulationPrefixShape::from_validation_prefix(
+            policy.prefix_end,
+            policy.deploy_index,
+            policy.expiry_index,
+        )
+        .expect("frame validation policy accepted an unknown prefix shape"),
+    );
+    let mut prefix_env = evm_env.clone();
+    // The transaction pool can validate a nonce-gapped transaction. This endpoint has
+    // the same public-prefix semantics, while full execution retains the configured
+    // nonce checks below.
+    prefix_env.cfg_env.disable_nonce_check = true;
+    if let Some(current_slot) = recent_root_current_slot {
+        prefix_env.block_env.inner_mut().slot_num = current_slot;
+    }
+    let prefix_tx_env = TxEnvFor::<E::Evm>::from_recovered_tx_with_gas_params(
+        tx,
+        tx.sender,
+        &prefix_env.cfg_env.gas_params,
+    );
+    let inspector = FrameValidationInspector::new(tx.sender, policy.clone());
+    let prefix_db =
+        State::builder().with_database(StateProviderDatabase::new(state_provider)).build();
+    let mut prefix_evm =
+        api.evm_config().evm_with_env_and_inspector(prefix_db, prefix_env, inspector);
+    let prefix_result =
+        match prefix_evm.validate_frame_transaction(prefix_tx_env, policy.prefix_end) {
+            Some(Ok(result)) => result,
+            Some(Err(error)) if error.is_fatal() => return Err(E::Error::from_evm_err(error)),
+            Some(Err(error)) => {
+                return Ok(FrameSimulationResult::invalid(max_cost, prefix_shape, error.to_string()))
+            }
+            None => {
+                return Err(E::Error::from_eth_err(EthApiError::Unsupported(
+                    "frame transaction validation is unavailable",
+                )))
+            }
+        };
+    if let Some(reason) = frame_simulation_prefix_violation(
+        &prefix_result,
+        &policy,
+        prefix_evm.components().1,
+        timestamp,
+    ) {
+        return Ok(FrameSimulationResult::invalid(prefix_result.max_cost, prefix_shape, reason))
+    }
+    drop(prefix_evm);
+
+    execute_frame_simulation(api, tx, evm_env, state_provider, prefix_result.max_cost, prefix_shape)
+}
+
+/// Returns the first policy violation after successful prefix execution.
+fn frame_simulation_prefix_violation(
+    result: &FrameValidationResult,
+    policy: &FrameValidationPolicy,
+    inspector: &FrameValidationInspector,
+    timestamp: u64,
+) -> Option<&'static str> {
+    if let Some(reason) = inspector.error() {
+        return Some(reason)
+    }
+    if !result.sender_approved || result.prefix_end != policy.prefix_end {
+        return Some("validation prefix did not grant the required approvals")
+    }
+    if result.execution_gas > policy.declared_execution_gas {
+        return Some("validation prefix exceeded its declared execution-gas budget")
+    }
+    if result.state_gas > policy.state_gas {
+        return Some("validation prefix exceeded its declared state-gas budget")
+    }
+    if inspector.expiry().is_some_and(|deadline| deadline < timestamp) {
+        return Some("frame transaction expired")
+    }
+    None
+}
+
+/// Executes against fresh state so prefix validation cannot affect the full simulation.
+fn execute_frame_simulation<E: EthCall>(
+    api: &E,
+    tx: &TxEip8141,
+    evm_env: EvmEnvFor<E::Evm>,
+    state_provider: &impl EvmStateProvider,
+    max_cost: U256,
+    prefix_shape: Option<FrameSimulationPrefixShape>,
+) -> Result<FrameSimulationResult, E::Error> {
+    let execution_tx_env = TxEnvFor::<E::Evm>::from_recovered_tx_with_gas_params(
+        tx,
+        tx.sender,
+        &evm_env.cfg_env.gas_params,
+    );
+    let execution_db =
+        State::builder().with_database(StateProviderDatabase::new(state_provider)).build();
+    let mut evm = api.evm_config().evm_with_env(execution_db, evm_env);
+    let execution_result = match evm.transact(execution_tx_env) {
+        Ok(result) => result.result,
+        Err(error) => return Err(E::Error::from_evm_err(error)),
+    };
+
+    let revm::context_interface::result::ExecutionResult::FrameTransaction {
+        gas,
+        payer,
+        frame_receipts,
+        ..
+    } = execution_result
+    else {
+        return Err(E::Error::from_eth_err(EthApiError::EvmCustom(
+            "frame transaction execution returned a non-frame result".into(),
+        )))
+    };
+    let frames = frame_receipts
+        .into_iter()
+        .map(|receipt| FrameSimulationFrameResult {
+            execution_gas: receipt.gas_used.execution,
+            state_gas: receipt.gas_used.state,
+            status: receipt.status,
+        })
+        .collect::<Vec<_>>();
+
+    Ok(FrameSimulationResult {
+        valid: true,
+        max_cost,
+        prefix_shape,
+        payer: Some(payer),
+        violation: None,
+        gas_used: Some(gas.frame_tx_gas_used()),
+        frames: Some(frames),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy_primitives::Address;
+
+    #[test]
+    fn frame_prefix_requires_approvals_and_separate_gas_budgets() {
+        let policy = FrameValidationPolicy {
+            prefix_end: 1,
+            deploy_index: None,
+            expiry_index: None,
+            recent_root: None,
+            declared_execution_gas: 100,
+            state_gas: 50,
+        };
+        let inspector = FrameValidationInspector::new(Address::ZERO, policy.clone());
+        let valid = FrameValidationResult {
+            payer: Address::ZERO,
+            max_cost: U256::ZERO,
+            prefix_end: policy.prefix_end,
+            sender_approved: true,
+            signature_gas: 0,
+            execution_gas: policy.declared_execution_gas,
+            state_gas: policy.state_gas,
+        };
+        for (result, violation) in [
+            (valid.clone(), None),
+            (
+                FrameValidationResult { sender_approved: false, ..valid.clone() },
+                Some("validation prefix did not grant the required approvals"),
+            ),
+            (
+                FrameValidationResult { prefix_end: 0, ..valid.clone() },
+                Some("validation prefix did not grant the required approvals"),
+            ),
+            (
+                FrameValidationResult { execution_gas: 101, state_gas: 51, ..valid.clone() },
+                Some("validation prefix exceeded its declared execution-gas budget"),
+            ),
+            (
+                FrameValidationResult { state_gas: 51, ..valid },
+                Some("validation prefix exceeded its declared state-gas budget"),
+            ),
+        ] {
+            assert_eq!(
+                frame_simulation_prefix_violation(&result, &policy, &inspector, 0),
+                violation
+            );
+        }
     }
 }
