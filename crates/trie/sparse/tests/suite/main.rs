@@ -259,6 +259,7 @@ sparse_trie_tests! {
     // root
     test_root_empty_trie,
     test_root_cached_returns_without_recomputation,
+    test_root_cached_across_subtrie_updates,
     test_root_after_single_leaf_update,
     test_root_deterministic_across_update_orders,
     test_root_handles_small_root_node_without_hash,
