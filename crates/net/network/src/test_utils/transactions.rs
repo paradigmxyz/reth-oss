@@ -65,7 +65,11 @@ pub fn buffer_hash_to_tx_fetcher(
         peer_id,
         [AnnouncedTransaction {
             hash,
-            metadata: tx_encoded_length.map(|size| TransactionMetadata { tx_type: 0, size }),
+            metadata: tx_encoded_length.map(|size| TransactionMetadata {
+                tx_type: 0,
+                size,
+                source_nonce: None,
+            }),
         }],
     );
 }

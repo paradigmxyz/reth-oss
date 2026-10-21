@@ -179,6 +179,8 @@ mod tests {
         assert_eq!(Protocol::eth(EthVersion::Eth69).messages(), 18);
         assert_eq!(Protocol::eth(EthVersion::Eth70).messages(), 18);
         assert_eq!(Protocol::eth(EthVersion::Eth71).messages(), 20);
+        assert_eq!(Protocol::eth(EthVersion::Eth72).messages(), 22);
+        assert_eq!(Protocol::eth(EthVersion::Eth73).messages(), 22);
         assert_eq!(Protocol::snap_2().messages(), 10);
     }
 }

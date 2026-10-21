@@ -1,9 +1,11 @@
 //! Ordered transaction announcements used by the transaction manager and fetcher.
 
 use super::constants::SOFT_LIMIT_COUNT_HASHES_IN_NEW_POOLED_TRANSACTIONS_BROADCAST_MESSAGE;
-use alloy_primitives::{map::B256Set, TxHash, B128};
+use alloy_consensus::constants::EIP4844_TX_TYPE_ID;
+use alloy_primitives::{map::B256Set, Address, TxHash, B128};
 use derive_more::IntoIterator;
 use reth_eth_wire::{EthVersion, HandleMempoolData, NewPooledTransactionHashes};
+use reth_transaction_pool::PoolTransaction;
 
 /// An announcement with unique hashes in the order supplied by the peer.
 ///
@@ -22,7 +24,7 @@ impl TransactionAnnouncement {
     /// The scratch set is cleared before use and its allocation is kept for subsequent messages,
     /// unless an oversized announcement grew it past twice the announcement soft limit.
     ///
-    /// Returns an error if the hash, type and size arrays have different lengths.
+    /// Returns an error if any per-transaction metadata arrays have different lengths.
     pub fn from_message(
         msg: &NewPooledTransactionHashes,
         seen: &mut B256Set,
@@ -33,6 +35,17 @@ impl TransactionAnnouncement {
                 (Some((msg.types.as_slice(), msg.sizes.as_slice())), None)
             }
             NewPooledTransactionHashes::Eth72(msg) => {
+                (Some((msg.types.as_slice(), msg.sizes.as_slice())), msg.cell_mask)
+            }
+            NewPooledTransactionHashes::Eth73(msg) => {
+                for len in [msg.tx_sources.len(), msg.tx_nonces.len()] {
+                    if len != msg.hashes.len() {
+                        return Err(alloy_rlp::Error::ListLengthMismatch {
+                            expected: msg.hashes.len(),
+                            got: len,
+                        })
+                    }
+                }
                 (Some((msg.types.as_slice(), msg.sizes.as_slice())), msg.cell_mask)
             }
         };
@@ -56,6 +69,12 @@ impl TransactionAnnouncement {
                 metadata: metadata.map(|(types, sizes)| TransactionMetadata {
                     tx_type: types[index],
                     size: sizes[index],
+                    source_nonce: match msg {
+                        NewPooledTransactionHashes::Eth73(msg) => {
+                            Some((msg.tx_sources[index], msg.tx_nonces[index]))
+                        }
+                        _ => None,
+                    },
                 }),
             },
         ));
@@ -126,6 +145,20 @@ pub struct TransactionMetadata {
     pub tx_type: u8,
     /// The announced encoded transaction size in bytes.
     pub size: usize,
+    /// Unverified source address and nonce supplied by an eth/73 peer.
+    pub source_nonce: Option<(Address, u64)>,
+}
+
+impl TransactionMetadata {
+    /// Checks eth/73 metadata against a transaction whose sender has been recovered.
+    pub(crate) fn matches_transaction(&self, tx: &impl PoolTransaction) -> bool {
+        // Sparse blob responses omit cells, so their encoded size differs from the full
+        // sidecar size advertised in eth/72 and later announcements.
+        let size_matches = tx.ty() == EIP4844_TX_TYPE_ID || self.size == tx.encoded_length();
+        self.tx_type == tx.ty() &&
+            self.source_nonce == Some((tx.sender(), tx.nonce())) &&
+            size_matches
+    }
 }
 
 /// Scratch capacity kept between messages. Only oversized announcements grow the set past this
@@ -173,8 +206,9 @@ mod tests {
             if msg.version().has_eth68_metadata() {
                 assert_eq!(
                     metadata,
-                    [(1, 100), (2, 200), (4, 400)]
-                        .map(|(tx_type, size)| Some(TransactionMetadata { tx_type, size }))
+                    [(1, 100), (2, 200), (4, 400)].map(|(tx_type, size)| Some(
+                        TransactionMetadata { tx_type, size, source_nonce: None }
+                    ))
                 );
             } else {
                 assert_eq!(metadata, [None; 3]);
@@ -240,5 +274,40 @@ mod tests {
             NewPooledTransactionHashes::Eth66(vec![B256::repeat_byte(2); 4 * full_len].into());
         assert_eq!(TransactionAnnouncement::from_message(&oversized, &mut seen).unwrap().len(), 1);
         assert_eq!(seen.capacity(), 0);
+    }
+
+    #[test]
+    fn eth73_dedup_and_filters_preserve_source_nonce() {
+        let hashes = [B256::repeat_byte(1), B256::repeat_byte(2)];
+        let sources = [Address::repeat_byte(1), Address::repeat_byte(2)];
+        let mut msg = reth_eth_wire::NewPooledTransactionHashes73 {
+            types: vec![2, 2, 2],
+            sizes: vec![100, 200, 300],
+            hashes: vec![hashes[0], hashes[1], hashes[0]],
+            tx_sources: vec![sources[0], sources[1], sources[1]],
+            tx_nonces: vec![1, 2, 3],
+            cell_mask: Some(B128::repeat_byte(1)),
+        };
+        let mut normalized =
+            TransactionAnnouncement::from_message(&msg.clone().into(), &mut B256Set::default())
+                .unwrap();
+        assert_eq!(normalized.version(), EthVersion::Eth73);
+        assert_eq!(normalized.len(), 2);
+        assert_eq!(
+            normalized.iter().next().unwrap().metadata.unwrap().source_nonce,
+            Some((sources[0], 1))
+        );
+        normalized.retain_by_hash(|hash| *hash == hashes[1]);
+        assert_eq!(
+            normalized.iter().next().unwrap().metadata.unwrap().source_nonce,
+            Some((sources[1], 2))
+        );
+        assert_eq!(normalized.cell_mask(), msg.cell_mask);
+        msg.tx_nonces.pop();
+        assert_eq!(
+            TransactionAnnouncement::from_message(&msg.into(), &mut B256Set::default())
+                .unwrap_err(),
+            alloy_rlp::Error::ListLengthMismatch { expected: 3, got: 2 }
+        );
     }
 }

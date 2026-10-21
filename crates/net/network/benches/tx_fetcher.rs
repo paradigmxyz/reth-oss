@@ -131,7 +131,11 @@ fn announcement_of(txs: &[PooledTransactionVariant]) -> Vec<AnnouncedTransaction
     txs.iter()
         .map(|tx| AnnouncedTransaction {
             hash: *tx.tx_hash(),
-            metadata: Some(TransactionMetadata { tx_type: TX_TYPE, size: TX_SIZE }),
+            metadata: Some(TransactionMetadata {
+                tx_type: TX_TYPE,
+                size: TX_SIZE,
+                source_nonce: None,
+            }),
         })
         .collect()
 }
