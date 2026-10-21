@@ -47,16 +47,33 @@ impl SenderIdentifiers {
     }
 
     /// Returns the internal lane for one sender and canonical nonce-key hash.
+    pub fn keyed_sender_id(&self, address: Address, keys: B256) -> Option<SenderId> {
+        self.keyed_senders.get(&address)?.get(&keys).copied()
+    }
+
+    /// Returns or allocates the internal lane for one sender and canonical nonce-key hash.
     pub fn keyed_sender_id_or_create(&mut self, address: Address, keys: B256) -> SenderId {
-        if let Some(id) =
-            self.keyed_senders.get(&address).and_then(|keys_to_id| keys_to_id.get(&keys))
-        {
-            return *id;
+        if let Some(id) = self.keyed_sender_id(address, keys) {
+            return id;
         }
         let id = self.next_id();
         self.keyed_senders.entry(address).or_default().insert(keys, id);
         self.sender_to_address.insert(id, address);
         id
+    }
+
+    /// Rolls back a new lane when admission fails. IDs are never reused because readers may
+    /// already have observed the provisional mapping.
+    pub(crate) fn remove_keyed_sender_id(&mut self, address: Address, keys: B256, id: SenderId) {
+        let Some(lanes) = self.keyed_senders.get_mut(&address) else { return };
+        if lanes.get(&keys) != Some(&id) {
+            return
+        }
+        lanes.remove(&keys);
+        if lanes.is_empty() {
+            self.keyed_senders.remove(&address);
+        }
+        self.sender_to_address.remove(&id);
     }
 
     /// Returns every tracked nonce-domain lane for an address.
@@ -160,6 +177,26 @@ impl TransactionId {
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
+
+    #[test]
+    fn rolling_back_keyed_lane_preserves_other_domains_and_never_reuses_ids() {
+        let mut ids = SenderIdentifiers::default();
+        let address = Address::repeat_byte(1);
+        let legacy = ids.sender_id_or_create(address);
+        let key = B256::repeat_byte(1);
+        let other_key = B256::repeat_byte(2);
+        let rejected = ids.keyed_sender_id_or_create(address, key);
+        let other = ids.keyed_sender_id_or_create(address, other_key);
+
+        ids.remove_keyed_sender_id(address, key, other);
+        assert_eq!(ids.keyed_sender_id(address, key), Some(rejected));
+        ids.remove_keyed_sender_id(address, key, rejected);
+        assert_eq!(ids.keyed_sender_id(address, key), None);
+        assert_eq!(ids.address(&rejected), None);
+        assert_eq!(ids.sender_id(&address), Some(legacy));
+        assert_eq!(ids.keyed_sender_id(address, other_key), Some(other));
+        assert_ne!(ids.keyed_sender_id_or_create(address, key), rejected);
+    }
 
     #[test]
     fn test_transaction_id_new() {

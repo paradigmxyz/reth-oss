@@ -13,7 +13,8 @@ use reth_transaction_pool::{
     maintain::MAX_QUEUED_TRANSACTION_LIFETIME,
     pool::{NEW_TX_LISTENER_BUFFER_SIZE, PENDING_TX_LISTENER_BUFFER_SIZE},
     validate::DEFAULT_MAX_TX_INPUT_BYTES,
-    LocalTransactionConfig, PoolConfig, PriceBumpConfig, SubPoolLimit, DEFAULT_PRICE_BUMP,
+    LocalTransactionConfig, PoolConfig, PriceBumpConfig, SubPoolLimit,
+    DEFAULT_MAX_FRAME_UNPAID_VALIDATION_ATTEMPTS, DEFAULT_PRICE_BUMP,
     DEFAULT_TXPOOL_ADDITIONAL_VALIDATION_TASKS, MAX_NEW_PENDING_TXS_NOTIFICATIONS,
     REPLACE_BLOB_PRICE_BUMP, TXPOOL_MAX_ACCOUNT_SLOTS_PER_SENDER,
     TXPOOL_SUBPOOL_MAX_SIZE_MB_DEFAULT, TXPOOL_SUBPOOL_MAX_TXS_DEFAULT,
@@ -58,6 +59,7 @@ pub struct DefaultTxPoolValues {
     transactions_backup_path: Option<PathBuf>,
     disable_transactions_backup: bool,
     max_batch_size: usize,
+    max_frame_unpaid_validation_attempts: usize,
 }
 
 impl DefaultTxPoolValues {
@@ -250,6 +252,12 @@ impl DefaultTxPoolValues {
         self.max_batch_size = v;
         self
     }
+
+    /// Set the default limit on consecutive unpaid frame-validation attempts.
+    pub const fn with_max_frame_unpaid_validation_attempts(mut self, v: usize) -> Self {
+        self.max_frame_unpaid_validation_attempts = v;
+        self
+    }
 }
 
 impl Default for DefaultTxPoolValues {
@@ -285,6 +293,7 @@ impl Default for DefaultTxPoolValues {
             transactions_backup_path: None,
             disable_transactions_backup: false,
             max_batch_size: 1,
+            max_frame_unpaid_validation_attempts: DEFAULT_MAX_FRAME_UNPAID_VALIDATION_ATTEMPTS,
         }
     }
 }
@@ -414,6 +423,11 @@ pub struct TxPoolArgs {
     /// Max batch size for transaction pool insertions
     #[arg(long = "txpool.max-batch-size", value_parser = RangedU64ValueParser::<usize>::new().range(1..), default_value_t = DefaultTxPoolValues::get_global().max_batch_size)]
     pub max_batch_size: usize,
+
+    /// Maximum consecutive block-building attempts in which a public frame transaction fails to
+    /// approve payment before eviction. Successful execution resets the count.
+    #[arg(long = "txpool.max-frame-unpaid-validation-attempts", value_parser = RangedU64ValueParser::<usize>::new().range(1..), default_value_t = DefaultTxPoolValues::get_global().max_frame_unpaid_validation_attempts)]
+    pub max_frame_unpaid_validation_attempts: usize,
 }
 
 impl TxPoolArgs {
@@ -467,6 +481,7 @@ impl Default for TxPoolArgs {
             transactions_backup_path,
             disable_transactions_backup,
             max_batch_size,
+            max_frame_unpaid_validation_attempts,
         } = DefaultTxPoolValues::get_global().clone();
         Self {
             pending_max_count,
@@ -499,6 +514,7 @@ impl Default for TxPoolArgs {
             transactions_backup_path,
             disable_transactions_backup,
             max_batch_size,
+            max_frame_unpaid_validation_attempts,
         }
     }
 }
@@ -543,6 +559,7 @@ impl RethTransactionPoolConfig for TxPoolArgs {
             max_new_pending_txs_notifications: self.max_new_pending_txs_notifications,
             max_queued_lifetime: self.max_queued_lifetime,
             max_inflight_delegated_slot_limit: default_config.max_inflight_delegated_slot_limit,
+            max_frame_unpaid_validation_attempts: self.max_frame_unpaid_validation_attempts,
         }
     }
 
@@ -570,6 +587,26 @@ mod tests {
         let default_args = TxPoolArgs::default();
         let args = CommandParser::<TxPoolArgs>::parse_from(["reth"]).args;
         assert_eq!(args, default_args);
+    }
+
+    #[test]
+    fn frame_unpaid_validation_attempt_limit() {
+        let defaults = CommandParser::<TxPoolArgs>::parse_from(["reth"]).args;
+        assert_eq!(defaults.pool_config().max_frame_unpaid_validation_attempts, 1);
+
+        let args = CommandParser::<TxPoolArgs>::parse_from([
+            "reth",
+            "--txpool.max-frame-unpaid-validation-attempts",
+            "3",
+        ])
+        .args;
+        assert_eq!(args.pool_config().max_frame_unpaid_validation_attempts, 3);
+        assert!(CommandParser::<TxPoolArgs>::try_parse_from([
+            "reth",
+            "--txpool.max-frame-unpaid-validation-attempts",
+            "0",
+        ])
+        .is_err());
     }
 
     #[test]
@@ -639,6 +676,7 @@ mod tests {
             transactions_backup_path: Some(PathBuf::from("/tmp/txpool-backup")),
             disable_transactions_backup: false,
             max_batch_size: 10,
+            max_frame_unpaid_validation_attempts: 1,
         };
 
         let parsed_args = CommandParser::<TxPoolArgs>::parse_from([

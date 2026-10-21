@@ -58,7 +58,8 @@ use crate::{
         TransactionListenerKind,
     },
     validate::{
-        FrameValidation, TransactionValidationOutcome, TransactionValidator, ValidPoolTransaction,
+        FrameDependencies, FrameValidation, TransactionValidationOutcome, TransactionValidator,
+        ValidPoolTransaction,
     },
     AddedTransactionOutcome, AllTransactionsEvents,
 };
@@ -509,6 +510,18 @@ pub trait TransactionPool: Clone + Debug + Send + Sync {
         hashes: Vec<TxHash>,
     ) -> Vec<Arc<ValidPoolTransaction<Self::Transaction>>>;
 
+    /// Records whether a public frame transaction approved payment during block building.
+    ///
+    /// Failed attempts count towards the pool's unpaid-validation limit; approval resets the
+    /// count. Implementations must ignore results for transactions that have since left the pool
+    /// or been replaced or revalidated. Custom pools may supply their own eviction policy.
+    fn on_frame_validation_result(
+        &self,
+        _transaction: &Arc<ValidPoolTransaction<Self::Transaction>>,
+        _approved: bool,
+    ) {
+    }
+
     /// Removes all transactions corresponding to the given hashes.
     ///
     /// Also removes all _dependent_ transactions.
@@ -804,6 +817,9 @@ pub trait TransactionPoolExt: TransactionPool {
 
     /// Updates the head with all touched state addresses, including destroyed accounts.
     ///
+    /// The addresses must cover storage changes as well as changes to account information. Public
+    /// frame pools use them to select validation prefixes affected by the update.
+    ///
     /// Pools supporting public frames must override this and
     /// [`Self::revalidate_frame_transactions`]; the defaults preserve non-frame pool behavior.
     fn on_canonical_state_change_with_touched_accounts(
@@ -831,6 +847,20 @@ pub trait TransactionPoolExt: TransactionPool {
 
     /// Maintenance function to cleanup blobs that are no longer needed.
     fn cleanup_blobs(&self);
+
+    /// Updates the head with the complete changes to account information, code, and storage slots.
+    ///
+    /// Unlike address-only updates, storage changes identify individual slots so a write to a
+    /// shared contract does not require revalidating frames that read other slots. Include
+    /// destroyed accounts in `dependencies.accounts` even if individual deleted slots are unknown.
+    /// The default falls back to a full canonical update.
+    fn on_canonical_state_change_with_dependencies(
+        &self,
+        update: CanonicalStateUpdate<'_, Self::Block>,
+        _dependencies: &FrameDependencies,
+    ) {
+        self.on_canonical_state_change(update);
+    }
 }
 
 /// Extension for [`TransactionPool`] that exposes the pool's underlying [`TransactionValidator`].
@@ -1859,7 +1889,9 @@ impl<T: InMemorySize> InMemorySize for EthPooledTransaction<T> {
                     metadata.dependencies.accounts.capacity() * std::mem::size_of::<Address>() +
                     metadata.dependencies.code.capacity() * std::mem::size_of::<Address>() +
                     metadata.dependencies.storage.capacity() *
-                        std::mem::size_of::<(Address, U256)>()
+                        std::mem::size_of::<(Address, U256)>() +
+                    metadata.recent_root_dependencies.capacity() *
+                        std::mem::size_of::<crate::validate::RecentRootDependency>()
             })
     }
 }

@@ -30,12 +30,24 @@ pub struct FrameValidationInspector {
     accounts: BTreeSet<Address>,
     code: BTreeSet<Address>,
     storage: BTreeSet<(Address, U256)>,
+    recent_root_storage: BTreeSet<U256>,
     expiry: Option<u64>,
 }
 
 impl FrameValidationInspector {
     /// Creates a fresh inspector for one structurally checked transaction.
-    pub const fn new(sender: Address, policy: FrameValidationPolicy) -> Self {
+    pub fn new(sender: Address, policy: FrameValidationPolicy) -> Self {
+        let recent_root_storage = policy
+            .recent_root
+            .as_ref()
+            .map(|verifier| {
+                verifier
+                    .dependencies()
+                    .into_iter()
+                    .map(|dependency| dependency.storage_key)
+                    .collect()
+            })
+            .unwrap_or_default();
         Self {
             sender,
             policy,
@@ -44,6 +56,7 @@ impl FrameValidationInspector {
             accounts: BTreeSet::new(),
             code: BTreeSet::new(),
             storage: BTreeSet::new(),
+            recent_root_storage,
             expiry: None,
         }
     }
@@ -61,7 +74,8 @@ impl FrameValidationInspector {
     /// Returns the state dependencies observed during prefix execution.
     pub fn dependencies(&self) -> FrameDependencies {
         FrameDependencies {
-            accounts: self.accounts.iter().copied().chain([self.sender]).collect(),
+            // Sender and payer account dependencies are indexed from FrameValidation itself.
+            accounts: self.accounts.iter().copied().collect(),
             code: self.code.iter().copied().collect(),
             storage: self.storage.iter().copied().collect(),
         }
@@ -94,12 +108,6 @@ impl FrameValidationInspector {
                     interp.input.bytecode_address() == Some(&RECENT_ROOT_ADDRESS) &&
                     interp.bytecode.bytecode_slice() == RECENT_ROOT_CODE.as_ref()
             })
-    }
-
-    fn is_recent_root_storage_slot(&self, slot: U256) -> bool {
-        self.policy.recent_root.as_ref().is_some_and(|verifier| {
-            verifier.references.iter().any(|reference| reference.dependency().storage_key == slot)
-        })
     }
 
     /// Read through the journal without changing warm/cold access accounting.
@@ -203,12 +211,17 @@ where
             0xf0 | 0xf5 | 0xf6 if !deploying => {
                 self.reject("code installation outside deploy frame")
             }
+            0xf0 | 0xf5 if interp.stack.data().last().is_some_and(|value| !value.is_zero()) => {
+                // CREATE can fail on insufficient caller balance before the create hook runs.
+                // Reject the endowment before even a caught failure can read helper balances.
+                self.reject("value transfer in validation prefix")
+            }
             0x54 | 0x55 => {
                 if recent_root {
                     if opcode == 0x55 {
                         self.reject("recent root verifier attempted a storage write")
                     } else if let Some(slot) = interp.stack.data().last() {
-                        if self.is_recent_root_storage_slot(*slot) {
+                        if self.recent_root_storage.contains(slot) {
                             self.storage.insert((RECENT_ROOT_ADDRESS, *slot));
                         } else {
                             self.reject("recent root verifier accessed an undeclared storage slot")
@@ -304,6 +317,10 @@ where
         if !self.deploying(ctx) {
             self.reject("creation outside deploy frame");
         }
+        // A factory's balance must not become a shared validation dependency.
+        if !inputs.value().is_zero() {
+            self.reject("value transfer in validation prefix");
+        }
         match Self::account(ctx, inputs.caller()) {
             Ok(info) if inputs.created_address(info.nonce) == self.sender => {}
             Ok(_) => self.reject("deploy frame created an account other than sender"),
@@ -322,7 +339,7 @@ mod tests {
     use super::*;
     use alloy_consensus::TxEip8141;
     use alloy_eips::eip8141::{Frame, FrameAddress, FrameLimits, FrameMode};
-    use alloy_primitives::Bytes;
+    use alloy_primitives::{Bytes, B256};
     use revm::{
         context::{transaction::FrameTransaction, Context, ContextSetters, TxEnv},
         context_interface::{local::FrameTransactionRuntime, ContextTr, JournalTr},
@@ -393,6 +410,137 @@ mod tests {
         assert!(inspector.error().is_none());
         assert!(inspector.dependencies().accounts.contains(&factory));
         assert!(ctx.journal().evm_state().is_empty());
+    }
+
+    #[test]
+    fn deploy_rejects_funded_creation_even_before_create_hook() {
+        let factory = Address::repeat_byte(2);
+        let helper = Address::repeat_byte(3);
+        for opcode in [0xf0, 0xf5] {
+            for endowment in [0, 1] {
+                // An unfunded helper can catch CREATE's balance failure without reaching
+                // the create hook. The factory can then deploy the sender with zero value.
+                // Reject the helper balance dependency while allowing zero-value deployment.
+                let initcode = [
+                    0x60, 0x06, 0x60, 0x0a, 0x5f, 0x39, 0x60, 0x06, 0x5f, 0xf3, 0x60, 0x03, 0x5f,
+                    0x5f, 0xaa, 0x00,
+                ];
+                let create2 = endowment == 0 && opcode == 0xf5;
+                let sender = if create2 {
+                    factory.create2_from_code(B256::ZERO, initcode)
+                } else {
+                    factory.create(0)
+                };
+                let mut code = Vec::new();
+                let mut helper_code = Vec::new();
+                if endowment != 0 {
+                    if opcode == 0xf5 {
+                        helper_code.push(0x5f); // salt
+                    }
+                    helper_code
+                        .extend_from_slice(&[0x5f, 0x5f, 0x60, endowment, opcode, 0x50, 0x00]);
+                    // CALL the helper with no value and a fixed 40,000 gas allowance.
+                    code.extend_from_slice(&[0x5f, 0x5f, 0x5f, 0x5f, 0x5f, 0x73]);
+                    code.extend_from_slice(helper.as_slice());
+                    code.extend_from_slice(&[0x61, 0x9c, 0x40, 0xf1, 0x50]);
+                }
+                let initcode_offset = code.len() + 13 + usize::from(create2);
+                code.extend_from_slice(&[
+                    0x60,
+                    initcode.len() as u8,
+                    0x60,
+                    initcode_offset as u8,
+                    0x5f,
+                    0x39,
+                ]);
+                if create2 {
+                    code.push(0x5f); // salt
+                }
+                code.extend_from_slice(&[
+                    0x60,
+                    initcode.len() as u8,
+                    0x5f,
+                    0x5f,
+                    if create2 { 0xf5 } else { 0xf0 },
+                    0x50,
+                    0x00,
+                ]);
+                code.extend_from_slice(&initcode);
+                let frame_tx = TxEip8141 {
+                    sender,
+                    frames: vec![
+                        Frame {
+                            mode: FrameMode::Default,
+                            target: factory.into(),
+                            limits: FrameLimits { execution: 80_000, state: 500_000 },
+                            ..Default::default()
+                        },
+                        Frame {
+                            mode: FrameMode::Verify,
+                            flags: 3,
+                            limits: FrameLimits { execution: 10_000, state: 0 },
+                            ..Default::default()
+                        },
+                    ],
+                    ..Default::default()
+                };
+                let policy = FrameValidationPolicy::new(&frame_tx, 0).unwrap();
+                let prefix_end = policy.prefix_end;
+                let payload = FrameTransaction {
+                    nonce_keys: None,
+                    nonce_calldata: Vec::new(),
+                    frames: frame_tx.frames.clone(),
+                    signatures: frame_tx.signatures.clone(),
+                    signature_hash: frame_tx.signature_hash(),
+                    max_priority_fee_per_gas: frame_tx.fees.max_priority_fee_per_gas,
+                    max_fee_per_gas: frame_tx.fees.max_fee_per_gas,
+                    max_fee_per_blob_gas: frame_tx.fees.max_fee_per_blob_gas,
+                };
+                let tx = TxEnv::builder()
+                    .tx_type(Some(0x06))
+                    .caller(sender)
+                    .kind(TxKind::Call(sender))
+                    .gas_limit(payload.gas_limit(sender).unwrap())
+                    .gas_priority_fee(Some(0))
+                    .frame_transaction(payload)
+                    .build()
+                    .unwrap();
+                let mut db = CacheDB::<EmptyDB>::default();
+                db.insert_account_info(
+                    factory,
+                    AccountInfo::default().with_code(Bytecode::new_legacy(code.into())),
+                );
+                db.insert_account_info(
+                    helper,
+                    AccountInfo::default().with_code(Bytecode::new_legacy(helper_code.into())),
+                );
+                let inspector = FrameValidationInspector::new(sender, policy);
+                let mut evm = Context::mainnet()
+                    .modify_cfg_chained(|cfg| cfg.set_spec_and_mainnet_gas_params(SpecId::BOGOTA))
+                    .with_db(db)
+                    .build_mainnet_with_inspector(inspector);
+                evm.ctx.set_tx(tx);
+                let mut handler: MainnetHandler<
+                    _,
+                    revm::context::result::EVMError<core::convert::Infallible>,
+                    _,
+                > = MainnetHandler::default();
+                let result = handler.inspect_validate_prefix(&mut evm, prefix_end);
+                if endowment == 0 {
+                    assert!(result.is_ok(), "{result:?}");
+                    assert!(evm.inspector.error().is_none());
+                    assert!(evm.inspector.dependencies().accounts.contains(&factory));
+                } else {
+                    assert_eq!(
+                        evm.inspector.error(),
+                        Some("value transfer in validation prefix"),
+                        "{result:?}",
+                    );
+                    // The rejected instruction never reaches the create hook.
+                    assert!(!evm.inspector.dependencies().accounts.contains(&helper));
+                }
+            }
+        }
     }
 
     #[test]
@@ -537,5 +685,34 @@ mod tests {
         run(&[0x5f, 0x5f, 0x5d, 0x60, 0x03, 0x5f, 0x5f, 0xaa, 0x00], false);
         // A rejected opcode remains sticky even though APPROVE would otherwise succeed.
         run(&[0x42, 0x60, 0x03, 0x5f, 0x5f, 0xaa, 0x00], false);
+    }
+
+    #[test]
+    fn deploy_frame_creation_rejects_factory_value_transfers() {
+        let factory = Address::repeat_byte(2);
+        for scheme in [
+            revm::context_interface::CreateScheme::Create,
+            revm::context_interface::CreateScheme::Create2 { salt: U256::ZERO },
+        ] {
+            for value in [U256::ZERO, U256::from(1)] {
+                let mut inputs = CreateInputs::new(factory, scheme, value, Bytes::new(), 10_000, 0);
+                let sender = inputs.created_address(0);
+                let mut policy = policy();
+                policy.deploy_index = Some(0);
+                let mut inspector = FrameValidationInspector::new(sender, policy);
+                let mut ctx = Context::mainnet();
+                ctx.local_mut().set_frame_transaction(Some(FrameTransactionRuntime::new(sender)));
+
+                let outcome = inspector.create(&mut ctx, &mut inputs);
+                if value.is_zero() {
+                    assert!(outcome.is_none());
+                    assert_eq!(inspector.error(), None);
+                } else {
+                    assert!(outcome.is_some());
+                    assert_eq!(inspector.error(), Some("value transfer in validation prefix"));
+                }
+                assert!(ctx.journal().evm_state().is_empty());
+            }
+        }
     }
 }

@@ -34,6 +34,9 @@ pub const MAX_NEW_PENDING_TXS_NOTIFICATIONS: usize = 200;
 /// Default maximum allowed in flight delegated transactions per account.
 pub const DEFAULT_MAX_INFLIGHT_DELEGATED_SLOTS: usize = 1;
 
+/// Default number of consecutive unpaid frame-validation attempts before eviction.
+pub const DEFAULT_MAX_FRAME_UNPAID_VALIDATION_ATTEMPTS: usize = 1;
+
 /// Configuration options for the Transaction pool.
 #[derive(Debug, Clone)]
 pub struct PoolConfig {
@@ -72,6 +75,9 @@ pub struct PoolConfig {
     ///
     /// This restricts how many executable transaction a delegated sender can stack.
     pub max_inflight_delegated_slot_limit: usize,
+    /// Maximum consecutive block-building attempts in which a public frame transaction fails to
+    /// approve payment before it is evicted. Values below one are treated as one.
+    pub max_frame_unpaid_validation_attempts: usize,
 }
 
 impl PoolConfig {
@@ -129,6 +135,7 @@ impl Default for PoolConfig {
             max_new_pending_txs_notifications: MAX_NEW_PENDING_TXS_NOTIFICATIONS,
             max_queued_lifetime: MAX_QUEUED_TRANSACTION_LIFETIME,
             max_inflight_delegated_slot_limit: DEFAULT_MAX_INFLIGHT_DELEGATED_SLOTS,
+            max_frame_unpaid_validation_attempts: DEFAULT_MAX_FRAME_UNPAID_VALIDATION_ATTEMPTS,
         }
     }
 }

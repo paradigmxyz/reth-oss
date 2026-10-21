@@ -194,8 +194,8 @@ where
         return Err(policy("frame transaction expired"))
     }
     let mut dependencies = inspector.dependencies();
-    dependencies.accounts.push(result.payer);
     dependencies.code.push(result.payer);
+    dependencies.accounts.retain(|address| *address != frame.sender && *address != result.payer);
     let payer = state
         .basic_account(&result.payer)
         .map_err(|_| policy("cannot read payer"))?
@@ -221,6 +221,7 @@ where
             }
         }
     }
+    dependencies.normalize();
     if result.max_cost > payer.balance {
         info!(
             target: "reth::eip8141::pool",

@@ -731,6 +731,11 @@ TxPool:
 
           [default: 1]
 
+      --txpool.max-frame-unpaid-validation-attempts <MAX_FRAME_UNPAID_VALIDATION_ATTEMPTS>
+          Maximum consecutive block-building attempts in which a public frame transaction fails to approve payment before eviction. Successful execution resets the count
+
+          [default: 1]
+
 Builder:
       --builder.extradata <EXTRA_DATA>
           Block extra data set by the payload builder.

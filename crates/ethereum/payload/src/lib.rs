@@ -392,6 +392,9 @@ where
             Err(BlockExecutionError::Validation(BlockValidationError::InvalidTx {
                 error, ..
             })) => {
+                if is_eip8141 && is_unpaid_frame_validation_failure(error.as_invalid_tx_err()) {
+                    pool.on_frame_validation_result(&pool_tx, false);
+                }
                 if error.is_nonce_too_low() {
                     // if the nonce is too low, we can skip this transaction
                     trace!(target: "payload_builder", %error, ?tx_hash, "skipping nonce too low transaction");
@@ -430,6 +433,7 @@ where
             Err(err) => return Err(PayloadBuilderError::evm(err)),
         };
         if is_eip8141 {
+            pool.on_frame_validation_result(&pool_tx, true);
             info!(
                 target: "reth::eip8141::payload",
                 ?tx_hash,
@@ -530,4 +534,92 @@ where
         .with_sidecars(blob_sidecars);
 
     Ok(BuildOutcome::Better { payload, cached_reads })
+}
+
+/// Only approval failures consume the unpaid work allowance. Nonce and block-capacity errors do
+/// not indicate that a validation prefix was executed without payment.
+fn is_unpaid_frame_validation_failure(
+    error: Option<&revm::context_interface::result::InvalidTransaction>,
+) -> bool {
+    matches!(
+        error,
+        Some(revm::context_interface::result::InvalidTransaction::Str(message))
+            if matches!(
+                message.as_ref(),
+                "EIP-8141 VERIFY frame failed" |
+                    "EIP-8141 transaction did not approve a payer" |
+                    "EIP-8141 SENDER frame executed before execution approval"
+            )
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_unpaid_frame_validation_failure;
+    use alloy_eips::eip8141::{Frame, FrameLimits, FrameMode};
+    use alloy_primitives::{Address, TxKind};
+    use revm::{
+        context::{Context, TxEnv},
+        context_interface::{
+            result::{EVMError, InvalidTransaction},
+            transaction::FrameTransaction,
+        },
+        database::{CacheDB, EmptyDB},
+        primitives::hardfork::SpecId,
+        state::{AccountInfo, Bytecode},
+        ExecuteEvm, MainBuilder, MainContext,
+    };
+
+    #[test]
+    fn vm_approval_failures_consume_unpaid_validation_attempts() {
+        let sender = Address::repeat_byte(1);
+        for code in [vec![0x5f, 0x5f, 0xfd], vec![0x00]] {
+            let frame = FrameTransaction {
+                frames: vec![Frame {
+                    mode: FrameMode::Verify,
+                    flags: 3,
+                    limits: FrameLimits { execution: 10_000, state: 0 },
+                    ..Default::default()
+                }],
+                ..Default::default()
+            };
+            let gas_limit = frame.gas_limit(sender).unwrap();
+            let tx = TxEnv::builder()
+                .tx_type(Some(0x06))
+                .caller(sender)
+                .kind(TxKind::Call(sender))
+                .gas_limit(gas_limit)
+                .gas_priority_fee(Some(0))
+                .frame_transaction(frame)
+                .build()
+                .unwrap();
+            let mut db = CacheDB::<EmptyDB>::default();
+            db.insert_account_info(
+                sender,
+                AccountInfo::default().with_code(Bytecode::new_legacy(code.into())),
+            );
+            let mut evm = Context::mainnet()
+                .modify_cfg_chained(|cfg| cfg.set_spec_and_mainnet_gas_params(SpecId::BOGOTA))
+                .with_db(db)
+                .build_mainnet();
+            let EVMError::Transaction(error) = evm.transact(tx).unwrap_err() else {
+                panic!("expected a transaction validation error")
+            };
+            assert!(is_unpaid_frame_validation_failure(Some(&error)), "{error}");
+        }
+    }
+
+    #[test]
+    fn unpaid_frame_failures_exclude_nonce_and_gas_errors() {
+        for error in [
+            InvalidTransaction::NonceTooLow { tx: 0, state: 1 },
+            InvalidTransaction::NonceTooHigh { tx: 1, state: 0 },
+            InvalidTransaction::CallerGasLimitMoreThanBlock,
+            InvalidTransaction::Str("EIP-8250 nonce sequence mismatch".into()),
+            InvalidTransaction::Str("EIP-8141 signature validation failed".into()),
+        ] {
+            assert!(!is_unpaid_frame_validation_failure(Some(&error)));
+        }
+        assert!(!is_unpaid_frame_validation_failure(None));
+    }
 }

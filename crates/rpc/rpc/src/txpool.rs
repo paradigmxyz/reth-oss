@@ -17,9 +17,14 @@ use reth_transaction_pool::{
 };
 use tracing::trace;
 
+mod transaction_key;
+use transaction_key::transaction_key;
+
 /// `txpool` API implementation.
 ///
 /// This type provides the functionality for handling `txpool` related requests.
+/// Nonzero keyed nonce domains use `<nonce_keys_hash>:<sequence>` map keys; the legacy domain
+/// retains decimal nonce keys.
 #[derive(Clone)]
 pub struct TxPoolApi<Pool, Eth> {
     /// An interface to interact with the pool
@@ -73,14 +78,14 @@ where
         Ok(content)
     }
 
-    /// Converts the pool transaction and inserts it into the given map, keyed by its nonce.
+    /// Converts the transaction and indexes it by its nonce domain and sequence.
     #[inline]
     fn insert_by_nonce(
         &self,
         tx: &Pool::Transaction,
         txs: &mut BTreeMap<String, RpcTransaction<Eth::Network>>,
     ) -> Result<(), Eth::Error> {
-        txs.insert(tx.nonce().to_string(), self.converter.fill_pending(tx.clone_into_consensus())?);
+        txs.insert(transaction_key(tx), self.converter.fill_pending(tx.clone_into_consensus())?);
 
         Ok(())
     }
@@ -118,8 +123,9 @@ where
             inspect: &mut BTreeMap<Address, BTreeMap<String, TxpoolInspectSummary>>,
         ) {
             let entry = inspect.entry(tx.sender()).or_default();
+            let key = transaction_key(tx);
             let tx = tx.clone_into_consensus();
-            entry.insert(tx.nonce().to_string(), tx.into_inner().into());
+            entry.insert(key, tx.into_inner().into());
         }
 
         let AllPoolTransactions { pending, queued } = self.pool.all_transactions();
