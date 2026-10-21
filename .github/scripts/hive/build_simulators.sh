@@ -16,7 +16,7 @@ case "${fixture_variant}" in
         ;;
     bogota)
         # Bogota fixtures are not part of the mainnet simulator image release.
-        eels_fixtures="https://github.com/ethereum/execution-specs/releases/download/tests-bogota-devnet@v1.1.0/fixtures_bogota-devnet.tar.gz"
+        eels_fixtures="https://github.com/ethereum/execution-specs/releases/download/tests-bogota-devnet@v1.1.1/fixtures_bogota-devnet.tar.gz"
         eels_branch="devnets/bogota/1"
         eels_build_args=(--sim.buildarg fixtures="${eels_fixtures}" --sim.buildarg branch="${eels_branch}")
         eels_blob_build_args=(--sim.buildarg branch="${eels_branch}")
