@@ -43,9 +43,9 @@ pub use execute::{
     BlockAssembler, BlockAssemblerInput, BlockBuilder, BlockBuilderOutcome, BlockExecutionError,
     BlockExecutionOutput, BlockExecutor, BlockExecutorFactory, BlockTransactionResult,
     BlockValidationError, CommitChanges, Evm, ExecutableTxFor, ExecutableTxParts, Executor,
-    ExecutorTx, FromRecoveredTx, FromTxWithEncoded, GasOutput, InternalBlockExecutionError,
-    IntoTxEnv, InvalidTxError, ReceiptBuilder, ReceiptBuilderCtx, RecoveredTx, TransactionEnvMut,
-    WithTxEnv,
+    ExecutorTx, FrameValidationResult, FromRecoveredTx, FromTxWithEncoded, GasOutput,
+    InternalBlockExecutionError, IntoTxEnv, InvalidTxError, ReceiptBuilder, ReceiptBuilderCtx,
+    RecoveredTx, TransactionEnvMut, WithTxEnv,
 };
 pub use reth_execution_types::{OnStateHook, StateUpdate};
 pub use reth_trie_common::bundle_state::BundleState;

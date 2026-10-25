@@ -31,6 +31,7 @@ use reth_execution_types::BundleSource;
 #[cfg(feature = "std")]
 use reth_primitives_traits::BlockTy;
 
+pub use evm2::ethereum::eip8141::FrameValidationResult;
 pub use reth_execution_errors::{
     BlockExecutionError, BlockValidationError, InternalBlockExecutionError, InvalidTxError,
 };
@@ -103,14 +104,14 @@ pub trait ReceiptBuilder {
     /// Receipt produced by this builder.
     type Receipt: reth_primitives_traits::Receipt;
 
-    /// Builds a receipt for the transaction execution result.
+    /// Builds a receipt, rejecting execution results missing required consensus receipt data.
     fn build_receipt<T: evm2::EvmTypes>(
         &self,
         ctx: ReceiptBuilderCtx<
             <Self::Transaction as TransactionEnvelope>::TxType,
             evm2::TxResult<T>,
         >,
-    ) -> Self::Receipt;
+    ) -> Result<Self::Receipt, BlockExecutionError>;
 }
 
 /// A detached block transaction output containing its raw execution result.
@@ -192,6 +193,27 @@ pub trait Evm {
         transaction: &Recovered<Self::Transaction>,
         observe: impl FnOnce(&evm2::ExecutedTx<'_, '_, Self::EvmTypes>) -> R,
     ) -> Result<R, BlockExecutionError>;
+
+    /// Validates a frame prefix and returns the inspector together with the validation result.
+    ///
+    /// The inspector observes interpreted prefix execution. Prefix writes are discarded on both
+    /// success and error, and the inspector is detached before this method returns.
+    fn validate_frame_prefix_with_inspector<I>(
+        &mut self,
+        _: &Recovered<Self::Transaction>,
+        _: usize,
+        inspector: I,
+    ) -> (I, Result<FrameValidationResult, BlockExecutionError>)
+    where
+        I: evm2::Inspector<Self::EvmTypes>,
+    {
+        (
+            inspector,
+            Err(map_handler_error(HandlerError::InvalidFrameTransaction(
+                "frame prefix validation is not supported",
+            ))),
+        )
+    }
 }
 
 impl<'a, T: evm2::EvmTypes<Tx: Typed2718>> Evm for evm2::Evm<'a, T> {
@@ -224,17 +246,12 @@ impl<'a, T: evm2::EvmTypes<Tx: Typed2718>> Evm for evm2::Evm<'a, T> {
     fn transact_with_inspector<I: evm2::Inspector<T> + 'a>(
         &mut self,
         transaction: &Recovered<Self::Transaction>,
-        inspector: I,
+        mut inspector: I,
     ) -> Result<(I, evm2::TxResultWithState<T>), BlockExecutionError> {
-        // TODO(dani): use either `&mut Inspector` or `clear_inspector_as`.
-        evm2::Evm::set_inspector(self, inspector);
-        let result = evm2::Evm::transact(self, transaction)
+        let result = evm2::Evm::transact_with_inspector(self, transaction, &mut inspector)
             .map(|executed| executed.detach())
             .map_err(map_handler_error);
-        let inspector = self.clear_inspector().expect("inspector was set before execution");
-        // SAFETY: the boxed inspector was created from `I` immediately above and was not replaced.
-        let inspector = unsafe { Box::from_raw(Box::into_raw(inspector).cast::<I>()) };
-        result.map(|result| (*inspector, result))
+        result.map(|result| (inspector, result))
     }
 
     fn set_inspector<I: evm2::Inspector<T> + 'a>(&mut self, inspector: I) {
@@ -284,6 +301,25 @@ impl<'a, T: evm2::EvmTypes<Tx: Typed2718>> Evm for evm2::Evm<'a, T> {
         let observed = observe(&executed);
         drop(executed);
         Ok(observed)
+    }
+
+    fn validate_frame_prefix_with_inspector<I>(
+        &mut self,
+        transaction: &Recovered<Self::Transaction>,
+        prefix_end: usize,
+        mut inspector: I,
+    ) -> (I, Result<FrameValidationResult, BlockExecutionError>)
+    where
+        I: evm2::Inspector<T>,
+    {
+        let result = evm2::Evm::validate_frame_prefix_with_inspector(
+            self,
+            transaction,
+            prefix_end,
+            &mut inspector,
+        )
+        .map_err(map_handler_error);
+        (inspector, result)
     }
 }
 
@@ -1438,10 +1474,10 @@ where
 /// Implementations update the transaction fields only: values derived when the environment was
 /// created (sender, recovered authorities, or other cached metadata) are preserved.
 pub trait TransactionEnvMut: Transaction + Clone {
-    /// Sets the gas limit.
+    /// Sets an ordinary transaction's gas limit. Frame budgets are set per frame.
     fn set_gas_limit(&mut self, gas_limit: u64);
 
-    /// Sets the access list.
+    /// Sets an ordinary transaction's access list. Frame transactions have no access list.
     fn set_access_list(&mut self, access_list: AccessList);
 }
 
@@ -1453,6 +1489,8 @@ impl TransactionEnvMut for evm2::ethereum::TxEnvelope {
             Self::Eip1559(tx) => tx.gas_limit = gas_limit,
             Self::Eip4844(tx) => AsMut::<TxEip4844>::as_mut(tx).gas_limit = gas_limit,
             Self::Eip7702(tx) => tx.gas_limit = gas_limit,
+            // Frame transactions carry independent budgets on each frame.
+            Self::Eip8141(_) => {}
         }
     }
 
@@ -1478,6 +1516,7 @@ impl TransactionEnvMut for evm2::ethereum::TxEnvelope {
             Self::Eip1559(tx) => tx.access_list = access_list,
             Self::Eip4844(tx) => AsMut::<TxEip4844>::as_mut(tx).access_list = access_list,
             Self::Eip7702(tx) => tx.access_list = access_list,
+            Self::Eip8141(_) => {}
         }
     }
 }

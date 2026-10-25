@@ -20,8 +20,10 @@ use alloy_eip7928::{BlockAccessIndex, BlockAccessList};
 use alloy_eips::{eip2718::Typed2718, eip4895::Withdrawal, eip7685::Requests};
 use alloy_primitives::{Address, B256};
 use evm2::{
-    ethereum::TxEnvelope, evm::Bal, interpreter::Host, BaseEvmTypes, Evm, EvmTypes,
-    TxResultWithState,
+    ethereum::{eip8141::FrameGas, TxEnvelope},
+    evm::Bal,
+    interpreter::Host,
+    BaseEvmTypes, Evm, EvmTypes, TxResultWithState,
 };
 use reth_chainspec::EthChainSpec;
 use reth_ethereum_forks::{EthereumHardfork, EthereumHardforks};
@@ -194,6 +196,34 @@ where
             self.evm.state_mut().set_bal_index(BlockAccessIndex::new(index));
         }
     }
+
+    fn validate_transaction_gas_reservations(
+        &mut self,
+        transaction: &R::Transaction,
+    ) -> Result<(), BlockExecutionError> {
+        let Some(frame) = transaction.frame_transaction() else {
+            return self.validate_transaction_gas_limit(transaction.gas_limit());
+        };
+        let gas = FrameGas::calculate(frame, self.evm.version())
+            .map_err(|error| map_transaction_error(error, *transaction.tx_hash()))?;
+        let block_gas_limit = self.evm.block_env().gas_limit.to::<u64>();
+        let separate =
+            [(gas.execution, self.block_regular_gas_used), (gas.state, self.block_state_gas_used)];
+        let combined = [(gas.maximum, self.cumulative_gas_used)];
+        let reservations =
+            if self.separate_block_gas { separate.as_slice() } else { combined.as_slice() };
+        for &(transaction_gas_limit, used) in reservations {
+            let block_available_gas = block_gas_limit.saturating_sub(used);
+            if transaction_gas_limit > block_available_gas {
+                return Err(BlockValidationError::TransactionGasLimitMoreThanAvailableBlockGas {
+                    transaction_gas_limit,
+                    block_available_gas,
+                }
+                .into());
+            }
+        }
+        Ok(())
+    }
 }
 
 impl<'a, T, R> BlockExecutor for EthBlockExecutor<'a, T, R>
@@ -310,7 +340,7 @@ where
     ) -> Result<Option<GasOutput>, BlockExecutionError> {
         let (transaction, tx) = transaction.into_parts();
         self.set_transaction_block_access_index();
-        self.validate_transaction_gas_limit(tx.tx().gas_limit())?;
+        self.validate_transaction_gas_reservations(tx.tx())?;
         let blob_gas_used = tx.tx().blob_gas_used().unwrap_or_default();
         let tx_type = tx.tx().tx_type();
         let Some(outcome) = crate::execution::execute_transaction_with_condition(
@@ -336,7 +366,7 @@ where
             tx_type,
             result: outcome,
             cumulative_gas_used: self.cumulative_gas_used,
-        }));
+        })?);
         Ok(Some(GasOutput::new_with_regular(tx_gas_used, regular_gas_used, state_gas_used)))
     }
 
@@ -346,8 +376,7 @@ where
     ) -> Result<Self::TransactionResultWithState, BlockExecutionError> {
         let (transaction, tx) = transaction.into_parts();
         self.set_transaction_block_access_index();
-        let transaction_gas_limit = tx.tx().gas_limit();
-        self.validate_transaction_gas_limit(transaction_gas_limit)?;
+        self.validate_transaction_gas_reservations(tx.tx())?;
         let blob_gas_used = tx.tx().blob_gas_used().unwrap_or_default();
         let tx_type = tx.tx().tx_type();
         let result = execute_transaction_without_commit(&mut self.evm, &transaction)
@@ -380,7 +409,7 @@ where
             tx_type,
             result: outcome,
             cumulative_gas_used: self.cumulative_gas_used,
-        }));
+        })?);
         Ok(GasOutput::new_with_regular(tx_gas_used, regular_gas_used, state_gas_used))
     }
 
@@ -774,7 +803,11 @@ where
 
     fn after_committed_transaction(&mut self) -> Result<(), BlockExecutionError> {
         if let Some(receipt) = self.inner.receipts.last_mut() {
-            receipt.cumulative_gas_used += self.receipt_gas_used_offset;
+            let cumulative_gas_used = receipt
+                .cumulative_gas_used()
+                .checked_add(self.receipt_gas_used_offset)
+                .ok_or(BlockValidationError::BlockGasExceeded)?;
+            receipt.set_cumulative_gas_used(cumulative_gas_used);
         }
         self.tx_counter += 1;
         while self.worker_segment.is_none() &&
@@ -982,9 +1015,10 @@ fn emit_state(hook: &mut StateUpdateHook, state: StateUpdate) {
 mod tests {
     use super::*;
     use crate::dao_fork;
-    use alloy_consensus::{SignableTransaction, TxEip4844, TxLegacy};
+    use alloy_consensus::{SignableTransaction, TxEip4844, TxEip8141, TxLegacy};
     use alloy_eip7928::BlockAccessIndex;
-    use alloy_primitives::{address, Address, Bytes, Signature, TxKind, B256, U256};
+    use alloy_eips::eip8141::{Frame, FrameLimits, FrameMode};
+    use alloy_primitives::{address, Address, Bytes, Sealable, Signature, TxKind, B256, U256};
     use evm2::{
         bytecode::Bytecode,
         env::BlockEnv,
@@ -1396,11 +1430,33 @@ mod tests {
             receipt_gas += gas.tx_gas_used();
             block_gas += segment_block_gas;
             let receipt = executor.receipts().last().unwrap();
-            assert!(receipt.success);
-            assert_eq!(receipt.cumulative_gas_used, receipt_gas);
+            assert!(receipt.success());
+            assert_eq!(receipt.cumulative_gas_used(), receipt_gas);
         }
         let (output, _) = executor.finish_with_block_access_list().unwrap();
         assert_eq!(output.result.gas_used, block_gas);
+    }
+
+    #[test]
+    fn big_block_receipt_offset_rejects_gas_overflow() {
+        let plan = EthBigBlockPlan::new(vec![segment(0, 1, B256::ZERO)], Vec::new(), 1);
+        let factory = super::super::factory::EthBigBlockExecutorFactory::new(
+            super::super::factory::EthBlockExecutorFactory::new(Arc::new(
+                ChainSpecBuilder::mainnet().paris_activated().build(),
+            )),
+        );
+        let evm = factory
+            .evm_with_env(Db::new(TestDatabase::default()), plan.segments[0].evm_env.clone());
+        let mut executor = factory.create_executor(evm, plan);
+        executor.inner.receipts.push(Receipt::standard(EthTxType::Legacy, true, 1, Vec::new()));
+        executor.receipt_gas_used_offset = u64::MAX;
+
+        assert!(matches!(
+            executor.after_committed_transaction(),
+            Err(BlockExecutionError::Validation(BlockValidationError::BlockGasExceeded))
+        ));
+        assert_eq!(executor.inner.receipts[0].cumulative_gas_used(), 1);
+        assert_eq!(executor.tx_counter, 0);
     }
 
     #[test]
@@ -1460,5 +1516,56 @@ mod tests {
         executor.execute_transaction(blob_tx(0)).expect("seven blobs fit the first segment cap");
         let err = executor.execute_transaction(blob_tx(1)).unwrap_err();
         assert!(err.to_string().contains("too many blobs: have 7, max 6"), "{err}");
+    }
+
+    #[test]
+    fn frame_admission_reserves_execution_and_state_independently() {
+        let factory = super::super::factory::EthBlockExecutorFactory::new(Arc::new(
+            ChainSpecBuilder::mainnet().bogota_activated().build(),
+        ));
+        let env = EthEvmEnv::new(
+            SpecId::BOGOTA,
+            BlockEnv::<BaseEvmTypes> { gas_limit: U256::from(1_000_000), ..Default::default() },
+            1,
+        );
+        let evm = factory.evm_with_env(Db::new(TestDatabase::default()), env);
+        let mut executor = factory.create_executor(evm, segment(0, 1, B256::ZERO).ctx);
+        let payload = TxEip8141 {
+            chain_id: 1,
+            sender: Address::with_last_byte(1),
+            nonce_keys: Some(vec![]),
+            frames: vec![Frame {
+                mode: FrameMode::Verify,
+                flags: 3,
+                limits: FrameLimits { execution: 600_000, state: 600_000 },
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let gas = FrameGas::calculate(&payload, executor.evm.version()).unwrap();
+        let transaction = TransactionSigned::Eip8141(payload.seal_slow());
+        assert!(gas.maximum > 1_000_000);
+        executor.validate_transaction_gas_reservations(&transaction).unwrap();
+        for (execution_used, state_used, required) in
+            [(1_000_001 - gas.execution, 0, gas.execution), (0, 1_000_001 - gas.state, gas.state)]
+        {
+            executor.block_regular_gas_used = execution_used;
+            executor.block_state_gas_used = state_used;
+            let error = executor.validate_transaction_gas_reservations(&transaction).unwrap_err();
+            assert!(matches!(error, BlockExecutionError::Validation(
+                BlockValidationError::TransactionGasLimitMoreThanAvailableBlockGas {
+                    transaction_gas_limit,
+                    block_available_gas,
+                }
+            ) if transaction_gas_limit == required && block_available_gas == required - 1));
+        }
+        executor.separate_block_gas = false;
+        let error = executor.validate_transaction_gas_reservations(&transaction).unwrap_err();
+        assert!(matches!(error, BlockExecutionError::Validation(
+            BlockValidationError::TransactionGasLimitMoreThanAvailableBlockGas {
+                transaction_gas_limit,
+                block_available_gas: 1_000_000,
+            }
+        ) if transaction_gas_limit == gas.maximum));
     }
 }

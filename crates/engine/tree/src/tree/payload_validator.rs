@@ -115,7 +115,7 @@ use alloy_eip7928::{
     bal::{Bal, DecodedBal},
     BlockAccessList,
 };
-use alloy_eips::{eip1898::BlockWithParent, eip4895::Withdrawal, NumHash};
+use alloy_eips::{eip1898::BlockWithParent, eip2718::Typed2718, eip4895::Withdrawal, NumHash};
 use alloy_primitives::{map::B256Set, B256};
 use reth_tasks::LazyHandle;
 
@@ -598,7 +598,16 @@ where
         // Get an iterator over the transactions in the payload
         let txs = self.tx_iterator_for(&input)?;
 
-        let parallel_bal_execution = ensure_ok!(self.bal_path_eligible(env.decoded_bal.as_deref()));
+        let has_frame_transactions = match &input {
+            BlockOrPayload::Payload(payload) => payload.has_eip8141_transactions(),
+            BlockOrPayload::Block(block) => {
+                block.body().transactions().iter().any(Typed2718::is_eip8141)
+            }
+        };
+        // The BAL commit loop receives only aggregate gas limits, so it cannot replay a
+        // frame transaction's separate execution and state reservations.
+        let parallel_bal_execution = !has_frame_transactions &&
+            ensure_ok!(self.bal_path_eligible(env.decoded_bal.as_deref()));
 
         // Prepare the state-root job before execution so it can provide streaming hooks.
         let mut state_root_job =

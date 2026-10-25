@@ -812,8 +812,8 @@ mod tests {
         )
         .expect("EVM execution succeeds");
 
-        assert_eq!(output.result.receipts[0].cumulative_gas_used, 43_106);
-        assert!(output.result.receipts[0].success);
+        assert_eq!(output.result.receipts[0].cumulative_gas_used(), 43_106);
+        assert!(output.result.receipts[0].success());
         assert_eq!(output.account(&contract).unwrap().unwrap().balance, U256::from(1));
         let sender = output.account(&caller).unwrap().unwrap();
         assert_eq!(sender.nonce, 1);
@@ -1071,7 +1071,7 @@ mod tests {
             address: MAINNET_DEPOSIT_CONTRACT_ADDRESS,
             data: deposit,
         });
-        let receipt = Receipt { tx_type: TxType::Legacy, logs: vec![log], ..Default::default() };
+        let receipt = Receipt::standard(TxType::Legacy, false, 0, vec![log]);
 
         let requests = block_requests_from_receipts(
             SpecId::PRAGUE,

@@ -57,10 +57,16 @@ use crate::{
         state::SubPool, BestTransactionFilter, NewTransactionEvent, TransactionEvents,
         TransactionListenerKind,
     },
-    validate::{TransactionValidationOutcome, TransactionValidator, ValidPoolTransaction},
+    validate::{
+        FrameValidation, TransactionValidationOutcome, TransactionValidator, ValidPoolTransaction,
+    },
     AddedTransactionOutcome, AllTransactionsEvents, PriceBumpConfig,
 };
-use alloy_consensus::{error::ValueError, transaction::TxHashRef, BlockHeader, Signed, Typed2718};
+use alloy_consensus::{
+    error::ValueError,
+    transaction::{TxEip8141Variant, TxEip8141WithSidecar, TxHashRef},
+    BlockHeader, Signed, Transaction as _, Typed2718,
+};
 use alloy_eips::{
     eip2718::{Decodable2718, Encodable2718, WithEncoded},
     eip2930::AccessList,
@@ -796,6 +802,12 @@ pub trait TransactionPoolExt: TransactionPool {
     /// the sidecar is still available.
     fn on_canonical_state_change(&self, update: CanonicalStateUpdate<'_, Self::Block>);
 
+    /// Revalidates frames withdrawn by canonical state updates.
+    /// Also call this after changing the head through [`Self::set_block_info`].
+    fn revalidate_frame_transactions(&self) -> impl Future<Output = ()> + Send {
+        async {}
+    }
+
     /// Updates the accounts in the pool
     fn update_accounts(&self, accounts: Vec<ChangedAccount>);
 
@@ -1349,6 +1361,24 @@ pub trait PoolTransaction:
     /// Associated type representing the recovered pooled variant of the transaction.
     type Pooled: TryFrom<Self::Consensus, Error = Self::TryFromConsensusError> + SignedTransaction;
 
+    /// Returns whether the transaction references blobs and therefore requires a sidecar in its
+    /// pooled representation.
+    fn is_blob_transaction(&self) -> bool {
+        self.is_eip4844() || self.blob_versioned_hashes().is_some_and(|hashes| !hashes.is_empty())
+    }
+
+    /// Gas required in each block dimension for admission under the pool's gas schedule.
+    fn gas_reservations(&self) -> (u64, u64) {
+        let gas = self.gas_limit();
+        match self.frame_transaction() {
+            Some(tx) => {
+                let state = tx.total_frame_state_gas_limit();
+                (gas.checked_sub(state).unwrap_or(u64::MAX), state)
+            }
+            None => (gas, gas),
+        }
+    }
+
     /// Define a method to convert from the `Consensus` type to `Self`
     ///
     /// This conversion may fail for transactions that are valid for inclusion in blocks
@@ -1487,6 +1517,24 @@ pub trait PoolTransaction:
     /// The Sender of the transaction.
     fn sender(&self) -> Address;
 
+    /// Returns EIP-8250 nonce keys, or `None` for a legacy payload.
+    fn eip8250_nonce_keys(&self) -> Option<&[U256]> {
+        None
+    }
+
+    /// Returns frame validation metadata when attached.
+    fn frame_validation(&self) -> Option<&Arc<FrameValidation>> {
+        None
+    }
+
+    /// Attaches frame validation metadata.
+    fn set_frame_validation(
+        &mut self,
+        _metadata: Arc<FrameValidation>,
+    ) -> Result<(), &'static str> {
+        Err("frame validation metadata is unsupported")
+    }
+
     /// Reference to the Sender of the transaction.
     fn sender_ref(&self) -> &Address;
 
@@ -1496,6 +1544,7 @@ pub trait PoolTransaction:
     /// For legacy transactions: `gas_price * gas_limit + tx_value`.
     /// For EIP-4844 blob transactions: `max_fee_per_gas * gas_limit + tx_value +
     /// max_blob_fee_per_gas * blob_gas_used`.
+    /// Frame transactions reserve their total `max_fee` budget, including blob fees.
     fn cost(&self) -> &U256;
 
     /// Returns the length of the rlp encoded transaction object
@@ -1531,15 +1580,26 @@ pub trait PoolTransaction:
         replacement: &Self,
         price_bumps: &PriceBumpConfig,
     ) -> bool {
+        if self.frame_transaction().is_some() || replacement.frame_transaction().is_some() {
+            return crate::ordering::frame_replacement_underpriced(
+                self,
+                replacement,
+                if self.is_blob_transaction() {
+                    price_bumps.replace_blob_tx_price_bump
+                } else {
+                    price_bumps.default_price_bump
+                },
+            )
+        }
         price_bumps.is_replacement_underpriced(self, replacement)
     }
 
     /// Whether the transaction's nonce must be below [`u64::MAX`] according to EIP-2681.
     ///
-    /// Defaults to `true`. Transactions with alternative nonce semantics can override this
-    /// independently of the sender nonce check in [`Self::requires_nonce_check`].
+    /// Keyed EIP-8250 transactions may use the single-use sentinel. Other transactions default
+    /// to `true`, independently of the sender nonce check in [`Self::requires_nonce_check`].
     fn requires_nonce_bound_check(&self) -> bool {
-        true
+        !self.eip8250_nonce_keys().is_some_and(|keys| !keys.is_empty())
     }
 
     /// Allows to communicate to the pool that the transaction doesn't require a nonce check.
@@ -1572,6 +1632,14 @@ pub trait EthPoolTransaction: PoolTransaction {
         sidecar: Arc<BlobTransactionSidecarVariant>,
     ) -> Option<Recovered<Self::Pooled>>;
 
+    /// Tries to reattach a blob sidecar to any transaction type that carries blobs.
+    fn try_into_pooled_blob(
+        self,
+        sidecar: Arc<BlobTransactionSidecarVariant>,
+    ) -> Option<Recovered<Self::Pooled>> {
+        self.try_into_pooled_eip4844(sidecar)
+    }
+
     /// Tries to convert the `Consensus` type with a blob sidecar into the `Pooled` type.
     ///
     /// Returns `None` if passed transaction is not a blob transaction.
@@ -1580,12 +1648,25 @@ pub trait EthPoolTransaction: PoolTransaction {
         sidecar: BlobTransactionSidecarVariant,
     ) -> Option<Self>;
 
+    /// Tries to convert a consensus transaction with its blob sidecar into the pooled type.
+    fn try_from_blob(
+        tx: Recovered<Self::Consensus>,
+        sidecar: BlobTransactionSidecarVariant,
+    ) -> Option<Self> {
+        Self::try_from_eip4844(tx, sidecar)
+    }
+
     /// Validates the blob sidecar of the transaction with the given settings.
     fn validate_blob(
         &self,
         blob: &BlobTransactionSidecarVariant,
         settings: &KzgSettings,
     ) -> Result<(), BlobTransactionValidationError>;
+
+    /// Validates EIP-8141 constraints that do not require frame execution.
+    fn validate_eip8141_structure(&self) -> Result<(), &'static str> {
+        Ok(())
+    }
 }
 
 /// The default [`PoolTransaction`] for the [Pool](crate::Pool) for Ethereum.
@@ -1609,6 +1690,7 @@ pub struct EthPooledTransaction<T = TransactionSigned> {
     /// For legacy transactions: `gas_price * gas_limit + tx_value`.
     /// For EIP-4844 blob transactions: `max_fee_per_gas * gas_limit + tx_value +
     /// max_blob_fee_per_gas * blob_gas_used`.
+    /// Frame transactions reserve their total `max_fee` budget, including blob fees.
     pub cost: U256,
 
     /// This is the RLP length of the transaction, computed when the transaction is added to the
@@ -1627,6 +1709,9 @@ pub struct EthPooledTransaction<T = TransactionSigned> {
     ///
     /// This is shared with the blob sidecar so that availability updates are reflected here.
     pub blob_cell_availability: Option<BlobCellAvailability>,
+
+    /// Optional validation metadata for an EIP-8141 frame transaction.
+    pub frame_validation: Option<Arc<FrameValidation>>,
 }
 
 impl<T: SignedTransaction> EthPooledTransaction<T> {
@@ -1638,18 +1723,23 @@ impl<T: SignedTransaction> EthPooledTransaction<T> {
         let mut blob_cell_availability = None;
         let mut blob_sidecar = EthBlobTransactionSidecar::None;
 
-        let gas_cost = U256::from(transaction.max_fee_per_gas())
-            .saturating_mul(U256::from(transaction.gas_limit()));
-
-        let mut cost = gas_cost.saturating_add(transaction.value());
+        let frame_budget = transaction.frame_transaction().map(|frame| frame.fees.max_fee);
+        let mut cost = frame_budget.unwrap_or_else(|| {
+            transaction
+                .max_fee_per_gas_u256()
+                .saturating_mul(U256::from(transaction.gas_limit()))
+                .saturating_add(transaction.value())
+        });
 
         if let (Some(blob_gas_used), Some(max_fee_per_blob_gas)) =
-            (transaction.blob_gas_used(), transaction.max_fee_per_blob_gas())
+            (transaction.blob_gas_used(), transaction.max_fee_per_blob_gas_u256()) &&
+            transaction.blob_versioned_hashes().is_some_and(|hashes| !hashes.is_empty())
         {
             // Add max blob cost using saturating math to avoid overflow
-            cost = cost.saturating_add(U256::from(
-                max_fee_per_blob_gas.saturating_mul(blob_gas_used as u128),
-            ));
+            if frame_budget.is_none() {
+                cost = cost
+                    .saturating_add(max_fee_per_blob_gas.saturating_mul(U256::from(blob_gas_used)));
+            }
 
             // because the blob sidecar is not included in this transaction variant, mark it as
             // missing
@@ -1666,6 +1756,7 @@ impl<T: SignedTransaction> EthPooledTransaction<T> {
             in_memory_size,
             blob_sidecar,
             blob_cell_availability,
+            frame_validation: None,
         }
     }
 
@@ -1718,6 +1809,28 @@ impl PoolTransaction for EthPooledTransaction {
                 }
                 pooled
             }
+            PooledTransactionVariant::Eip8141(tx) => {
+                let (tx, hash) = tx.into_parts();
+                let (tx, blob) = match tx.into_inner() {
+                    TxEip8141Variant::TxEip8141(tx) => (tx, None),
+                    TxEip8141Variant::TxEip8141WithSidecar(tx) => {
+                        let (tx, sidecar) = tx.into_parts();
+                        (tx, Some(sidecar))
+                    }
+                };
+                let tx =
+                    TransactionSigned::Eip8141(alloy_primitives::Sealed::new_unchecked(tx, hash));
+                let tx = Recovered::new_unchecked(tx, signer);
+                let mut pooled = Self::new(tx, encoded_length);
+                if let (Some(blob), Some(availability)) =
+                    (blob, pooled.blob_cell_availability.clone())
+                {
+                    pooled.blob_sidecar = EthBlobTransactionSidecar::Present(
+                        PooledBlobSidecar::new(blob.into(), availability),
+                    );
+                }
+                pooled
+            }
             tx => {
                 // no blob sidecar
                 let tx = Recovered::new_unchecked(tx.into(), signer);
@@ -1741,6 +1854,29 @@ impl PoolTransaction for EthPooledTransaction {
         self.transaction.signer_ref()
     }
 
+    fn eip8250_nonce_keys(&self) -> Option<&[U256]> {
+        self.transaction.inner().as_eip8141()?.nonce_keys.as_deref()
+    }
+
+    fn frame_validation(&self) -> Option<&Arc<FrameValidation>> {
+        self.frame_validation.as_ref()
+    }
+
+    fn set_frame_validation(&mut self, metadata: Arc<FrameValidation>) -> Result<(), &'static str> {
+        if !self.is_eip8141() {
+            return Err("frame validation metadata requires an EIP-8141 transaction");
+        }
+        if metadata.sender != self.sender() ||
+            metadata.sender_nonce != self.nonce() ||
+            metadata.nonce_keys.as_deref() != self.eip8250_nonce_keys()
+        {
+            return Err("frame validation metadata sender or nonce mismatch");
+        }
+        self.cost = metadata.max_cost;
+        self.frame_validation = Some(metadata);
+        Ok(())
+    }
+
     /// Returns the cost that this transaction is allowed to consume:
     ///
     /// For EIP-1559 transactions: `max_fee_per_gas * gas_limit + tx_value`.
@@ -1748,7 +1884,7 @@ impl PoolTransaction for EthPooledTransaction {
     /// For EIP-4844 blob transactions: `max_fee_per_gas * gas_limit + tx_value +
     /// max_blob_fee_per_gas * blob_gas_used`.
     fn cost(&self) -> &U256 {
-        &self.cost
+        self.frame_validation.as_ref().map_or(&self.cost, |metadata| &metadata.max_cost)
     }
 
     /// Returns the length of the rlp encoded object
@@ -1766,7 +1902,22 @@ impl<T: Typed2718> Typed2718 for EthPooledTransaction<T> {
 impl<T: InMemorySize> InMemorySize for EthPooledTransaction<T> {
     #[inline]
     fn size(&self) -> usize {
-        self.in_memory_size
+        self.in_memory_size +
+            self.frame_validation.as_ref().map_or(0, |metadata| {
+                // Admission metadata can exceed the wire payload for code/storage-heavy prefixes.
+                // Include its allocation in pool pressure accounting without changing encoded
+                // length.
+                std::mem::size_of::<FrameValidation>() +
+                    metadata
+                        .nonce_keys
+                        .as_ref()
+                        .map_or(0, |keys| keys.capacity() * std::mem::size_of::<U256>()) +
+                    2 * std::mem::size_of::<usize>() +
+                    metadata.dependencies.accounts.capacity() * std::mem::size_of::<Address>() +
+                    metadata.dependencies.code.capacity() * std::mem::size_of::<Address>() +
+                    metadata.dependencies.storage.capacity() *
+                        std::mem::size_of::<(Address, U256)>()
+            })
     }
 }
 
@@ -1791,6 +1942,22 @@ impl<T: alloy_consensus::Transaction> alloy_consensus::Transaction for EthPooled
         self.transaction.max_fee_per_gas()
     }
 
+    fn frame_transaction(&self) -> Option<&alloy_consensus::TxEip8141> {
+        self.transaction.frame_transaction()
+    }
+
+    fn max_fee_per_gas_u256(&self) -> U256 {
+        self.transaction.max_fee_per_gas_u256()
+    }
+
+    fn max_priority_fee_per_gas_u256(&self) -> Option<U256> {
+        self.transaction.max_priority_fee_per_gas_u256()
+    }
+
+    fn max_fee_per_blob_gas_u256(&self) -> Option<U256> {
+        self.transaction.max_fee_per_blob_gas_u256()
+    }
+
     fn max_priority_fee_per_gas(&self) -> Option<u128> {
         self.transaction.max_priority_fee_per_gas()
     }
@@ -1801,6 +1968,10 @@ impl<T: alloy_consensus::Transaction> alloy_consensus::Transaction for EthPooled
 
     fn priority_fee_or_price(&self) -> u128 {
         self.transaction.priority_fee_or_price()
+    }
+
+    fn priority_fee_or_price_u256(&self) -> U256 {
+        self.transaction.priority_fee_or_price_u256()
     }
 
     fn effective_gas_price(&self, base_fee: Option<u64>) -> u128 {
@@ -1842,7 +2013,7 @@ impl<T: alloy_consensus::Transaction> alloy_consensus::Transaction for EthPooled
 
 impl EthPoolTransaction for EthPooledTransaction {
     fn take_blob(&mut self) -> EthBlobTransactionSidecar {
-        if self.is_eip4844() {
+        if self.blob_versioned_hashes().is_some_and(|hashes| !hashes.is_empty()) {
             std::mem::replace(&mut self.blob_sidecar, EthBlobTransactionSidecar::Missing)
         } else {
             EthBlobTransactionSidecar::None
@@ -1862,6 +2033,30 @@ impl EthPoolTransaction for EthPooledTransaction {
             .ok()
     }
 
+    fn try_into_pooled_blob(
+        self,
+        sidecar: Arc<BlobTransactionSidecarVariant>,
+    ) -> Option<Recovered<Self::Pooled>> {
+        let (signed_transaction, signer) = self.into_consensus().into_parts();
+        let pooled_transaction = match signed_transaction {
+            TransactionSigned::Eip8141(tx) => {
+                let BlobTransactionSidecarVariant::Eip7594(sidecar) = Arc::unwrap_or_clone(sidecar)
+                else {
+                    return None
+                };
+                let (tx, hash) = tx.into_parts();
+                let tx = TxEip8141WithSidecar::new(tx, sidecar);
+                PooledTransactionVariant::Eip8141(alloy_primitives::Sealed::new_unchecked(
+                    tx.into(),
+                    hash,
+                ))
+            }
+            tx => tx.try_into_pooled_eip4844(Arc::unwrap_or_clone(sidecar)).ok()?.into(),
+        };
+
+        Some(Recovered::new_unchecked(pooled_transaction, signer))
+    }
+
     fn try_from_eip4844(
         tx: Recovered<Self::Consensus>,
         sidecar: BlobTransactionSidecarVariant,
@@ -1870,7 +2065,32 @@ impl EthPoolTransaction for EthPooledTransaction {
         tx.try_into_pooled_eip4844(sidecar)
             .ok()
             .map(|tx| tx.with_signer(signer))
+            .map(|tx| tx.map(Into::into))
             .map(Self::from_pooled)
+    }
+
+    fn try_from_blob(
+        tx: Recovered<Self::Consensus>,
+        sidecar: BlobTransactionSidecarVariant,
+    ) -> Option<Self> {
+        let tx = match tx.into_parts() {
+            (TransactionSigned::Eip8141(tx), signer) => {
+                let BlobTransactionSidecarVariant::Eip7594(sidecar) = sidecar else { return None };
+                let (tx, hash) = tx.into_parts();
+                let tx = TxEip8141WithSidecar::new(tx, sidecar);
+                Recovered::new_unchecked(
+                    PooledTransactionVariant::Eip8141(alloy_primitives::Sealed::new_unchecked(
+                        tx.into(),
+                        hash,
+                    )),
+                    signer,
+                )
+            }
+            (tx, signer) => {
+                tx.try_into_pooled_eip4844(sidecar).ok()?.with_signer(signer).map(Into::into)
+            }
+        };
+        Some(Self::from_pooled(tx))
     }
 
     fn validate_blob(
@@ -1880,7 +2100,22 @@ impl EthPoolTransaction for EthPooledTransaction {
     ) -> Result<(), BlobTransactionValidationError> {
         match self.transaction.inner().as_eip4844() {
             Some(tx) => tx.tx().validate_blob(sidecar, settings),
-            _ => Err(BlobTransactionValidationError::NotBlobTransaction(self.ty())),
+            None => match self.transaction.inner().as_eip8141() {
+                Some(tx) => {
+                    let BlobTransactionSidecarVariant::Eip7594(sidecar) = sidecar else {
+                        return Err(BlobTransactionValidationError::NotBlobTransaction(self.ty()))
+                    };
+                    sidecar.validate(&tx.blob_versioned_hashes, settings)
+                }
+                None => Err(BlobTransactionValidationError::NotBlobTransaction(self.ty())),
+            },
+        }
+    }
+
+    fn validate_eip8141_structure(&self) -> Result<(), &'static str> {
+        match self.transaction.inner().as_eip8141() {
+            Some(tx) => tx.validate(),
+            None => Ok(()),
         }
     }
 }
