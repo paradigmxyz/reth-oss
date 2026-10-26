@@ -8,7 +8,7 @@ use alloy_eips::{
 use alloy_primitives::{Address, Bytes, KECCAK256_EMPTY, U256};
 use evm2::{
     evm::AccountInfo,
-    interpreter::{GasTracker, InstrStop, Interpreter, Message, MessageResult},
+    interpreter::{op, opcode::OpCode, GasTracker, InstrStop, Interpreter, Message, MessageResult},
     DatabaseError, Evm, EvmTypes, Inspector,
 };
 use std::collections::BTreeSet;
@@ -26,6 +26,7 @@ pub struct FrameValidationInspector {
     database_error: Option<DatabaseError>,
     accounts: BTreeSet<Address>,
     code: BTreeSet<Address>,
+    mutable_code: BTreeSet<Address>,
     storage: BTreeSet<(Address, U256)>,
     expiry: Option<u64>,
 }
@@ -41,6 +42,7 @@ impl FrameValidationInspector {
             database_error: None,
             accounts: BTreeSet::new(),
             code: BTreeSet::new(),
+            mutable_code: BTreeSet::new(),
             storage: BTreeSet::new(),
             expiry: None,
         }
@@ -66,6 +68,7 @@ impl FrameValidationInspector {
         FrameDependencies {
             accounts: self.accounts.iter().copied().chain([self.sender]).collect(),
             code: self.code.iter().copied().collect(),
+            mutable_code: self.mutable_code.iter().copied().collect(),
             storage: self.storage.iter().copied().collect(),
         }
     }
@@ -144,6 +147,21 @@ impl FrameValidationInspector {
             self.reject("validation accessed delegated code");
             return false
         }
+        if !(sender_entry && address == self.sender) {
+            let mut instructions = code.original_byte_slice();
+            while let Some((&opcode, rest)) = instructions.split_first() {
+                if opcode == op::SETCODEFROM {
+                    self.reject("validation accessed mutable code");
+                    return false
+                }
+                if matches!(opcode, op::DELEGATECALL | op::CALLCODE) {
+                    self.mutable_code.insert(address);
+                }
+                instructions = rest
+                    .get(usize::from(OpCode::new_or_unknown(opcode).immediate_size())..)
+                    .unwrap_or_default();
+            }
+        }
         true
     }
 
@@ -200,9 +218,17 @@ impl<T: EvmTypes> Inspector<T> for FrameValidationInspector {
             interp.original_bytecode_slice() == EXPIRY_VERIFIER_RUNTIME;
 
         match opcode {
-            0x31 | 0x3a | 0x40 | 0x41 | 0x43..=0x45 | 0x47 | 0x48 | 0x4a | 0xfe | 0xff => {
-                self.reject("banned opcode in validation prefix")
-            }
+            0x31 |
+            0x3a |
+            0x40 |
+            0x41 |
+            0x43..=0x45 |
+            0x47 |
+            0x48 |
+            0x4a |
+            op::SETCODEFROM |
+            0xfe |
+            0xff => self.reject("banned opcode in validation prefix"),
             0x42 if !expiry_timestamp => self.reject("TIMESTAMP outside canonical expiry verifier"),
             0x4b if !recent_root => self.reject("SLOTNUM outside canonical recent root verifier"),
             0x5a if !matches!(
@@ -287,7 +313,7 @@ impl<T: EvmTypes> Inspector<T> for FrameValidationInspector {
         {
             self.reject("recent root verifier runtime does not match canonical code");
         }
-        self.rejected(message)
+        self.rejected::<T>(message)
     }
 
     fn call_end(
@@ -296,7 +322,7 @@ impl<T: EvmTypes> Inspector<T> for FrameValidationInspector {
         message: &Message<T>,
         result: &mut MessageResult<T>,
     ) {
-        if message.depth == 0 && !result.stop.is_ok() {
+        if message.depth == 0 && !result.stop.is_success() {
             self.reject("validation prefix frame failed");
         }
     }
@@ -313,7 +339,7 @@ impl<T: EvmTypes> Inspector<T> for FrameValidationInspector {
         if message.destination != self.sender {
             self.reject("deploy frame created an account other than sender");
         }
-        self.rejected(message)
+        self.rejected::<T>(message)
     }
 }
 
@@ -386,21 +412,35 @@ mod tests {
             error.downcast_ref::<std::io::Error>().unwrap().to_string(),
             "frame account read failed"
         );
-        assert!(inspector.rejected(&Message::<BaseEvmTypes>::default()).is_some());
+        assert!(inspector.rejected::<BaseEvmTypes>(&Message::<BaseEvmTypes>::default()).is_some());
     }
 
     #[test]
     fn rejects_environment_reads_and_requires_immediate_call_after_gas() {
-        for opcode in
-            [0x31, 0x3a, 0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x47, 0x48, 0x4a, 0x4b, 0xfe, 0xff]
-        {
+        for opcode in [
+            0x31,
+            0x3a,
+            0x40,
+            0x41,
+            0x42,
+            0x43,
+            0x44,
+            0x45,
+            0x47,
+            0x48,
+            0x4a,
+            0x4b,
+            op::SETCODEFROM,
+            0xfe,
+            0xff,
+        ] {
             let mut inspector = FrameValidationInspector::new(Address::ZERO, policy());
-            let tx = TxEnv::default();
+            let tx = TxEnv::<BaseEvmTypes>::default();
             let message = Message::<BaseEvmTypes> {
                 code: Bytecode::new_legacy(Bytes::from(vec![opcode])),
                 ..Default::default()
             };
-            let mut interp = Interpreter::new(&tx, &message);
+            let mut interp = Interpreter::<BaseEvmTypes>::new(&tx, &message);
             inspector.step(&mut interp);
             let reason = match opcode {
                 0x42 => "TIMESTAMP outside canonical expiry verifier",
@@ -412,12 +452,12 @@ mod tests {
         }
         for next in [0xf1, 0xf2, 0xf4, 0xfa, 0x00, 0x50] {
             let mut inspector = FrameValidationInspector::new(Address::ZERO, policy());
-            let tx = TxEnv::default();
+            let tx = TxEnv::<BaseEvmTypes>::default();
             let message = Message::<BaseEvmTypes> {
                 code: Bytecode::new_legacy(Bytes::from(vec![0x5a, next])),
                 ..Default::default()
             };
-            let mut interp = Interpreter::new(&tx, &message);
+            let mut interp = Interpreter::<BaseEvmTypes>::new(&tx, &message);
             inspector.step(&mut interp);
             assert_eq!(
                 inspector.error(),
@@ -435,7 +475,7 @@ mod tests {
         policy.deploy_index = Some(0);
         let mut inspector = FrameValidationInspector::new(sender, policy);
         inspector.current_frame = Some(0);
-        let tx = TxEnv::default();
+        let tx = TxEnv::<BaseEvmTypes>::default();
         let mut message = Message::<BaseEvmTypes> {
             kind: MessageKind::Create,
             caller: factory,
@@ -443,7 +483,7 @@ mod tests {
             ..Default::default()
         };
         let active_message = message.clone();
-        let mut interp = Interpreter::new(&tx, &active_message);
+        let mut interp = Interpreter::<BaseEvmTypes>::new(&tx, &active_message);
         assert!(inspector.create(&mut interp, &mut message).is_none());
         assert_eq!(inspector.error(), None);
         assert_eq!(inspector.dependencies().accounts, vec![factory, sender]);
@@ -455,13 +495,13 @@ mod tests {
         for address in [sender, Address::repeat_byte(2)] {
             for opcode in [0x5c, 0x5d] {
                 let mut inspector = FrameValidationInspector::new(sender, policy());
-                let tx = TxEnv::default();
+                let tx = TxEnv::<BaseEvmTypes>::default();
                 let message = Message::<BaseEvmTypes> {
                     destination: address,
                     code: Bytecode::new_legacy(Bytes::from(vec![opcode])),
                     ..Default::default()
                 };
-                let mut interp = Interpreter::new(&tx, &message);
+                let mut interp = Interpreter::<BaseEvmTypes>::new(&tx, &message);
                 interp.stack_mut().push(U256::from(7)).unwrap();
                 inspector.step(&mut interp);
                 assert_eq!(inspector.error(), None);
@@ -484,13 +524,13 @@ mod tests {
             policy.deploy_index = deploy.then_some(0);
             let mut inspector = FrameValidationInspector::new(sender, policy);
             inspector.current_frame = Some(0);
-            let tx = TxEnv::default();
+            let tx = TxEnv::<BaseEvmTypes>::default();
             let message = Message::<BaseEvmTypes> {
                 destination: address,
                 code: Bytecode::new_legacy(Bytes::from(vec![opcode])),
                 ..Default::default()
             };
-            let mut interp = Interpreter::new(&tx, &message);
+            let mut interp = Interpreter::<BaseEvmTypes>::new(&tx, &message);
             interp.stack_mut().push(U256::from(7)).unwrap();
             inspector.step(&mut interp);
             let expected = if allowed {
@@ -578,6 +618,106 @@ mod tests {
             assert_eq!(inspector.error(), expected_error);
             assert_eq!(evm.state_mut().account(&sender).unwrap().nonce(), 0);
             assert_eq!(inspector.dependencies().code, vec![sender]);
+        }
+    }
+
+    #[test]
+    fn mutable_code_scan_skips_immediates_and_allows_only_sender_entry() {
+        let sender = Address::repeat_byte(1);
+        let helper = Address::repeat_byte(2);
+        for (bytes, mutable) in [
+            (vec![op::SETCODEFROM], true),
+            (vec![op::STOP, op::SETCODEFROM], true),
+            (vec![op::PUSH1, op::SETCODEFROM, op::STOP], false),
+            (vec![op::PUSH32, op::SETCODEFROM], false),
+            (vec![op::PUSH1, 0, op::SETCODEFROM], true),
+        ] {
+            for (address, entry) in
+                [(sender, true), (sender, false), (helper, true), (helper, false)]
+            {
+                let mut db = InMemoryDB::default();
+                db.insert_account_info(
+                    &address,
+                    AccountInfo::default().with_code(Bytecode::new_legacy(bytes.clone().into())),
+                );
+                let mut evm = Evm::<BaseEvmTypes>::new(
+                    SpecId::BOGOTA,
+                    BlockEnvExt::default(),
+                    ethereum_tx_registry(SpecId::BOGOTA),
+                    db,
+                    Precompiles::base(SpecId::BOGOTA),
+                );
+                let mut inspector = FrameValidationInspector::new(sender, policy());
+                let rejected = mutable && !(address == sender && entry);
+                assert_eq!(inspector.check_code(&mut evm, address, false, entry), !rejected);
+                assert_eq!(
+                    inspector.error(),
+                    rejected.then_some("validation accessed mutable code")
+                );
+                assert_eq!(inspector.dependencies().code, vec![address]);
+            }
+        }
+    }
+
+    #[test]
+    fn delegated_sender_cannot_hide_mutable_target_code() {
+        let sender = Address::repeat_byte(1);
+        let helper = Address::repeat_byte(2);
+        let mut db = InMemoryDB::default();
+        db.insert_account_info(
+            &sender,
+            AccountInfo::default().with_code(Bytecode::new_eip7702(helper)),
+        );
+        db.insert_account_info(
+            &helper,
+            AccountInfo::default()
+                .with_code(Bytecode::new_legacy(Bytes::from_static(&[op::SETCODEFROM]))),
+        );
+        let mut evm = Evm::<BaseEvmTypes>::new(
+            SpecId::BOGOTA,
+            BlockEnvExt::default(),
+            ethereum_tx_registry(SpecId::BOGOTA),
+            db,
+            Precompiles::base(SpecId::BOGOTA),
+        );
+        let mut inspector = FrameValidationInspector::new(sender, policy());
+        assert!(!inspector.check_code(&mut evm, sender, false, true));
+        assert_eq!(inspector.error(), Some("validation accessed mutable code"));
+        assert_eq!(inspector.dependencies().code, vec![sender, helper]);
+    }
+
+    #[test]
+    fn delegated_execution_code_is_a_bounded_dependency() {
+        let sender = Address::repeat_byte(1);
+        let helper = Address::repeat_byte(2);
+        for opcode in [op::DELEGATECALL, op::CALLCODE] {
+            for (code, mutable) in [
+                (vec![op::STOP, opcode], true),
+                (vec![op::PUSH1, opcode, op::STOP], false),
+                (vec![op::PUSH32, opcode], false),
+            ] {
+                let mut db = InMemoryDB::default();
+                db.insert_account_info(
+                    &helper,
+                    AccountInfo::default().with_code(Bytecode::new_legacy(code.into())),
+                );
+                let mut evm = Evm::<BaseEvmTypes>::new(
+                    SpecId::BOGOTA,
+                    BlockEnvExt::default(),
+                    ethereum_tx_registry(SpecId::BOGOTA),
+                    db,
+                    Precompiles::base(SpecId::BOGOTA),
+                );
+                let mut inspector = FrameValidationInspector::new(sender, policy());
+                for _ in 0..2 {
+                    assert!(inspector.check_code(&mut evm, helper, false, false));
+                }
+                assert_eq!(inspector.dependencies().code, vec![helper]);
+                assert_eq!(
+                    inspector.dependencies().mutable_code,
+                    if mutable { vec![helper] } else { vec![] }
+                );
+            }
         }
     }
 }

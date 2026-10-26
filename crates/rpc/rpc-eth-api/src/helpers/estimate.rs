@@ -25,7 +25,7 @@ use reth_rpc_eth_types::{
     EthApiError, RpcInvalidTransactionError,
 };
 use reth_rpc_server_types::constants::gas_oracle::{CALL_STIPEND_GAS, ESTIMATE_GAS_ERROR_RATIO};
-use reth_storage_api::{EvmStateProvider, StateProvider};
+use reth_storage_api::EvmStateProvider;
 use reth_tasks::cancel::is_cancelled;
 use tracing::trace;
 
@@ -45,14 +45,26 @@ pub trait EstimateCall: Call {
     ///  - `nonce` is set to `None`
     fn estimate_gas_with<S>(
         &self,
-        mut evm_env: EvmEnvFor<Self::Evm>,
-        mut request: RpcTxReq<<Self::RpcConvert as RpcConvert>::Network>,
+        evm_env: EvmEnvFor<Self::Evm>,
+        request: RpcTxReq<<Self::RpcConvert as RpcConvert>::Network>,
         state: S,
         overrides: EvmOverrides,
     ) -> Result<U256, Self::Error>
     where
         S: EvmStateProvider,
     {
+        let db = CacheDB::new(Db::new(StateProviderDatabase::new(state)));
+        self.estimate_gas_with_cache(evm_env, request, db, overrides)
+    }
+
+    /// Estimates execution using a cache that already contains pre-execution state changes.
+    fn estimate_gas_with_cache<DB: DynDatabase>(
+        &self,
+        mut evm_env: EvmEnvFor<Self::Evm>,
+        mut request: RpcTxReq<<Self::RpcConvert as RpcConvert>::Network>,
+        mut db: CacheDB<DB>,
+        overrides: EvmOverrides,
+    ) -> Result<U256, Self::Error> {
         // Disabled because eth_estimateGas is sometimes used with eoa senders
         // See <https://github.com/paradigmxyz/reth/issues/1959>
         evm_env.version_mut().features.remove(EvmFeatures::EIP3607);
@@ -84,9 +96,6 @@ pub trait EstimateCall: Call {
         // Keep a copy of gas related request values
         let tx_request_gas_limit = request.as_ref().gas_limit();
         let tx_request_gas_price = request.as_ref().gas_price();
-
-        // Configure the evm env
-        let mut db = CacheDB::new(Db::new(StateProviderDatabase::new(state)));
 
         // Apply any block overrides before deriving block-derived limits and the tx env so
         // overrides for `gasLimit`, `baseFee` and `blobBaseFee` are visible to estimation.
@@ -320,7 +329,9 @@ pub trait EstimateCall: Call {
             let invalid = |message: &str| {
                 Self::Error::from_eth_err(EthApiError::InvalidParams(message.into()))
             };
-            let (evm_env, at) = self.evm_env_at(at).await?;
+            let requested_block = at;
+            let (evm_env, at) = self.evm_env_at(requested_block).await?;
+            let derived_pending = requested_block.is_pending() && !at.is_pending();
             if evm_env.version().feature(EvmFeatures::EIP8250) &&
                 request.as_ref().nonce_keys.is_none()
             {
@@ -462,15 +473,19 @@ pub trait EstimateCall: Call {
                     frame.execution_gas = Some(execution_initial);
                 }
             }
-            let _permit = self
-                .acquire_owned_blocking_io()
-                .await
-                .map_err(|_| EthApiError::InternalEthError)?;
             let probe = async |candidate| {
+                let permit = self
+                    .acquire_owned_blocking_io()
+                    .await
+                    .map_err(|_| EthApiError::InternalEthError)?;
                 let env = evm_env.clone();
                 let overrides = overrides.clone();
                 let result = self
                     .spawn_with_state_at_block(at, move |this, mut db| {
+                        let _permit = permit;
+                        if derived_pending {
+                            this.apply_pending_block_state_changes(&mut db, &env, at)?;
+                        }
                         let (env, tx) =
                             this.prepare_call_env(env, candidate, &mut db, overrides)?;
                         this.transact(&mut db, env, tx)
@@ -572,16 +587,15 @@ pub trait EstimateCall: Call {
             } else {
                 request
             };
-            let (evm_env, at) = self.evm_env_at(at).await?;
+            let requested_block = at;
+            let (evm_env, at) = self.evm_env_at(requested_block).await?;
+            let derived_pending = requested_block.is_pending() && !at.is_pending();
 
-            self.spawn_blocking_io_with_state(at, move |this, state| {
-                EstimateCall::estimate_gas_with(
-                    &this,
-                    evm_env,
-                    request,
-                    state.into_evm_state_provider(),
-                    overrides,
-                )
+            self.spawn_with_state_at_block(at, move |this, mut db| {
+                if derived_pending && request.as_ref().minimal_tx_type().is_eip8141() {
+                    this.apply_pending_block_state_changes(&mut db, &evm_env, at)?;
+                }
+                EstimateCall::estimate_gas_with_cache(&this, evm_env, request, db, overrides)
             })
             .await
         }

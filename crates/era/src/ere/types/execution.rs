@@ -805,7 +805,7 @@ mod tests {
         (receipt.tx_type() as u8).encode(&mut fields);
         receipt.success().encode(&mut fields);
         receipt.cumulative_gas_used().encode(&mut fields);
-        receipt.logs().to_vec().encode(&mut fields);
+        alloy_rlp::encode_list(receipt.logs(), &mut fields);
         let mut expected = Vec::new();
         alloy_rlp::Header { list: true, payload_length: fields.len() }.encode(&mut expected);
         expected.extend_from_slice(&fields);

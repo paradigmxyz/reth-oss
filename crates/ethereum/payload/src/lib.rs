@@ -222,6 +222,7 @@ where
     }
     let base_fee = builder.evm_env().block_base_fee();
     let blob_fee = blob_params.as_ref().map(|_| builder.evm_env().block_blob_base_fee());
+    let frame_blob_fee = builder.evm_env().block_env().blob_basefee;
     let separate_block_gas = builder.evm_env().uses_separate_block_gas();
     let regular_gas_limit_cap = builder.evm_env().regular_gas_limit_cap();
 
@@ -383,7 +384,7 @@ where
                     result.tx_gas_used(),
                     result.frame.as_ref().map(|frame| frame.precharge),
                     base_fee,
-                    blob_fee.unwrap_or_default(),
+                    frame_blob_fee,
                 );
                 CommitChanges::Yes
             })
@@ -532,14 +533,13 @@ fn transaction_tip(
     gas_used: u64,
     frame_precharge: Option<U256>,
     base_fee: u64,
-    blob_fee: u64,
+    blob_fee: U256,
 ) -> U256 {
     let used = U256::from(gas_used);
     if let Some(frame) = transaction.as_eip8141() {
         // Native execution has validated the escrow against both base-fee charges.
         let base_charge = used * U256::from(base_fee);
-        let blob_charge =
-            U256::from(transaction.blob_gas_used().unwrap_or_default()) * U256::from(blob_fee);
+        let blob_charge = U256::from(transaction.blob_gas_used().unwrap_or_default()) * blob_fee;
         frame.fees.max_priority_fee_per_gas.saturating_mul(used).min(
             frame_precharge
                 .unwrap_or_default()
@@ -582,26 +582,28 @@ mod tests {
         let transaction = frame_transaction(U256::from(1), U256::from(150_000));
         let transaction = TransactionSigned::Eip8141(transaction.seal_slow());
         assert_eq!(
-            transaction_tip(&transaction, 50_000, Some(U256::from(150_000)), 1, 0),
+            transaction_tip(&transaction, 50_000, Some(U256::from(150_000)), 1, U256::ZERO),
             U256::from(50_000),
         );
         assert_eq!(
-            transaction_tip(&transaction, 100_000, Some(U256::from(150_000)), 1, 0),
+            transaction_tip(&transaction, 100_000, Some(U256::from(150_000)), 1, U256::ZERO),
             U256::from(50_000),
         );
     }
 
     #[test]
     fn frame_tip_excludes_blob_charge_and_caps_full_width_priority_fee() {
-        let blob_charge = U256::from(DATA_GAS_PER_BLOB) * U256::from(2);
-        let precharge = blob_charge + U256::from(150_000);
-        let mut transaction = frame_transaction(U256::MAX, precharge);
-        transaction.blob_versioned_hashes.push(B256::repeat_byte(1));
-        let transaction = TransactionSigned::Eip8141(transaction.seal_slow());
-        assert_eq!(
-            transaction_tip(&transaction, 50_000, Some(precharge), 1, 2),
-            U256::from(100_000)
-        );
+        for blob_fee in [U256::from(2), U256::from(u64::MAX) + U256::ONE] {
+            let blob_charge = U256::from(DATA_GAS_PER_BLOB) * blob_fee;
+            let precharge = blob_charge + U256::from(150_000);
+            let mut transaction = frame_transaction(U256::MAX, precharge);
+            transaction.blob_versioned_hashes.push(B256::repeat_byte(1));
+            let transaction = TransactionSigned::Eip8141(transaction.seal_slow());
+            assert_eq!(
+                transaction_tip(&transaction, 50_000, Some(precharge), 1, blob_fee),
+                U256::from(100_000)
+            );
+        }
     }
 
     #[test]
@@ -627,7 +629,7 @@ mod tests {
             ),
         ] {
             assert_eq!(
-                transaction_tip(&transaction, 21_000, None, 1, 2),
+                transaction_tip(&transaction, 21_000, None, 1, U256::from(2)),
                 U256::from(expected * 21_000),
             );
         }

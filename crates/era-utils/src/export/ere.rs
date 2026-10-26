@@ -260,7 +260,7 @@ mod tests {
         ];
         let error = Ere::write_file("mainnet", MAX_BLOCKS_PER_ERE as u64, &[block], dir.path())
             .unwrap_err();
-        assert!(error.to_string().contains("ERE slim receipts do not support EIP-8141"));
+        assert_eq!(error.to_string(), "ERE slim receipts do not support EIP-8141 frame receipts");
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     }
 
@@ -274,7 +274,7 @@ mod tests {
             dir.path(),
         )
         .unwrap_err();
-        assert!(error.to_string().contains("empty block range"));
+        assert_eq!(error.to_string(), "cannot write ERE file from empty block range");
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     }
 

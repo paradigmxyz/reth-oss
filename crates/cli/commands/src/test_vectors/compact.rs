@@ -3,7 +3,7 @@ use alloy_eips::{
     eip8141::{FrameLimits, FrameMode, SignatureScheme, FRAME_TX_TYPE},
 };
 use alloy_primitives::{hex, Address, Bytes, Signature, TxKind, B256, U256};
-use alloy_rlp::{Encodable, Header, PayloadView, RlpDecodable, RlpEncodable};
+use alloy_rlp::{Encodable, PayloadView, RlpDecodable, RlpEncodable};
 use arbitrary::Arbitrary;
 use eyre::{Context, Result};
 use proptest::{
@@ -352,7 +352,7 @@ fn decode_legacy_frame_vector(
     };
     let Some(payload) = bytes.strip_prefix(prefix) else { return Ok(None) };
     let mut encoded = payload;
-    let PayloadView::List(fields) = Header::decode_raw(&mut encoded)? else {
+    let PayloadView::List(fields) = alloy_rlp::Header::decode_raw(&mut encoded)? else {
         return Err(alloy_rlp::Error::UnexpectedString)
     };
     // Keyed transactions add an eighth field; current fees contain two values.
@@ -360,7 +360,7 @@ fn decode_legacy_frame_vector(
         return Ok(None)
     }
     let mut encoded_fees = fields[5];
-    let PayloadView::List(fees) = Header::decode_raw(&mut encoded_fees)? else {
+    let PayloadView::List(fees) = alloy_rlp::Header::decode_raw(&mut encoded_fees)? else {
         return Err(alloy_rlp::Error::UnexpectedString)
     };
     if fees.len() != 3 {

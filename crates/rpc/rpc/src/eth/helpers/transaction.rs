@@ -801,11 +801,13 @@ mod tests {
             })),
             ..Default::default()
         };
+        let available_permits = api.blocking_io_task_guard().available_permits();
         let estimated =
             EthCall::estimate_gas_at(&api, request.clone(), BlockId::latest(), overrides.clone())
                 .await
                 .unwrap();
         assert!(estimated > U256::from(block_limit));
+        assert_eq!(api.blocking_io_task_guard().available_permits(), available_permits);
         for (execution, state, expected) in [
             (block_limit, 600_000, "frame transaction exceeds the execution gas cap"),
             (500_000, block_limit + 1, "frame transaction exceeds the state gas cap"),
@@ -836,12 +838,22 @@ mod tests {
                 .gas_cap(GasCap(block_limit))
                 .build();
         assert_eq!(
-            EthCall::estimate_gas_at(&rpc_capped, request, BlockId::latest(), overrides)
-                .await
-                .unwrap_err()
-                .to_string(),
+            EthCall::estimate_gas_at(
+                &rpc_capped,
+                request.clone(),
+                BlockId::latest(),
+                overrides.clone()
+            )
+            .await
+            .unwrap_err()
+            .to_string(),
             "frame transaction exceeds the gas cap"
         );
+        api.blocking_io_task_guard().close();
+        assert!(matches!(
+            EthCall::estimate_gas_at(&api, request, BlockId::latest(), overrides).await,
+            Err(EthApiError::InternalEthError)
+        ));
     }
 
     #[tokio::test]
@@ -961,6 +973,158 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn frame_pending_simulation_applies_nonce_transition_once() {
+        let sender = Address::repeat_byte(0x11);
+        for (timestamp, state_nonce, nonce, at) in [
+            (1, 0, 1, BlockId::pending()),
+            (13, 2, 2, BlockId::pending()),
+            (13, 2, 2, BlockId::latest()),
+        ] {
+            let mut genesis = ChainSpecBuilder::mainnet().build().genesis.clone();
+            genesis.timestamp = 0;
+            genesis.config.bogota_time = Some(2);
+            genesis.config.eip8253_accounts = Some(vec![sender]);
+            let spec = ChainSpecBuilder::mainnet()
+                .genesis(genesis)
+                .amsterdam_activated()
+                .with_bogota_at(2)
+                .build();
+            let api = mock_eth_api_builder(
+                AddressMap::from_iter([(
+                    sender,
+                    ExtendedAccount::new(state_nonce, U256::from(10_000_000_000_000_000_000u64))
+                        .with_bytecode(bytes!("60035f5faa00")),
+                )]),
+                spec,
+            )
+            .build();
+            if timestamp > 1 {
+                api.provider().add_block(
+                    B256::repeat_byte(1),
+                    Block::new(
+                        Header {
+                            number: 1,
+                            timestamp,
+                            gas_limit: 30_000_000,
+                            base_fee_per_gas: Some(1_000_000_000),
+                            excess_blob_gas: Some(0),
+                            blob_gas_used: Some(0),
+                            slot_number: Some(1),
+                            ..Default::default()
+                        },
+                        Default::default(),
+                    ),
+                );
+            }
+            let transaction = TxEip8141 {
+                chain_id: 1,
+                sender,
+                nonce,
+                nonce_keys: Some(vec![]),
+                frames: vec![Frame {
+                    mode: FrameMode::Verify,
+                    flags: 3,
+                    limits: FrameLimits { execution: 20_000, state: 0 },
+                    ..Default::default()
+                }],
+                fees: TransactionFees {
+                    max_fee: U256::from(1_000_000_000_000_000_000u64),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let result = EthCall::simulate_frame_transaction(
+                &api,
+                transaction.encoded_2718().into(),
+                Some(at),
+            )
+            .await
+            .unwrap();
+            assert!(result.valid, "{:?}", result.violation);
+            assert_eq!(result.frames.unwrap()[0].status, alloy_eips::eip8141::FrameStatus::Success);
+            let request = <TransactionRequest as From<_>>::from(transaction);
+            assert!(EthCall::call(&api, request.clone(), Some(at), EvmOverrides::default())
+                .await
+                .unwrap()
+                .is_empty());
+            assert!(
+                EthCall::estimate_gas_at(&api, request, at, EvmOverrides::default()).await.unwrap() >
+                    U256::ZERO
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn frame_pending_deployment_observes_nonce_transition_collision() {
+        let factory = Address::repeat_byte(0x22);
+        let sender = factory.create(0);
+        let mut genesis = ChainSpecBuilder::mainnet().build().genesis.clone();
+        genesis.timestamp = 0;
+        genesis.config.bogota_time = Some(2);
+        genesis.config.eip8253_accounts = Some(vec![sender]);
+        let spec = ChainSpecBuilder::mainnet()
+            .genesis(genesis)
+            .amsterdam_activated()
+            .with_bogota_at(2)
+            .build();
+        let api = mock_eth_api_builder(
+            AddressMap::from_iter([
+                (
+                    sender,
+                    ExtendedAccount::new(0, U256::from(10_000_000_000_000_000_000u64))
+                        .extend_storage([(B256::ZERO, U256::ONE)]),
+                ),
+                // CREATE installs the sender's approval runtime, or reverts if the address
+                // collides.
+                (
+                    factory,
+                    ExtendedAccount::new(0, U256::ZERO).with_bytecode(bytes!(
+                        "601060145f3960105f5ff015601057005b5f5ffd6006600a5f3960065ff360035f5faa00"
+                    )),
+                ),
+            ]),
+            spec,
+        )
+        .build();
+        let transaction = TxEip8141 {
+            chain_id: 1,
+            sender,
+            nonce_keys: Some(vec![]),
+            frames: vec![
+                Frame {
+                    mode: FrameMode::Default,
+                    target: factory.into(),
+                    limits: FrameLimits { execution: 80_000, state: 500_000 },
+                    ..Default::default()
+                },
+                Frame {
+                    mode: FrameMode::Verify,
+                    flags: 3,
+                    limits: FrameLimits { execution: 20_000, state: 0 },
+                    ..Default::default()
+                },
+            ],
+            fees: TransactionFees {
+                max_fee: U256::from(1_000_000_000_000_000_000u64),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let result = EthCall::simulate_frame_transaction(
+            &api,
+            transaction.encoded_2718().into(),
+            Some(BlockId::pending()),
+        )
+        .await
+        .unwrap();
+        assert!(!result.valid);
+        assert_eq!(
+            result.violation.as_deref(),
+            Some("invalid frame transaction: VERIFY frame failed")
+        );
+    }
+
+    #[tokio::test]
     async fn simulate_frame_transaction_classifies_recent_root_prefix() {
         for slot in [0, 1] {
             let sender = Address::repeat_byte(0x11);
@@ -982,7 +1146,7 @@ mod tests {
                         .with_bytecode(RECENT_ROOT_CODE.clone())
                         .extend_storage([(
                             dependency.storage_key.into(),
-                            U256::from(dependency.entry_hash),
+                            dependency.entry_hash.into(),
                         )]),
                 ),
             ]));
@@ -1028,15 +1192,12 @@ mod tests {
             assert_eq!(result.frames.unwrap().len(), transaction.frames.len());
             assert_eq!(api.blocking_io_task_guard().available_permits(), available_permits);
             api.blocking_io_task_guard().close();
-            assert!(matches!(
-                EthCall::simulate_frame_transaction(
-                    &api,
-                    transaction.encoded_2718().into(),
-                    Some(BlockId::latest()),
-                )
-                .await,
-                Err(EthApiError::InternalEthError)
-            ));
+            for raw in [transaction.encoded_2718().into(), Bytes::from_static(&[0x06])] {
+                assert!(matches!(
+                    EthCall::simulate_frame_transaction(&api, raw, Some(BlockId::latest()),).await,
+                    Err(EthApiError::InternalEthError)
+                ));
+            }
         }
     }
 

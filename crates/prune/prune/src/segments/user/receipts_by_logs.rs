@@ -234,7 +234,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::segments::{user::ReceiptsByLogs, PruneInput, PruneLimiter, Segment};
+    use crate::segments::PruneLimiter;
     use alloy_primitives::B256;
     use assert_matches::assert_matches;
     use reth_db_api::{cursor::DbCursorRO, tables, transaction::DbTx};

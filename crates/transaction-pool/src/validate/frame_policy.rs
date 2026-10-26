@@ -155,9 +155,6 @@ impl FrameValidationPolicy {
                 .ok_or("execution gas overflows u64")?;
             state_gas =
                 state_gas.checked_add(frame.limits.state).ok_or("state gas overflows u64")?;
-            if frame.flags & 0x04 != 0 {
-                return Err("atomic frame in validation prefix");
-            }
         }
         if declared_execution_gas
             .checked_add(signature_validation_gas)

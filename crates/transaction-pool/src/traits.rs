@@ -1915,6 +1915,7 @@ impl<T: InMemorySize> InMemorySize for EthPooledTransaction<T> {
                     2 * std::mem::size_of::<usize>() +
                     metadata.dependencies.accounts.capacity() * std::mem::size_of::<Address>() +
                     metadata.dependencies.code.capacity() * std::mem::size_of::<Address>() +
+                    metadata.dependencies.mutable_code.capacity() * std::mem::size_of::<Address>() +
                     metadata.dependencies.storage.capacity() *
                         std::mem::size_of::<(Address, U256)>()
             })
@@ -2029,7 +2030,7 @@ impl EthPoolTransaction for EthPooledTransaction {
         sidecar: Arc<BlobTransactionSidecarVariant>,
     ) -> Option<Recovered<Self::Pooled>> {
         self.into_consensus()
-            .try_map(|tx| tx.try_into_pooled_eip4844(Arc::unwrap_or_clone(sidecar)))
+            .try_map(|tx| tx.try_into_pooled_eip4844(Arc::unwrap_or_clone(sidecar)).map(Into::into))
             .ok()
     }
 
@@ -2431,6 +2432,19 @@ mod tests {
         let expected_cost =
             U256::from(100) + U256::from(10 * 1000) + U256::from(5 * DATA_GAS_PER_BLOB);
         assert_eq!(pooled_tx.cost, expected_cost);
+
+        for sidecar in [
+            BlobTransactionSidecarVariant::Eip4844(Default::default()),
+            BlobTransactionSidecarVariant::Eip7594(Default::default()),
+        ] {
+            let pooled =
+                pooled_tx.clone().try_into_pooled_eip4844(Arc::new(sidecar.clone())).unwrap();
+            let (envelope, signer) = pooled.into_parts();
+            assert_eq!(signer, transaction.signer());
+            assert_eq!(envelope.tx_hash(), transaction.tx_hash());
+            assert_eq!(envelope.as_eip4844().unwrap().tx().sidecar(), &sidecar);
+            assert_eq!(TransactionSigned::from(envelope), *transaction.inner());
+        }
     }
 
     #[test]

@@ -109,7 +109,9 @@ impl TryFrom<HandlerError> for EthInvalidTxError {
             HandlerError::EmptyBlobs |
             HandlerError::TooManyBlobs { .. } |
             HandlerError::BlobVersionNotSupported |
-            HandlerError::PriorityFeeGreaterThanMaxFee => Ok(Self(error)),
+            HandlerError::PriorityFeeGreaterThanMaxFee |
+            HandlerError::InvalidFrameTransaction(_) |
+            HandlerError::FrameFeeBudgetTooLow { .. } => Ok(Self(error)),
         }
     }
 }
@@ -470,6 +472,25 @@ fn commit_state_changes<T: EvmTypes>(
         pending_state.insert_account(*address, original.clone(), current.clone());
     }
     accumulate_pending_state(block_state, stream_state, on_state_update, &pending_state);
+}
+
+pub(crate) fn eip8253_state_changes<T: EvmTypes>(
+    evm: &mut Evm<'_, T>,
+    block_state: &mut BlockState,
+    stream_state: bool,
+    on_state_update: &mut impl FnMut(StateUpdate),
+    accounts: &[Address],
+) -> Result<(), BlockExecutionError> {
+    let mut changes = Vec::with_capacity(accounts.len());
+    for address in accounts {
+        let original = evm.read_account_info(address).map_err(map_database_error)?;
+        let mut current = original.clone().unwrap_or_default();
+        // The configured list describes pre-fork state; the transition is unconditional.
+        current.nonce = 1;
+        changes.push((*address, original, Some(current)));
+    }
+    commit_state_changes(evm, block_state, stream_state, on_state_update, &changes);
+    Ok(())
 }
 
 #[expect(clippy::too_many_arguments)]
@@ -1091,6 +1112,24 @@ mod tests {
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0][0], DEPOSIT_REQUEST_TYPE);
         assert_eq!(requests[0].len(), 1 + DEPOSIT_BYTES_SIZE);
+    }
+
+    #[test]
+    fn frame_validation_errors_preserve_transaction_classification() {
+        let hash = B256::with_last_byte(1);
+        for error in [
+            HandlerError::InvalidFrameTransaction("VERIFY frame failed"),
+            HandlerError::FrameFeeBudgetTooLow { required: U256::from(2), got: U256::ONE },
+        ] {
+            let expected = error.clone();
+            assert!(matches!(
+                map_transaction_error(error, hash),
+                BlockExecutionError::Validation(BlockValidationError::InvalidTx {
+                    hash: actual,
+                    error,
+                }) if actual == hash && error.as_any().downcast_ref::<HandlerError>() == Some(&expected)
+            ));
+        }
     }
 
     fn return_byte_code(value: u8) -> Bytecode {

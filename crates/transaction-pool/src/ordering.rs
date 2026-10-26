@@ -163,10 +163,14 @@ fn satisfies_fee_bump(existing: U256, replacement: U256, price_bump: u128) -> bo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{EthPooledTransaction, PriceBumpConfig, ValidPoolTransaction};
+    use crate::{
+        pool::{pending::PendingTransaction, BasefeeOrd, QueuedOrd},
+        EthPooledTransaction, PriceBumpConfig, ValidPoolTransaction,
+    };
     use alloy_consensus::{SignableTransaction, TxEip8141, TxLegacy};
     use alloy_eips::eip8141::{Frame, FrameLimits, TransactionFees};
     use alloy_primitives::{Address, Sealable, Signature};
+    use std::sync::Arc;
 
     fn frame(fee: U256, tip: U256) -> EthPooledTransaction {
         frame_with_blobs(fee, tip, false)
@@ -207,9 +211,6 @@ mod tests {
 
     #[test]
     fn frame_subpool_ordering_retains_high_bits() {
-        use crate::pool::{pending::PendingTransaction, BasefeeOrd, QueuedOrd};
-        use std::sync::Arc;
-
         let fee = U256::from(u128::MAX) + U256::from(1);
         let gas = U256::from(alloy_consensus::Transaction::gas_limit(
             &alloy_consensus::TxEip8141::default(),

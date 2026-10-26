@@ -66,7 +66,7 @@ mod tests {
             ..Default::default()
         };
         let receipt = RethReceiptBuilder
-            .build_receipt(ReceiptBuilderCtx {
+            .build_receipt::<BaseEvmTypes>(ReceiptBuilderCtx {
                 tx_type: TxType::Eip8141,
                 result,
                 cumulative_gas_used: 42_000,
@@ -81,7 +81,7 @@ mod tests {
     #[test]
     fn frame_receipt_requires_native_frame_data() {
         let error = RethReceiptBuilder
-            .build_receipt(ReceiptBuilderCtx {
+            .build_receipt::<BaseEvmTypes>(ReceiptBuilderCtx {
                 tx_type: TxType::Eip8141,
                 result: TxResult::<BaseEvmTypes>::default(),
                 cumulative_gas_used: 21_000,

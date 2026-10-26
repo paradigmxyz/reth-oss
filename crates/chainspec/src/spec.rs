@@ -1401,6 +1401,38 @@ mod tests {
     }
 
     #[test]
+    fn eip8253_chain_accounts_preserve_genesis() {
+        assert_eq!(MAINNET.eip8253_accounts(), &alloy_genesis::EIP8253_MAINNET_ACCOUNTS);
+        for spec in [&*SEPOLIA, &*HOLESKY, &*HOODI] {
+            assert!(spec.eip8253_accounts().is_empty());
+        }
+        for accounts in [None, Some(vec![]), Some(vec![Address::with_last_byte(1)])] {
+            let mut genesis = Genesis::default();
+            genesis.config.chain_id = 1;
+            genesis.config.bogota_time = Some(0);
+            genesis.config.eip8253_accounts = accounts.clone();
+            let address = Address::with_last_byte(1);
+            genesis.alloc.insert(
+                address,
+                GenesisAccount {
+                    balance: U256::from(19),
+                    nonce: Some(0),
+                    storage: Some([(B256::ZERO, B256::with_last_byte(7))].into()),
+                    ..Default::default()
+                },
+            );
+            let spec = ChainSpec::from(genesis.clone());
+            assert_eq!(spec.eip8253_accounts(), accounts.as_deref().unwrap_or_default());
+            assert_eq!(spec.genesis.alloc, genesis.alloc);
+            let expected = make_genesis_header(&genesis, &spec.hardforks);
+            assert_eq!(spec.genesis_hash(), expected.hash_slow());
+        }
+        let mut mainnet = MAINNET.as_ref().clone();
+        mainnet.genesis.config.eip8253_accounts = Some(vec![]);
+        assert!(mainnet.eip8253_accounts().is_empty());
+    }
+
+    #[test]
     fn test_hardfork_list_display_mainnet() {
         assert_eq!(
             MAINNET.display_hardforks().to_string(),

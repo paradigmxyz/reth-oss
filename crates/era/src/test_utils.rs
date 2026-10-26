@@ -6,7 +6,7 @@ use crate::{
         BlockTuple, CompressedBody, CompressedHeader, CompressedReceipts, TotalDifficulty,
     },
 };
-use alloy_consensus::{Header, Receipt as ConsensusReceipt, ReceiptWithBloom};
+use alloy_consensus::{Header, ReceiptWithBloom, TxReceipt};
 use alloy_primitives::{Address, BlockNumber, Bytes, Log, LogData, B256, B64, U256};
 use reth_ethereum_primitives::{Receipt, TxType};
 
@@ -89,10 +89,10 @@ pub(crate) fn create_test_receipt_with_bloom(
 ) -> ReceiptWithBloom {
     let receipt = create_test_receipt(tx_type, success, cumulative_gas_used, log_count);
     ReceiptWithBloom {
-        receipt: ConsensusReceipt {
+        receipt: alloy_consensus::Receipt {
             status: receipt.success().into(),
             cumulative_gas_used: receipt.cumulative_gas_used(),
-            logs: receipt.logs().to_vec(),
+            logs: receipt.into_logs(),
         },
         logs_bloom: Default::default(),
     }

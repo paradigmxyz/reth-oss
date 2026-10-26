@@ -440,14 +440,19 @@ where
     pub fn execution_ctx_for<'a, T: PayloadTypes<BuiltPayload: BuiltPayload<Primitives = N>>>(
         &self,
         input: &'a BlockOrPayload<T>,
+        parent_timestamp: u64,
     ) -> Result<ExecutionCtxFor<'a, Evm>, Evm::Error>
     where
         V: PayloadValidator<T, Block = N::Block>,
         Evm: ConfigureEngineEvm<T::ExecutionData, Primitives = N>,
     {
         match input {
-            BlockOrPayload::Payload(payload) => Ok(self.evm_config.context_for_payload(payload)?),
-            BlockOrPayload::Block(block) => Ok(self.evm_config.context_for_block(block)?),
+            BlockOrPayload::Payload(payload) => {
+                self.evm_config.context_for_payload_with_parent_timestamp(payload, parent_timestamp)
+            }
+            BlockOrPayload::Block(block) => {
+                self.evm_config.context_for_block_with_parent_timestamp(block, parent_timestamp)
+            }
         }
     }
 
@@ -723,7 +728,13 @@ where
         // as transactions complete, allowing parallel computation during execution.
         let execute_block_start = Instant::now();
         let execution_result = if parallel_bal_execution {
-            self.execute_block_bal(env, &input, &handle, &make_state_provider)
+            self.execute_block_bal(
+                env,
+                &input,
+                parent_block.timestamp(),
+                &handle,
+                &make_state_provider,
+            )
         } else {
             let state_provider = make_state_provider(false);
             match state_provider {
@@ -731,6 +742,7 @@ where
                     state_provider,
                     env,
                     &input,
+                    parent_block.timestamp(),
                     &mut handle,
                     execution_state_hook,
                 ),
@@ -1018,6 +1030,7 @@ where
         state_provider: S,
         env: ExecutionEnv<Evm>,
         input: &BlockOrPayload<T>,
+        parent_timestamp: u64,
         handle: &mut PayloadHandle<impl ExecutableTxFor<Evm>, Err, N::Receipt, EvmTypesFor<Evm>>,
         state_hook: Option<StateRootUpdateHook>,
     ) -> Result<
@@ -1040,7 +1053,8 @@ where
         let prewarm_results = handle.prewarm_results().filter(|_| !input.has_block_access_list());
         let execution_start = Instant::now();
         let evm_config = self.evm_config.clone().with_jit_support();
-        let execution_ctx = self.execution_ctx_for(input).map_err(BlockExecutionError::other)?;
+        let execution_ctx =
+            self.execution_ctx_for(input, parent_timestamp).map_err(BlockExecutionError::other)?;
 
         let (output, senders, built_bal) = debug_span!(target: "engine::tree", "execute_block")
             .in_scope(|| {
@@ -1130,6 +1144,7 @@ where
         &self,
         env: ExecutionEnv<Evm>,
         input: &BlockOrPayload<T>,
+        parent_timestamp: u64,
         handle: &PayloadHandle<Tx, Err, N::Receipt, EvmTypesFor<Evm>>,
         make_state_provider: &MakeStateProvider,
     ) -> Result<
@@ -1157,8 +1172,9 @@ where
             Ok(StateProviderDatabase::new(provider))
         };
         let execution_start = Instant::now();
-        let ctx =
-            self.execution_ctx_for(input).map_err(|e| InsertBlockErrorKind::Other(Box::new(e)))?;
+        let ctx = self
+            .execution_ctx_for(input, parent_timestamp)
+            .map_err(|e| InsertBlockErrorKind::Other(Box::new(e)))?;
         let (output, senders, built_bal, received_bal_evm) =
             crate::tree::payload_processor::bal::execute_block(
                 &self.runtime,

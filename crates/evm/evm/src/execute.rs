@@ -1021,6 +1021,11 @@ pub trait Executor<DB: Database>: Sized {
 
     /// Takes the canonical block access list from executor.
     fn take_bal(&mut self) -> Option<BlockAccessList>;
+
+    /// Supplies the actual parent's timestamp before executing the first block in a batch.
+    /// Executors that do not use parent-dependent transitions may ignore it. Implementations
+    /// should advance it only after a block executes successfully.
+    fn set_parent_timestamp(&mut self, _parent_timestamp: u64) {}
 }
 
 /// Generic block executor backed by a [`ConfigureEvm`] implementation.
@@ -1031,6 +1036,7 @@ pub struct BasicBlockExecutor<Evm, DB: Database> {
     batch_database: CacheDB<Db<DB>>,
     batch_state: BundleState,
     block_access_list: Option<BlockAccessList>,
+    parent_timestamp: Option<u64>,
 }
 
 #[cfg(feature = "std")]
@@ -1042,6 +1048,7 @@ impl<Evm, DB: Database> BasicBlockExecutor<Evm, DB> {
             batch_database: CacheDB::new(Db::new(database)),
             batch_state: BundleState::default(),
             block_access_list: None,
+            parent_timestamp: None,
         }
     }
 }
@@ -1071,11 +1078,18 @@ where
         evm_config: &Evm,
         block: &RecoveredBlock<BlockTy<Evm::Primitives>>,
         database: impl DynDatabase,
+        parent_timestamp: Option<u64>,
     ) -> Result<
         (BlockExecutionOutput<ReceiptTy<Evm::Primitives>>, Option<BlockAccessList>),
         BlockExecutionError,
     > {
-        Self::execute_block_with_database_and_state_hook(evm_config, block, database, None)
+        Self::execute_block_with_database_and_state_hook(
+            evm_config,
+            block,
+            database,
+            parent_timestamp,
+            None,
+        )
     }
 
     #[expect(clippy::type_complexity)]
@@ -1083,6 +1097,7 @@ where
         evm_config: &Evm,
         block: &RecoveredBlock<BlockTy<Evm::Primitives>>,
         database: impl DynDatabase,
+        parent_timestamp: Option<u64>,
         state_hook: Option<Box<dyn FnMut(StateUpdate) + Send>>,
     ) -> Result<
         (BlockExecutionOutput<ReceiptTy<Evm::Primitives>>, Option<BlockAccessList>),
@@ -1090,9 +1105,13 @@ where
     > {
         let evm_env = evm_config.evm_env(block.header()).map_err(BlockExecutionError::other)?;
         let evm = evm_config.block_executor_factory().evm_with_env(database, evm_env);
-        let ctx = evm_config
-            .context_for_block(block.sealed_block())
-            .map_err(BlockExecutionError::other)?;
+        let ctx = match parent_timestamp {
+            Some(timestamp) => {
+                evm_config.context_for_block_with_parent_timestamp(block.sealed_block(), timestamp)
+            }
+            None => evm_config.context_for_block(block.sealed_block()),
+        }
+        .map_err(BlockExecutionError::other)?;
         let mut executor = evm_config.block_executor_factory().create_executor(evm, ctx);
         if block.header().block_access_list_hash().is_some() {
             executor.enable_block_access_list_builder();
@@ -1126,8 +1145,13 @@ where
         block: &RecoveredBlock<<Self::Primitives as NodePrimitives>::Block>,
     ) -> Result<BlockExecutionResult<<Self::Primitives as NodePrimitives>::Receipt>, Self::Error>
     {
-        let (output, block_access_list) =
-            Self::execute_block_with_database(&self.evm_config, block, &mut self.batch_database)?;
+        let (output, block_access_list) = Self::execute_block_with_database(
+            &self.evm_config,
+            block,
+            &mut self.batch_database,
+            self.parent_timestamp,
+        )?;
+        self.parent_timestamp = Some(block.header().timestamp());
         self.block_access_list = block_access_list;
         self.batch_database.commit_source(&BundleSource(&output.state));
 
@@ -1149,8 +1173,10 @@ where
             &self.evm_config,
             block,
             &mut self.batch_database,
+            self.parent_timestamp,
             Some(Box::new(state_hook)),
         )?;
+        self.parent_timestamp = Some(block.header().timestamp());
         self.block_access_list = block_access_list;
         self.batch_database.commit_source(&BundleSource(&output.state));
 
@@ -1165,8 +1191,13 @@ where
         block: &RecoveredBlock<<Self::Primitives as NodePrimitives>::Block>,
     ) -> Result<BlockExecutionOutput<<Self::Primitives as NodePrimitives>::Receipt>, Self::Error>
     {
-        let Self { evm_config, batch_database, batch_state, .. } = self;
-        let (output, _) = Self::execute_block_with_database(&evm_config, block, batch_database)?;
+        let Self { evm_config, batch_database, batch_state, parent_timestamp, .. } = self;
+        let (output, _) = Self::execute_block_with_database(
+            &evm_config,
+            block,
+            batch_database,
+            parent_timestamp,
+        )?;
         Ok(Self::merge_batch_output(batch_state, output))
     }
 
@@ -1178,11 +1209,12 @@ where
     where
         F: FnMut(StateUpdate) + Send + 'static,
     {
-        let Self { evm_config, batch_database, batch_state, .. } = self;
+        let Self { evm_config, batch_database, batch_state, parent_timestamp, .. } = self;
         let (output, _) = Self::execute_block_with_database_and_state_hook(
             &evm_config,
             block,
             batch_database,
+            parent_timestamp,
             Some(Box::new(state_hook)),
         )?;
         Ok(Self::merge_batch_output(batch_state, output))
@@ -1198,6 +1230,10 @@ where
 
     fn take_bal(&mut self) -> Option<BlockAccessList> {
         self.block_access_list.take()
+    }
+
+    fn set_parent_timestamp(&mut self, parent_timestamp: u64) {
+        self.parent_timestamp = Some(parent_timestamp);
     }
 }
 

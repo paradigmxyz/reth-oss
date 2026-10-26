@@ -108,10 +108,10 @@ impl Receipt {
     }
 
     /// Returns whether execution succeeded.
-    pub const fn success(&self) -> bool {
+    pub fn success(&self) -> bool {
         match &self.inner {
             ReceiptData::Standard(receipt) => receipt.success,
-            ReceiptData::Frame(_) => true,
+            ReceiptData::Frame(frame) => frame.status(),
         }
     }
 
@@ -470,7 +470,7 @@ mod tests {
         eip8141::{FrameGasUsed, FrameReceipt, FrameStatus},
     };
     use alloy_primitives::{
-        address, b256, bloom, bytes, hex_literal::hex, Address, Bloom, Bytes, Log, LogData,
+        address, b256, bytes, hex_literal::hex, Address, Bloom, Bytes, Log, LogData,
     };
     use alloy_rlp::{Decodable, Encodable};
     use reth_primitives_traits::proofs::{
@@ -484,6 +484,34 @@ mod tests {
     ///
     /// Withdrawals can be optionally included at the end of the RLP encoded message.
     pub(crate) type Block<T = TransactionSigned> = alloy_consensus::Block<T>;
+
+    #[test]
+    fn frame_receipt_status_matches_its_consensus_envelope() {
+        for status in [FrameStatus::Success, FrameStatus::Failure, FrameStatus::SkippedAtomicBatch]
+        {
+            let envelope = ReceiptEnvelope::Eip8141(
+                FrameReceiptPayload {
+                    cumulative_gas_used: 42_000,
+                    payer: Address::repeat_byte(1),
+                    frame_receipts: vec![
+                        FrameReceipt { status: FrameStatus::Success, ..Default::default() },
+                        FrameReceipt { status, ..Default::default() },
+                    ],
+                }
+                .into(),
+            );
+            let receipt = Receipt::from(envelope.clone());
+            assert_eq!(receipt.success(), status.is_success());
+            assert_eq!(receipt.status(), envelope.status());
+            assert_eq!(receipt.status_or_post_state(), envelope.status_or_post_state());
+            assert_eq!(ReceiptEnvelope::from(receipt.clone()).status(), receipt.status());
+            #[cfg(feature = "serde")]
+            assert_eq!(
+                serde_json::to_value(&receipt).unwrap(),
+                serde_json::to_value(&envelope).unwrap()
+            );
+        }
+    }
 
     #[test]
     fn plain_receipt_rlp_matches_standard_bloomless_encoding() {

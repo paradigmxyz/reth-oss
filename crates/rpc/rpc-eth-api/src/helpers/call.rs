@@ -43,7 +43,9 @@ use reth_rpc_eth_types::{
     },
     EthApiError, RpcInvalidTransactionError, StateCacheDb,
 };
-use reth_storage_api::{BlockIdReader, ProviderTx, StateProvider};
+use reth_storage_api::{
+    BlockIdReader, BlockReaderIdExt, HeaderProvider, ProviderTx, StateProvider,
+};
 use reth_tasks::{cancel::is_cancelled, CancelOnDrop};
 use reth_transaction_pool::validate::{FrameValidationInspector, FrameValidationPolicy};
 use std::fmt;
@@ -289,6 +291,10 @@ pub trait EthCall: EstimateCall + LoadBlock + FullEthApiTypes {
         block: Option<BlockId>,
     ) -> impl Future<Output = Result<FrameSimulationResult, Self::Error>> + Send {
         async move {
+            let permit = self
+                .acquire_owned_blocking_io()
+                .await
+                .map_err(|_| EthApiError::InternalEthError)?;
             let transaction =
                 ProviderTx::<Self::Provider>::decode_2718_exact(&raw).map_err(|error| {
                     EthApiError::InvalidParams(format!(
@@ -301,7 +307,9 @@ pub trait EthCall: EstimateCall + LoadBlock + FullEthApiTypes {
             frame.validate().map_err(|error| {
                 EthApiError::InvalidParams(format!("invalid frame transaction: {error}"))
             })?;
-            let (evm_env, at) = self.evm_env_at(block.unwrap_or_default()).await?;
+            let requested_block = block.unwrap_or_default();
+            let (evm_env, at) = self.evm_env_at(requested_block).await?;
+            let derived_pending = requested_block.is_pending() && !at.is_pending();
             let timestamp = evm_env.block_env().timestamp.saturating_to::<u64>();
             if !self.provider().chain_spec().is_bogota_active_at_timestamp(timestamp) {
                 return Err(EthApiError::FrameTransactionsNotActive.into());
@@ -370,13 +378,12 @@ pub trait EthCall: EstimateCall + LoadBlock + FullEthApiTypes {
                 transaction,
                 sender,
             ));
-            let permit = self
-                .acquire_owned_blocking_io()
-                .await
-                .map_err(|_| EthApiError::InternalEthError)?;
             self.spawn_with_state_at_block(at, move |this, mut db| {
                 let _permit = permit;
                 let mut evm_env = evm_env;
+                if derived_pending {
+                    this.apply_pending_block_state_changes(&mut db, &evm_env, at)?;
+                }
                 if let Some(current_slot) = current_slot {
                     evm_env.block_env_mut().slot_num = U256::from(current_slot);
                 }
@@ -478,7 +485,9 @@ pub trait EthCall: EstimateCall + LoadBlock + FullEthApiTypes {
                     .iter()
                     .any(|frame| frame.execution_gas.is_none() || frame.state_gas.is_none())
             }) {
-                (_, at) = self.evm_env_at(at).await?;
+                if !at.is_pending() {
+                    (_, at) = self.evm_env_at(at).await?;
+                }
                 self.fill_frame_gas_at(request, at, overrides.clone()).await?
             } else {
                 request
@@ -731,6 +740,36 @@ pub trait Call:
         self.eth_api_settings().compute_state_root_for_eth_simulate
     }
 
+    /// Applies pre-execution changes once when a derived pending environment uses parent state.
+    /// Historical and actual pending state already contain their block's pre-execution changes.
+    fn apply_pending_block_state_changes(
+        &self,
+        db: &mut StateCacheDb,
+        evm_env: &EvmEnvFor<Self::Evm>,
+        parent_id: BlockId,
+    ) -> Result<(), Self::Error>
+    where
+        Self: LoadPendingBlock,
+    {
+        let parent = self
+            .provider()
+            .sealed_header_by_id(parent_id)
+            .map_err(Self::Error::from_eth_err)?
+            .ok_or_else(|| EthApiError::HeaderNotFound(parent_id))?;
+        let context = self
+            .evm_config()
+            .context_for_next_block(&parent, self.next_env_attributes(&parent)?)
+            .map_err(RethError::other)
+            .map_err(Self::Error::from_eth_err)?;
+        let changes = self
+            .evm_config()
+            .pre_block_state_changes(&mut *db, evm_env.clone(), context)
+            .map_err(RethError::Other)
+            .map_err(Self::Error::from_eth_err)?;
+        db.commit_source(&BundleSource(&changes));
+        Ok(())
+    }
+
     /// Returns the maximum memory the EVM can allocate per RPC request.
     fn evm_memory_limit(&self) -> u64 {
         self.eth_api_settings().evm_memory_limit
@@ -891,8 +930,13 @@ pub trait Call:
         R: Send + 'static,
     {
         async move {
-            let (evm_env, at) = self.evm_env_at(at).await?;
+            let requested_block = at;
+            let (evm_env, at) = self.evm_env_at(requested_block).await?;
+            let derived_pending = requested_block.is_pending() && !at.is_pending();
             self.spawn_with_state_at_block(at, move |this, mut db| {
+                if derived_pending && request.as_ref().minimal_tx_type().is_eip8141() {
+                    this.apply_pending_block_state_changes(&mut db, &evm_env, at)?;
+                }
                 let (evm_env, tx_env) =
                     this.prepare_call_env(evm_env, request, &mut db, overrides)?;
 
@@ -955,9 +999,17 @@ pub trait Call:
 
                 let block_txs = block.transactions_recovered();
 
+                let parent = this
+                    .provider()
+                    .header(parent_block)
+                    .map_err(Self::Error::from_eth_err)?
+                    .ok_or_else(|| EthApiError::HeaderNotFound(parent_block.into()))?;
                 let ctx = this
                     .evm_config()
-                    .context_for_block(block.sealed_block())
+                    .context_for_block_with_parent_timestamp(
+                        block.sealed_block(),
+                        parent.timestamp(),
+                    )
                     .map_err(RethError::other)
                     .map_err(Self::Error::from_eth_err)?;
                 let changes = this

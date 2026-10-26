@@ -570,7 +570,7 @@ where
                 queue.cancel(hash);
             }
             if !affected.is_empty() {
-                let mined: HashSet<_> = mined_transactions.iter().copied().collect();
+                let mined = mined_transactions.iter().copied().collect::<B256Set>();
                 for tx in pool.remove_transactions(affected) {
                     if !mined.contains(tx.hash()) {
                         queue.insert(tx);
@@ -1906,9 +1906,9 @@ mod tests {
             testing_pool, MockTransaction, MockTransactionFactory, TestPool, TestPoolBuilder,
         },
         validate::ValidTransaction,
-        BlockInfo, FullTransactionEvent, PoolConfig, SubPool, SubPoolLimit,
-        TransactionListenerKind, TransactionOrigin, TransactionPool, TransactionPoolExt,
-        TransactionValidationOutcome, ValidPoolTransaction, U256,
+        BlockInfo, PoolConfig, SubPool, SubPoolLimit, TransactionListenerKind, TransactionOrigin,
+        TransactionPool, TransactionPoolExt, TransactionValidationOutcome, ValidPoolTransaction,
+        U256,
     };
     use alloy_consensus::Transaction;
     use alloy_eips::{

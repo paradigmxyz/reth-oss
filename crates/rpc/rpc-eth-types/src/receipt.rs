@@ -43,7 +43,7 @@ where
         to,
         gas_used,
         contract_address,
-        effective_gas_price: tx.effective_gas_price(meta.base_fee),
+        effective_gas_price: tx.effective_gas_price_u256(meta.base_fee),
         // EIP-4844 fields
         blob_gas_price,
         blob_gas_used,
@@ -146,9 +146,57 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_consensus::TxType;
-    use alloy_eips::eip8141::{FrameGasUsed, FrameReceipt, FrameReceiptPayload, FrameStatus};
-    use alloy_primitives::{bytes, B256};
+    use alloy_consensus::{TxEip8141, TxType};
+    use alloy_eips::eip8141::{
+        Frame, FrameGasUsed, FrameLimits, FrameReceipt, FrameReceiptPayload, FrameStatus,
+        TransactionFees,
+    };
+    use alloy_primitives::{bytes, Sealable, B256, U256};
+    use reth_ethereum_primitives::{EthPrimitives, TransactionSigned};
+    use reth_primitives_traits::Recovered;
+
+    #[test]
+    fn frame_receipt_retains_full_width_effective_gas_price() {
+        let sender = Address::repeat_byte(1);
+        let priority = U256::ONE << 180;
+        let tx = TransactionSigned::Eip8141(
+            TxEip8141 {
+                sender,
+                frames: vec![Frame {
+                    limits: FrameLimits { execution: 10, state: 0 },
+                    ..Default::default()
+                }],
+                fees: TransactionFees {
+                    max_fee: U256::ONE << 220,
+                    max_priority_fee_per_gas: priority,
+                },
+                ..Default::default()
+            }
+            .seal_slow(),
+        );
+        let receipt = Receipt::from(ReceiptEnvelope::Eip8141(
+            FrameReceiptPayload { cumulative_gas_used: 2, payer: sender, frame_receipts: vec![] }
+                .into(),
+        ));
+        let converter = EthReceiptConverter::new(Arc::new(()));
+        let rpc = build_receipt::<EthPrimitives, _>(
+            ConvertReceiptInput {
+                receipt,
+                tx: Recovered::new_unchecked(&tx, sender),
+                gas_used: 2,
+                next_log_index: 0,
+                meta: TransactionMeta { base_fee: Some(10), ..Default::default() },
+            },
+            None,
+            &converter.build_rpc_receipt,
+        );
+        assert_eq!(rpc.effective_gas_price, priority + U256::from(10));
+        let json = serde_json::to_value(&rpc).unwrap();
+        assert_eq!(
+            json["effectiveGasPrice"],
+            serde_json::to_value(priority + U256::from(10)).unwrap()
+        );
+    }
 
     #[test]
     fn owned_receipt_conversion_preserves_logs_and_rpc_indices() {

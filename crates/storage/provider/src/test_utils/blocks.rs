@@ -207,7 +207,7 @@ fn block1(
             true,
             300,
             vec![Log::new_unchecked(
-                Address::new([0x60; 20]),
+                Address::repeat_byte(0x60),
                 vec![B256::with_last_byte(1), B256::with_last_byte(2)],
                 Bytes::default(),
             )],
@@ -261,7 +261,7 @@ fn block2(
             false,
             400,
             vec![Log::new_unchecked(
-                Address::new([0x61; 20]),
+                Address::repeat_byte(0x61),
                 vec![B256::with_last_byte(3), B256::with_last_byte(4)],
                 Bytes::default(),
             )],
@@ -324,7 +324,7 @@ fn block3(
             true,
             400,
             vec![Log::new_unchecked(
-                Address::new([0x61; 20]),
+                Address::repeat_byte(0x61),
                 vec![B256::with_last_byte(3), B256::with_last_byte(4)],
                 Bytes::default(),
             )],
@@ -407,7 +407,7 @@ fn block4(
             true,
             400,
             vec![Log::new_unchecked(
-                Address::new([0x61; 20]),
+                Address::repeat_byte(0x61),
                 vec![B256::with_last_byte(3), B256::with_last_byte(4)],
                 Bytes::default(),
             )],
@@ -487,7 +487,7 @@ fn block5(
             true,
             400,
             vec![Log::new_unchecked(
-                Address::new([0x61; 20]),
+                Address::repeat_byte(0x61),
                 vec![B256::with_last_byte(3), B256::with_last_byte(4)],
                 Bytes::default(),
             )],

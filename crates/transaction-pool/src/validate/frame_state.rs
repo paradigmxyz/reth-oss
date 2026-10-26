@@ -1,4 +1,5 @@
 use super::frame_policy::RecentRootDependency;
+use crate::TXPOOL_MAX_ACCOUNT_SLOTS_PER_SENDER;
 use std::{
     collections::{BTreeMap, HashMap},
     sync::Arc,
@@ -49,6 +50,8 @@ pub struct FrameDependencies {
     pub accounts: Vec<Address>,
     /// Accounts whose code can affect validation.
     pub code: Vec<Address>,
+    /// Code dependencies that can replace their own code through delegated execution.
+    pub mutable_code: Vec<Address>,
     /// Storage slots whose values can affect validation.
     pub storage: Vec<(Address, U256)>,
 }
@@ -163,6 +166,20 @@ impl FrameReservations {
         // the payer's one-pending slot.
         if metadata.exclusive_payer && other_exclusive_count != 0 {
             return Err("exclusive payer capacity exceeded");
+        }
+        for address in &metadata.dependencies.mutable_code {
+            if !metadata.dependencies.code.contains(address) {
+                return Err("mutable code dependency is not indexed");
+            }
+            let count = self.code.get(address).map_or(0, B256Set::len);
+            let old_count = usize::from(
+                old.as_ref().is_some_and(|old| old.dependencies.code.contains(address)),
+            );
+            let other_count = count.checked_sub(old_count).ok_or("reservation accounting error")?;
+            // Bound one proxy upgrade's revalidation work by the ordinary per-sender capacity.
+            if other_count >= TXPOOL_MAX_ACCOUNT_SLOTS_PER_SENDER {
+                return Err("mutable code dependency capacity exceeded");
+            }
         }
         self.remove_inner(replaces);
         self.frames.insert(hash, metadata.clone());
@@ -331,6 +348,7 @@ mod tests {
             dependencies: FrameDependencies {
                 accounts: vec![Address::repeat_byte(9), Address::repeat_byte(9)],
                 code: vec![],
+                mutable_code: vec![],
                 storage: vec![],
             },
             expires_at: None,
@@ -568,5 +586,80 @@ mod tests {
             Err("sender already has a pending frame transaction"),
         );
         assert_eq!(reservations.hashes().count(), 3);
+    }
+
+    #[test]
+    fn mutable_code_capacity_replacements_and_removal_are_atomic() {
+        let proxy = Address::repeat_byte(0x42);
+        let immutable = Address::repeat_byte(0x43);
+        let metadata = |sender, dependency| {
+            let mut metadata = m(sender, 0, sender, 1);
+            metadata.dependencies.code = vec![dependency, dependency];
+            metadata.dependencies.mutable_code = vec![dependency, dependency];
+            metadata
+        };
+        let mut reservations = FrameReservations::default();
+        for sender in 0..TXPOOL_MAX_ACCOUNT_SLOTS_PER_SENDER {
+            put(&mut reservations, sender as u8, metadata(sender as u8, proxy)).unwrap();
+        }
+        assert_eq!(reservations.code[&proxy].len(), TXPOOL_MAX_ACCOUNT_SLOTS_PER_SENDER);
+        let rejected = metadata(100, proxy);
+        assert_eq!(
+            put(&mut reservations, 100, rejected),
+            Err("mutable code dependency capacity exceeded")
+        );
+        assert!(!reservations.frames.contains_key(&B256::repeat_byte(100)));
+        assert_eq!(reservations.payer_usage(&Address::repeat_byte(100)), PayerUsage::default());
+        reservations
+            .replace(
+                B256::repeat_byte(101),
+                Arc::new(metadata(0, proxy)),
+                Some(B256::repeat_byte(0)),
+                U256::ZERO,
+                B256::ZERO,
+            )
+            .unwrap();
+        let mut unrelated = m(102, 0, 102, 1);
+        unrelated.dependencies.code = vec![immutable];
+        put(&mut reservations, 102, unrelated).unwrap();
+        assert_eq!(
+            reservations.replace(
+                B256::repeat_byte(103),
+                Arc::new(metadata(102, proxy)),
+                Some(B256::repeat_byte(102)),
+                U256::ZERO,
+                B256::ZERO,
+            ),
+            Err("mutable code dependency capacity exceeded")
+        );
+        assert!(reservations.frames.contains_key(&B256::repeat_byte(102)));
+        assert_eq!(reservations.code[&immutable].len(), 1);
+        reservations.remove(&B256::repeat_byte(101));
+        put(&mut reservations, 103, metadata(103, proxy)).unwrap();
+        for hash in reservations.hashes().collect::<Vec<_>>() {
+            reservations.remove(&hash);
+        }
+        assert!(reservations.frames.is_empty());
+        assert!(reservations.code.is_empty());
+        assert!(reservations.payer.is_empty());
+        let mut missing_index = metadata(104, proxy);
+        missing_index.dependencies.code.clear();
+        assert_eq!(
+            put(&mut reservations, 104, missing_index),
+            Err("mutable code dependency is not indexed")
+        );
+        assert!(reservations.frames.is_empty());
+    }
+
+    #[test]
+    fn immutable_code_dependencies_do_not_consume_mutable_capacity() {
+        let helper = Address::repeat_byte(0x42);
+        let mut reservations = FrameReservations::default();
+        for sender in 0..=TXPOOL_MAX_ACCOUNT_SLOTS_PER_SENDER {
+            let mut metadata = m(sender as u8, 0, sender as u8, 1);
+            metadata.dependencies.code = vec![helper];
+            put(&mut reservations, sender as u8, metadata).unwrap();
+        }
+        assert_eq!(reservations.code[&helper].len(), TXPOOL_MAX_ACCOUNT_SLOTS_PER_SENDER + 1);
     }
 }

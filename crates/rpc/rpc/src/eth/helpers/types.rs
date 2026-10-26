@@ -153,7 +153,7 @@ mod tests {
     fn frame_env_preserves_full_width_fees_and_independent_limits() {
         let converter = EthRpcConverter::new(EthReceiptConverter::new(MAINNET.clone()));
         let expected = frame_transaction();
-        let request = TransactionRequest::from(expected.clone());
+        let request = <TransactionRequest as From<_>>::from(expected.clone());
         let tx = converter.tx_env(request, &EthEvmEnv::default()).unwrap();
         assert_eq!(tx.frame_transaction(), Some(&expected));
         assert_eq!(tx.signer(), expected.sender);
@@ -175,7 +175,7 @@ mod tests {
             |request| request.transaction_type = Some(u8::from(TxType::Legacy)),
         ];
         for prepare in cases {
-            let mut request = TransactionRequest::from(frame_transaction());
+            let mut request = <TransactionRequest as From<_>>::from(frame_transaction());
             prepare(&mut request);
             assert_eq!(
                 converter.tx_env(request, &EthEvmEnv::default()).unwrap_err().to_string(),
@@ -188,7 +188,7 @@ mod tests {
     fn frame_env_rejects_invalid_counts_before_converting_frames() {
         let converter = EthRpcConverter::new(EthReceiptConverter::new(MAINNET.clone()));
         for count in [0, alloy_eips::eip8141::MAX_FRAMES + 1] {
-            let mut request = TransactionRequest::from(frame_transaction());
+            let mut request = <TransactionRequest as From<_>>::from(frame_transaction());
             request.frames = Some(vec![Frame::default().into(); count]);
             assert_eq!(
                 converter.tx_env(request, &EthEvmEnv::default()).unwrap_err().to_string(),
@@ -208,14 +208,14 @@ mod tests {
             &nonce_slot(payload.sender, U256::ZERO),
             &U256::from(9),
         );
-        let mut request = TransactionRequest::from(payload.clone());
+        let mut request = <TransactionRequest as From<_>>::from(payload.clone());
         request.nonce = None;
         let resolved =
             resolve_transaction(request, 30_000_000, 0, 1, false, &mut db, &converter).unwrap();
         assert_eq!(resolved.frame_transaction(), Some(&payload));
         let mut single_use = payload;
         single_use.nonce = u64::MAX;
-        let request = TransactionRequest::from(single_use.clone());
+        let request = <TransactionRequest as From<_>>::from(single_use.clone());
         let resolved =
             resolve_transaction(request, 30_000_000, 0, 1, true, &mut db, &converter).unwrap();
         assert_eq!(resolved.frame_transaction(), Some(&single_use));

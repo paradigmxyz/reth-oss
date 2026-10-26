@@ -15,6 +15,7 @@ use alloy_signer_local::PrivateKeySigner;
 use reth_chainspec::{ChainSpecBuilder, MAINNET};
 use reth_e2e_test_utils::{test_genesis, wait::poll_until, wallet::Wallet, E2ETestSetupExt};
 use reth_node_ethereum::EthereumNode;
+use reth_rpc_eth_api::helpers::LoadPendingBlock;
 use serde_json::json;
 use std::sync::Arc;
 
@@ -192,6 +193,10 @@ async fn frame_block_import_preserves_separate_gas_reservations() -> eyre::Resul
     let raw = frame_tx(&signer, 0, vec![self_verify_frame(), body]);
     assert!(TxEip8141::decode_2718_exact(&raw)?.gas_limit() > 1_000_000);
     let hash = node.rpc.inject_tx(raw).await?;
+    node.wait_for_pooled([hash]).await?;
+    let pending = node.rpc.inner.eth_api().local_pending_block().await?.unwrap();
+    assert_eq!(pending.block.body().transactions.len(), 1);
+    assert_eq!(*pending.block.body().transactions[0].tx_hash(), hash);
 
     assert_mined_from_pool(&mut node, &[hash]).await
 }

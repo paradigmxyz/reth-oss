@@ -373,6 +373,19 @@ pub trait ConfigureEvm: Clone + Debug + Send + Sync + Unpin {
     where
         Self: 'a;
 
+    /// Returns a block context with its actual parent's timestamp available for fork transitions.
+    /// The default preserves configurations whose transitions do not depend on the parent.
+    fn context_for_block_with_parent_timestamp<'a>(
+        &self,
+        block: &'a SealedBlock<BlockTy<Self::Primitives>>,
+        _parent_timestamp: u64,
+    ) -> Result<ExecutionCtxFor<'a, Self>, Self::Error>
+    where
+        Self: 'a,
+    {
+        self.context_for_block(block)
+    }
+
     /// Returns the configured [`BlockExecutorFactory::ExecutionCtx`] for `parent + 1`
     /// block.
     fn context_for_next_block(
@@ -513,6 +526,23 @@ pub trait ConfigureEvm: Clone + Debug + Send + Sync + Unpin {
     {
         let evm = self.evm_for_block(db, block.header())?;
         let ctx = self.context_for_block(block)?;
+        Ok(self.block_executor_factory().create_executor(evm, ctx))
+    }
+
+    /// Creates a block executor with the actual parent timestamp for fork transitions.
+    #[cfg(feature = "std")]
+    fn executor_for_block_with_parent_timestamp<'a, DB>(
+        &'a self,
+        db: DB,
+        block: &'a SealedBlock<BlockTy<Self::Primitives>>,
+        parent_timestamp: u64,
+    ) -> Result<crate::BlockExecutorFor<'a, Self>, Self::Error>
+    where
+        Self: 'a,
+        DB: Database + 'a,
+    {
+        let evm = self.evm_for_block(db, block.header())?;
+        let ctx = self.context_for_block_with_parent_timestamp(block, parent_timestamp)?;
         Ok(self.block_executor_factory().create_executor(evm, ctx))
     }
 

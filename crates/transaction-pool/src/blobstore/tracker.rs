@@ -88,9 +88,9 @@ pub enum BlobStoreUpdates {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_consensus::{Header, Signed};
+    use alloy_consensus::{Header, Signed, TxEip8141};
     use alloy_primitives::{Sealable, Signature};
-    use reth_ethereum_primitives::Transaction;
+    use reth_ethereum_primitives::{Transaction, TransactionSigned};
     use reth_execution_types::Chain;
     use reth_primitives_traits::{RecoveredBlock, SealedBlock, SealedHeader};
 
@@ -115,9 +115,6 @@ mod tests {
 
     #[test]
     fn tracks_only_blob_bearing_frame_transactions() {
-        use alloy_consensus::TxEip8141;
-        use reth_ethereum_primitives::TransactionSigned;
-
         let with_blobs = TransactionSigned::Eip8141(
             TxEip8141 { blob_versioned_hashes: vec![B256::repeat_byte(1)], ..Default::default() }
                 .seal_slow(),
