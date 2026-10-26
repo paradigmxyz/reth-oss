@@ -328,6 +328,7 @@ mod tests {
             created: true,
             selfdestructed,
             code: None,
+            code_adopted: false,
             storage,
         }
     }

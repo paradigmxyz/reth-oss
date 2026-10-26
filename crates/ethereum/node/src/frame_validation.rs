@@ -190,6 +190,8 @@ where
     dependencies.accounts.push(result.payer);
     dependencies.code.push(result.payer);
     let payer = state.basic_account(&result.payer)?.unwrap_or_default();
+    let payer_balance = payer.balance;
+    let payer_code_hash = payer.bytecode_hash;
     let sender = if result.payer == frame.sender {
         payer
     } else {
@@ -213,13 +215,13 @@ where
             }
         }
     }
-    if result.max_cost > payer.balance {
+    if result.max_cost > payer_balance {
         debug!(
             target: "reth::eip8141::pool",
             ?tx_hash,
             payer = ?result.payer,
             max_cost = ?result.max_cost,
-            payer_balance = ?payer.balance,
+            payer_balance = ?payer_balance,
             "rejected EIP-8141 public-pool transaction with insufficient payer balance"
         );
         return Err(policy("payer cannot cover maximum transaction cost"))
@@ -227,7 +229,7 @@ where
     // No canonical runtime is specified by this devnet's reference. Contract pay frames
     // therefore use the non-canonical one-pending-transaction rule, never a trace exemption.
     let exclusive_payer = frame.frames[prefix.prefix_end - 1].flags == 1 &&
-        payer.bytecode_hash.is_some_and(|hash| hash != alloy_consensus::constants::KECCAK_EMPTY);
+        payer_code_hash.is_some_and(|hash| hash != alloy_consensus::constants::KECCAK_EMPTY);
     debug!(
         target: "reth::eip8141::pool",
         ?tx_hash,
@@ -247,7 +249,7 @@ where
         sender_code_hash: sender.bytecode_hash,
         payer: result.payer,
         max_cost: result.max_cost,
-        payer_balance: payer.balance,
+        payer_balance,
         head_hash: head.hash(),
         dependencies,
         expires_at: expiry,

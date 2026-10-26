@@ -1,7 +1,7 @@
 #![allow(unreachable_pub)]
 //! Tests for eth related requests
 
-use alloy_consensus::{Header, Sealed, TxReceipt, TxType};
+use alloy_consensus::{Header, Sealed, TxType};
 use alloy_eips::NumHash;
 use alloy_primitives::{BlockHash, BlockNumber, Bytes, B256};
 use rand::Rng;
