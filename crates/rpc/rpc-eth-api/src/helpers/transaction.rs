@@ -690,21 +690,17 @@ pub trait EthTransactions: LoadTransaction<Provider: BlockReaderIdExt> {
                         .filter(|signature| signature.signature.is_empty())
                         .filter_map(|signature| signature.scheme.signature_length())
                         .fold(0u64, |sum, length| sum.saturating_add(length as u64));
-                    let signature_byte_cost =
-                        u64::from(gas_params.get(evm2::version::GasId::TxTokenCost))
-                            .max(u64::from(
-                                gas_params.get(evm2::version::GasId::TxFloorCostPerToken),
-                            ))
-                            .saturating_mul(
-                                u64::from(
-                                    gas_params
-                                        .get(evm2::version::GasId::TxTokenNonZeroByteMultiplier),
-                                )
-                                .max(u64::from(
+                    let signature_byte_cost = gas_params
+                        .get(evm2::version::GasId::TxTokenCost)
+                        .max(gas_params.get(evm2::version::GasId::TxFloorCostPerToken))
+                        .saturating_mul(
+                            gas_params
+                                .get(evm2::version::GasId::TxTokenNonZeroByteMultiplier)
+                                .max(
                                     gas_params.get(evm2::version::GasId::TxFloorZeroByteMultiplier),
-                                ))
+                                )
                                 .max(1),
-                            );
+                        );
                     // Built-in witnesses are filled after this unsigned request is returned.
                     let max_gas = evm2::ethereum::eip8141::FrameGas::calculate(
                         preview.frame_transaction().ok_or_else(|| {

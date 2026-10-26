@@ -417,14 +417,12 @@ pub trait EstimateCall: Call {
                 .try_fold(0u64, |sum, length| sum.checked_add(length as u64))
                 .ok_or_else(|| invalid("signature gas overflows"))?;
             let signature_gas = signature_bytes
-                .checked_mul(u64::from(
-                    gas_params.get(evm2::version::GasId::TxTokenNonZeroByteMultiplier),
-                ))
+                .checked_mul(gas_params.get(evm2::version::GasId::TxTokenNonZeroByteMultiplier))
                 .and_then(|tokens| {
                     tokens.checked_mul(
-                        u64::from(gas_params.get(evm2::version::GasId::TxTokenCost)).max(
-                            u64::from(gas_params.get(evm2::version::GasId::TxFloorCostPerToken)),
-                        ),
+                        gas_params
+                            .get(evm2::version::GasId::TxTokenCost)
+                            .max(gas_params.get(evm2::version::GasId::TxFloorCostPerToken)),
                     )
                 })
                 .ok_or_else(|| invalid("signature gas overflows"))?;
