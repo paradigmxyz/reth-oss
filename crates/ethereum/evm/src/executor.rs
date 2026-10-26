@@ -1061,7 +1061,7 @@ mod tests {
         bytecode::Bytecode,
         env::BlockEnv,
         evm::{AccountInfo, Database, Db, InMemoryDB, BEACON_ROOTS_ADDRESS},
-        interpreter::Word,
+        interpreter::{InstrStop, Word},
         BaseEvmTypes, SpecId,
     };
     use reth_chainspec::{Chain, ChainSpecBuilder, EthereumHardfork, ForkCondition};
@@ -1662,15 +1662,18 @@ mod tests {
                 U256::from(37)
             );
             let bal = executor.take_block_access_list().unwrap();
-            let account = bal.iter().find(|account| account.address == address).unwrap();
-            assert_eq!(account.nonce_changes.len(), usize::from(transition));
+            let account = bal.iter().find(|account| account.address == address);
             if transition {
+                let account = account.unwrap();
+                assert_eq!(account.nonce_changes.len(), 1);
                 assert_eq!(account.nonce_changes[0].new_nonce, 1);
                 assert_eq!(account.nonce_changes[0].block_access_index, BlockAccessIndex::new(0));
+                assert!(account.balance_changes.is_empty());
+                assert!(account.code_changes.is_empty());
+                assert!(account.storage_changes.is_empty());
+            } else {
+                assert!(account.is_none());
             }
-            assert!(account.balance_changes.is_empty());
-            assert!(account.code_changes.is_empty());
-            assert!(account.storage_changes.is_empty());
         }
     }
 
@@ -1742,7 +1745,8 @@ mod tests {
             let tx = TransactionSigned::Legacy(
                 TxLegacy {
                     chain_id: Some(1),
-                    gas_limit: 200_000,
+                    // Leave room for Amsterdam's separate account-creation state gas.
+                    gas_limit: 500_000,
                     gas_price: 1,
                     to: TxKind::Create,
                     input: Bytes::from_static(&[0]),
@@ -1750,7 +1754,13 @@ mod tests {
                 }
                 .into_signed(Signature::test_signature()),
             );
-            executor.execute_transaction(Recovered::new_unchecked(tx, sender)).unwrap();
+            let output = executor
+                .execute_transaction_without_commit(Recovered::new_unchecked(tx, sender))
+                .unwrap();
+            if timestamp == 10 {
+                assert_eq!(output.result().result.stop, InstrStop::CreateCollision);
+            }
+            executor.commit_transaction(output).unwrap();
             assert_eq!(executor.receipts[0].status(), timestamp == 9);
             assert_eq!(
                 executor.evm.state_mut().storage_slot_untracked(&target, &U256::ZERO).unwrap(),
@@ -1827,18 +1837,21 @@ mod tests {
             assert_eq!(system_call.storage[0].0, U256::from(1));
             let bal = executor.take_block_access_list().unwrap();
             for address in addresses {
-                let account = bal.iter().find(|account| account.address == *address).unwrap();
-                assert_eq!(account.nonce_changes.len(), usize::from(!empty_override));
-                if !empty_override {
+                let account = bal.iter().find(|account| account.address == *address);
+                if empty_override {
+                    assert!(account.is_none());
+                } else {
+                    let account = account.unwrap();
+                    assert_eq!(account.nonce_changes.len(), 1);
                     assert_eq!(account.nonce_changes[0].new_nonce, 1);
                     assert_eq!(
                         account.nonce_changes[0].block_access_index,
                         BlockAccessIndex::new(0)
                     );
+                    assert!(account.balance_changes.is_empty());
+                    assert!(account.code_changes.is_empty());
+                    assert!(account.storage_changes.is_empty());
                 }
-                assert!(account.balance_changes.is_empty());
-                assert!(account.code_changes.is_empty());
-                assert!(account.storage_changes.is_empty());
             }
         }
     }

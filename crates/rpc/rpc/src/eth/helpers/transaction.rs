@@ -212,11 +212,12 @@ mod tests {
             excess_blob_gas: Some(0),
             base_fee_per_gas: Some(1000000000),
             blob_gas_used: Some(0),
+            parent_beacon_block_root: Some(B256::ZERO),
             slot_number: mock_provider.chain_spec().is_bogota_active_at_timestamp(1).then_some(1),
             ..Default::default()
         };
 
-        let genesis_hash = B256::ZERO;
+        let genesis_hash = genesis_header.hash_slow();
         mock_provider.add_block(genesis_hash, Block::new(genesis_header, Default::default()));
 
         EthApi::builder(mock_provider, pool, NoopNetwork::default(), evm_config)
@@ -999,22 +1000,19 @@ mod tests {
             )
             .build();
             if timestamp > 1 {
-                api.provider().add_block(
-                    B256::repeat_byte(1),
-                    Block::new(
-                        Header {
-                            number: 1,
-                            timestamp,
-                            gas_limit: 30_000_000,
-                            base_fee_per_gas: Some(1_000_000_000),
-                            excess_blob_gas: Some(0),
-                            blob_gas_used: Some(0),
-                            slot_number: Some(1),
-                            ..Default::default()
-                        },
-                        Default::default(),
-                    ),
-                );
+                let header = Header {
+                    number: 1,
+                    timestamp,
+                    gas_limit: 30_000_000,
+                    base_fee_per_gas: Some(1_000_000_000),
+                    excess_blob_gas: Some(0),
+                    blob_gas_used: Some(0),
+                    parent_beacon_block_root: Some(B256::ZERO),
+                    slot_number: Some(1),
+                    ..Default::default()
+                };
+                api.provider()
+                    .add_block(header.hash_slow(), Block::new(header, Default::default()));
             }
             let transaction = TxEip8141 {
                 chain_id: 1,

@@ -2865,17 +2865,23 @@ mod tests {
             let mut pool = AllTransactions::default();
             let mut factory = MockTransactionFactory::default();
             let mut costs = Vec::new();
-            for (lane, nonce, price) in [(ordinary, 0, 1), (ordinary, 2, 2), (keyed, 0, 3)] {
+            for (lane, nonce, price) in [
+                (ordinary, 0, MIN_PROTOCOL_BASE_FEE),
+                (ordinary, 2, MIN_PROTOCOL_BASE_FEE + 1),
+                (keyed, 0, MIN_PROTOCOL_BASE_FEE + 2),
+            ] {
                 let mut transaction = factory.validated(
                     MockTransaction::legacy()
                         .with_sender(payer)
                         .with_nonce(nonce)
-                        .with_gas_price(price),
+                        .with_gas_price(u128::from(price))
+                        .with_gas_limit(21_000),
                 );
                 transaction.transaction_id = TransactionId::new(lane, nonce);
                 costs.push((transaction.transaction_id, *transaction.cost()));
                 pool.insert_tx(transaction, U256::MAX, 0).unwrap();
             }
+            assert!(costs.iter().all(|(_, cost)| !cost.is_zero()));
             let total = costs.iter().map(|(_, cost)| *cost).sum::<U256>();
             assert_eq!(pool.ordinary_payer_cost(payer, None), Some(total));
             assert_eq!(pool.ordinary_payer_cost(payer, Some(costs[0].0)), Some(total - costs[0].1));
@@ -2907,13 +2913,14 @@ mod tests {
     #[test]
     fn frame_payer_reservations_include_ordinary_pending_and_queued_exposure() {
         let payer = Address::repeat_byte(1);
+        let ordinary_cost = U256::from(42_000) * U256::from(MIN_PROTOCOL_BASE_FEE);
         let mut pool = AllTransactions::default();
         for nonce in [0, 2] {
             let transaction = TransactionSigned::new_unhashed(
                 TxLegacy {
                     nonce,
                     gas_limit: 21_000,
-                    gas_price: 1,
+                    gas_price: u128::from(MIN_PROTOCOL_BASE_FEE),
                     to: Address::ZERO.into(),
                     ..Default::default()
                 }
@@ -2941,22 +2948,22 @@ mod tests {
         let mut keyed =
             validated_frame(payer, SenderId::from(2), 0, 100, 1, Some(vec![U256::from(1)]));
         Arc::make_mut(keyed.transaction.frame_validation.as_mut().unwrap()).payer_balance =
-            U256::from(42_001);
+            ordinary_cost + U256::ONE;
         let keyed_hash = *keyed.hash();
         pool.insert_tx(keyed, U256::MAX, 0).unwrap();
-        assert_eq!(pool.ordinary_payer_cost(payer, None), Some(U256::from(42_000)));
+        assert_eq!(pool.ordinary_payer_cost(payer, None), Some(ordinary_cost));
 
         let mut sponsored =
             validated_frame(Address::repeat_byte(2), SenderId::from(3), 0, 100, 2, None);
         let metadata = Arc::make_mut(sponsored.transaction.frame_validation.as_mut().unwrap());
         metadata.payer = payer;
-        metadata.payer_balance = U256::from(42_001);
+        metadata.payer_balance = ordinary_cost + U256::ONE;
         assert!(matches!(
             pool.insert_tx(sponsored.clone(), U256::MAX, 0),
             Err(InsertErr::FramePolicy { reason: "payer balance exceeded", .. })
         ));
         pool.remove_transaction_by_hash(&keyed_hash).unwrap();
-        assert_eq!(pool.ordinary_payer_cost(payer, None), Some(U256::from(42_000)));
+        assert_eq!(pool.ordinary_payer_cost(payer, None), Some(ordinary_cost));
         assert!(matches!(
             pool.insert_tx(sponsored, U256::MAX, 0),
             Err(InsertErr::FramePolicy { reason: "payer balance exceeded", .. })

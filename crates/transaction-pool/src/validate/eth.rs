@@ -2051,7 +2051,7 @@ mod tests {
 
     #[test]
     fn eip8141_blob_count_obeys_active_limit() {
-        let provider = MockEthProvider::default().with_genesis_block();
+        let provider = mock_provider();
         let validator = EthTransactionValidatorBuilder::new(provider, test_evm_config())
             .set_bogota(true)
             .set_cancun(true)
@@ -2060,7 +2060,7 @@ mod tests {
         let sender = Address::repeat_byte(0x41);
         for count in [0, 1] {
             let transaction = eip8141_tx_with_blobs(validator.chain_id(), sender, count);
-            assert!(validator.validate_stateless(TransactionOrigin::Local, &transaction).is_ok());
+            validator.validate_stateless(TransactionOrigin::Local, &transaction).unwrap();
         }
         let transaction = eip8141_tx_with_blobs(validator.chain_id(), sender, 2);
         assert!(matches!(
@@ -2074,7 +2074,7 @@ mod tests {
     #[test]
     fn eip8141_local_transaction_skips_eoa_and_sender_balance_checks() {
         let sender = Address::repeat_byte(0x41);
-        let provider = MockEthProvider::default().with_genesis_block();
+        let provider = mock_provider();
         provider.add_account(
             sender,
             ExtendedAccount::new(0, U256::ZERO).with_bytecode(Bytes::from_static(&[0x60, 0x00])),

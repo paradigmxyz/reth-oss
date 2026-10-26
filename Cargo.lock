@@ -3642,7 +3642,7 @@ dependencies = [
 [[package]]
 name = "evm2"
 version = "0.1.0"
-source = "git+https://github.com/Rimeeeeee/evm2?branch=bogota-plan#36f1ed9d5a1ae08bf24ee013b45e7c902534e5a1"
+source = "git+https://github.com/Rimeeeeee/evm2?branch=bogota-plan#5f6fd9e9cd2797271e71a7131d4a4ed3fb4c433a"
 dependencies = [
  "alloy-consensus",
  "alloy-eip7928",
@@ -3681,7 +3681,7 @@ dependencies = [
 [[package]]
 name = "evm2-inspectors"
 version = "0.1.0"
-source = "git+https://github.com/Rimeeeeee/evm2?branch=bogota-plan#36f1ed9d5a1ae08bf24ee013b45e7c902534e5a1"
+source = "git+https://github.com/Rimeeeeee/evm2?branch=bogota-plan#5f6fd9e9cd2797271e71a7131d4a4ed3fb4c433a"
 dependencies = [
  "alloy-consensus",
  "alloy-eip2930",
@@ -3704,7 +3704,7 @@ dependencies = [
 [[package]]
 name = "evm2-jit"
 version = "0.1.0"
-source = "git+https://github.com/Rimeeeeee/evm2?branch=bogota-plan#36f1ed9d5a1ae08bf24ee013b45e7c902534e5a1"
+source = "git+https://github.com/Rimeeeeee/evm2?branch=bogota-plan#5f6fd9e9cd2797271e71a7131d4a4ed3fb4c433a"
 dependencies = [
  "evm2",
  "evm2-jit-backend",
@@ -3719,7 +3719,7 @@ dependencies = [
 [[package]]
 name = "evm2-jit-backend"
 version = "0.1.0"
-source = "git+https://github.com/Rimeeeeee/evm2?branch=bogota-plan#36f1ed9d5a1ae08bf24ee013b45e7c902534e5a1"
+source = "git+https://github.com/Rimeeeeee/evm2?branch=bogota-plan#5f6fd9e9cd2797271e71a7131d4a4ed3fb4c433a"
 dependencies = [
  "eyre",
  "ruint",
@@ -3728,12 +3728,12 @@ dependencies = [
 [[package]]
 name = "evm2-jit-build"
 version = "0.1.0"
-source = "git+https://github.com/Rimeeeeee/evm2?branch=bogota-plan#36f1ed9d5a1ae08bf24ee013b45e7c902534e5a1"
+source = "git+https://github.com/Rimeeeeee/evm2?branch=bogota-plan#5f6fd9e9cd2797271e71a7131d4a4ed3fb4c433a"
 
 [[package]]
 name = "evm2-jit-builtins"
 version = "0.1.0"
-source = "git+https://github.com/Rimeeeeee/evm2?branch=bogota-plan#36f1ed9d5a1ae08bf24ee013b45e7c902534e5a1"
+source = "git+https://github.com/Rimeeeeee/evm2?branch=bogota-plan#5f6fd9e9cd2797271e71a7131d4a4ed3fb4c433a"
 dependencies = [
  "alloy-primitives",
  "evm2",
@@ -3746,7 +3746,7 @@ dependencies = [
 [[package]]
 name = "evm2-jit-codegen"
 version = "0.1.0"
-source = "git+https://github.com/Rimeeeeee/evm2?branch=bogota-plan#36f1ed9d5a1ae08bf24ee013b45e7c902534e5a1"
+source = "git+https://github.com/Rimeeeeee/evm2?branch=bogota-plan#5f6fd9e9cd2797271e71a7131d4a4ed3fb4c433a"
 dependencies = [
  "alloy-primitives",
  "bitflags 2.13.2",
@@ -3769,7 +3769,7 @@ dependencies = [
 [[package]]
 name = "evm2-jit-context"
 version = "0.1.0"
-source = "git+https://github.com/Rimeeeeee/evm2?branch=bogota-plan#36f1ed9d5a1ae08bf24ee013b45e7c902534e5a1"
+source = "git+https://github.com/Rimeeeeee/evm2?branch=bogota-plan#5f6fd9e9cd2797271e71a7131d4a4ed3fb4c433a"
 dependencies = [
  "alloy-primitives",
  "evm2",
@@ -3779,7 +3779,7 @@ dependencies = [
 [[package]]
 name = "evm2-jit-llvm"
 version = "0.1.0"
-source = "git+https://github.com/Rimeeeeee/evm2?branch=bogota-plan#36f1ed9d5a1ae08bf24ee013b45e7c902534e5a1"
+source = "git+https://github.com/Rimeeeeee/evm2?branch=bogota-plan#5f6fd9e9cd2797271e71a7131d4a4ed3fb4c433a"
 dependencies = [
  "alloy-primitives",
  "cc",
@@ -3792,7 +3792,7 @@ dependencies = [
 [[package]]
 name = "evm2-jit-runtime"
 version = "0.1.0"
-source = "git+https://github.com/Rimeeeeee/evm2?branch=bogota-plan#36f1ed9d5a1ae08bf24ee013b45e7c902534e5a1"
+source = "git+https://github.com/Rimeeeeee/evm2?branch=bogota-plan#5f6fd9e9cd2797271e71a7131d4a4ed3fb4c433a"
 dependencies = [
  "alloy-primitives",
  "crossbeam-channel",
@@ -3820,7 +3820,7 @@ dependencies = [
 [[package]]
 name = "evm2-macros"
 version = "0.1.0"
-source = "git+https://github.com/Rimeeeeee/evm2?branch=bogota-plan#36f1ed9d5a1ae08bf24ee013b45e7c902534e5a1"
+source = "git+https://github.com/Rimeeeeee/evm2?branch=bogota-plan#5f6fd9e9cd2797271e71a7131d4a4ed3fb4c433a"
 dependencies = [
  "proc-macro2",
  "quote",

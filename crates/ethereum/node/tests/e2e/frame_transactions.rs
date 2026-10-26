@@ -3,9 +3,9 @@
 use alloy_consensus::{Transaction, TxEip8141};
 use alloy_eips::{
     eip8141::{
-        nonce_slot, Frame, FrameAddress, FrameLimits, FrameMode, FrameSignature, TransactionFees,
-        ATOMIC_BATCH_FLAG, EXPIRY_VERIFIER, EXPIRY_VERIFIER_RUNTIME, NONCE_MANAGER,
-        NONCE_MANAGER_CODE,
+        nonce_slot, Frame, FrameAddress, FrameLimits, FrameMode, FrameSignature, SignatureScheme,
+        TransactionFees, ATOMIC_BATCH_FLAG, EXPIRY_VERIFIER, EXPIRY_VERIFIER_RUNTIME,
+        NONCE_MANAGER, NONCE_MANAGER_CODE,
     },
     Decodable2718,
 };
@@ -91,7 +91,7 @@ fn frame_tx(signer: &PrivateKeySigner, nonce: u64, frames: Vec<Frame>) -> Bytes 
         sender: signer.address(),
         frames,
         signatures: vec![FrameSignature {
-            scheme: Default::default(),
+            scheme: SignatureScheme::Secp256k1,
             signature: Bytes::from(vec![0; 65]),
             ..Default::default()
         }],

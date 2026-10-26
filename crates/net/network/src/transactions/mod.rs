@@ -3301,8 +3301,16 @@ mod tests {
         let (mut manager, network) = new_eth_tx_manager().await;
         let handle = network.handle().clone();
         let peer_id = PeerId::repeat_byte(1);
+        let (peer, _session_rx) = new_mock_session(peer_id, EthVersion::Eth68);
+        manager.peers.insert(peer_id, peer);
+        handle.update_sync_state(SyncState::Idle);
         handle.set_network_hibernate();
-        handle.add_peer(peer_id, SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0));
+        handle.add_peer_kind(
+            peer_id,
+            Some(PeerKind::Basic),
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+            None,
+        );
         let task = tokio::spawn(network);
         let blobless = frame_transaction(false);
         let blob = frame_transaction(true);
