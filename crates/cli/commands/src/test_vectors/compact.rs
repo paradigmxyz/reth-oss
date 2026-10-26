@@ -295,6 +295,7 @@ pub fn type_name<T>() -> String {
     // With alloy type transition <https://github.com/paradigmxyz/reth/pull/15768> the types are renamed, we map them here to the original name so that test vector files remain consistent
     let name = std::any::type_name::<T>();
     match name {
+        "reth_ethereum_primitives::receipt::Receipt" => "EthereumReceipt".to_string(),
         "alloy_consensus::transaction::envelope::EthereumTypedTransaction<alloy_consensus::transaction::eip4844::TxEip4844>" => "Transaction".to_string(),
         "alloy_consensus::transaction::envelope::EthereumTxEnvelope<alloy_consensus::transaction::eip4844::TxEip4844>" => "TransactionSigned".to_string(),
         name => {
@@ -374,6 +375,7 @@ fn decode_legacy_frame_vector(
 mod tests {
     use super::*;
     use alloy_consensus::TxEip8141;
+    use alloy_primitives::Sealable;
     use reth_codecs::Compact;
 
     const LEGACY_PAYLOAD: &str = concat!(
@@ -386,6 +388,11 @@ mod tests {
         ("Transaction", &[FRAME_TX_TYPE, FRAME_TX_TYPE]),
         ("TransactionSigned", &[u8::MAX, FRAME_TX_TYPE, FRAME_TX_TYPE]),
     ];
+
+    #[test]
+    fn receipt_vectors_keep_the_existing_filename() {
+        assert_eq!(type_name::<Receipt>(), "EthereumReceipt");
+    }
 
     #[test]
     fn legacy_frame_vectors_preserve_nested_fees_and_untyped_metadata() {

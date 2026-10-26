@@ -468,9 +468,6 @@ fn transaction_request_to_evm2(
     let TransactionRequest {
         from,
         to,
-        gas_price: _,
-        max_fee_per_gas: _,
-        max_priority_fee_per_gas: _,
         gas,
         value,
         input,
@@ -478,10 +475,7 @@ fn transaction_request_to_evm2(
         access_list,
         chain_id,
         blob_versioned_hashes,
-        max_fee_per_blob_gas: _,
         authorization_list,
-        transaction_type: _,
-        sidecar: _,
         ..
     } = request;
     let input = input.try_into_unique_input()?.unwrap_or_default();

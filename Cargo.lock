@@ -3642,7 +3642,7 @@ dependencies = [
 [[package]]
 name = "evm2"
 version = "0.1.0"
-source = "git+https://github.com/Rimeeeeee/evm2?branch=bogota-plan#607463e46f20573210dc55c1f1cff2fff78c6a6b"
+source = "git+https://github.com/Rimeeeeee/evm2?branch=bogota-plan#36f1ed9d5a1ae08bf24ee013b45e7c902534e5a1"
 dependencies = [
  "alloy-consensus",
  "alloy-eip7928",
@@ -3672,6 +3672,7 @@ dependencies = [
  "secp256k1 0.33.1",
  "serde",
  "sha2 0.11.0",
+ "stacker",
  "thiserror 2.0.21",
  "triomphe",
  "typeid",
@@ -3680,7 +3681,7 @@ dependencies = [
 [[package]]
 name = "evm2-inspectors"
 version = "0.1.0"
-source = "git+https://github.com/Rimeeeeee/evm2?branch=bogota-plan#607463e46f20573210dc55c1f1cff2fff78c6a6b"
+source = "git+https://github.com/Rimeeeeee/evm2?branch=bogota-plan#36f1ed9d5a1ae08bf24ee013b45e7c902534e5a1"
 dependencies = [
  "alloy-consensus",
  "alloy-eip2930",
@@ -3703,7 +3704,7 @@ dependencies = [
 [[package]]
 name = "evm2-jit"
 version = "0.1.0"
-source = "git+https://github.com/Rimeeeeee/evm2?branch=bogota-plan#607463e46f20573210dc55c1f1cff2fff78c6a6b"
+source = "git+https://github.com/Rimeeeeee/evm2?branch=bogota-plan#36f1ed9d5a1ae08bf24ee013b45e7c902534e5a1"
 dependencies = [
  "evm2",
  "evm2-jit-backend",
@@ -3718,7 +3719,7 @@ dependencies = [
 [[package]]
 name = "evm2-jit-backend"
 version = "0.1.0"
-source = "git+https://github.com/Rimeeeeee/evm2?branch=bogota-plan#607463e46f20573210dc55c1f1cff2fff78c6a6b"
+source = "git+https://github.com/Rimeeeeee/evm2?branch=bogota-plan#36f1ed9d5a1ae08bf24ee013b45e7c902534e5a1"
 dependencies = [
  "eyre",
  "ruint",
@@ -3727,12 +3728,12 @@ dependencies = [
 [[package]]
 name = "evm2-jit-build"
 version = "0.1.0"
-source = "git+https://github.com/Rimeeeeee/evm2?branch=bogota-plan#607463e46f20573210dc55c1f1cff2fff78c6a6b"
+source = "git+https://github.com/Rimeeeeee/evm2?branch=bogota-plan#36f1ed9d5a1ae08bf24ee013b45e7c902534e5a1"
 
 [[package]]
 name = "evm2-jit-builtins"
 version = "0.1.0"
-source = "git+https://github.com/Rimeeeeee/evm2?branch=bogota-plan#607463e46f20573210dc55c1f1cff2fff78c6a6b"
+source = "git+https://github.com/Rimeeeeee/evm2?branch=bogota-plan#36f1ed9d5a1ae08bf24ee013b45e7c902534e5a1"
 dependencies = [
  "alloy-primitives",
  "evm2",
@@ -3745,7 +3746,7 @@ dependencies = [
 [[package]]
 name = "evm2-jit-codegen"
 version = "0.1.0"
-source = "git+https://github.com/Rimeeeeee/evm2?branch=bogota-plan#607463e46f20573210dc55c1f1cff2fff78c6a6b"
+source = "git+https://github.com/Rimeeeeee/evm2?branch=bogota-plan#36f1ed9d5a1ae08bf24ee013b45e7c902534e5a1"
 dependencies = [
  "alloy-primitives",
  "bitflags 2.13.2",
@@ -3768,7 +3769,7 @@ dependencies = [
 [[package]]
 name = "evm2-jit-context"
 version = "0.1.0"
-source = "git+https://github.com/Rimeeeeee/evm2?branch=bogota-plan#607463e46f20573210dc55c1f1cff2fff78c6a6b"
+source = "git+https://github.com/Rimeeeeee/evm2?branch=bogota-plan#36f1ed9d5a1ae08bf24ee013b45e7c902534e5a1"
 dependencies = [
  "alloy-primitives",
  "evm2",
@@ -3778,7 +3779,7 @@ dependencies = [
 [[package]]
 name = "evm2-jit-llvm"
 version = "0.1.0"
-source = "git+https://github.com/Rimeeeeee/evm2?branch=bogota-plan#607463e46f20573210dc55c1f1cff2fff78c6a6b"
+source = "git+https://github.com/Rimeeeeee/evm2?branch=bogota-plan#36f1ed9d5a1ae08bf24ee013b45e7c902534e5a1"
 dependencies = [
  "alloy-primitives",
  "cc",
@@ -3791,7 +3792,7 @@ dependencies = [
 [[package]]
 name = "evm2-jit-runtime"
 version = "0.1.0"
-source = "git+https://github.com/Rimeeeeee/evm2?branch=bogota-plan#607463e46f20573210dc55c1f1cff2fff78c6a6b"
+source = "git+https://github.com/Rimeeeeee/evm2?branch=bogota-plan#36f1ed9d5a1ae08bf24ee013b45e7c902534e5a1"
 dependencies = [
  "alloy-primitives",
  "crossbeam-channel",
@@ -3819,7 +3820,7 @@ dependencies = [
 [[package]]
 name = "evm2-macros"
 version = "0.1.0"
-source = "git+https://github.com/Rimeeeeee/evm2?branch=bogota-plan#607463e46f20573210dc55c1f1cff2fff78c6a6b"
+source = "git+https://github.com/Rimeeeeee/evm2?branch=bogota-plan#36f1ed9d5a1ae08bf24ee013b45e7c902534e5a1"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -7547,6 +7548,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f94967dc7688f3054c7fac87473ffae4cc4c3904800e2d9f5b857246d8963b0a"
 dependencies = [
  "prost",
+]
+
+[[package]]
+name = "psm"
+version = "0.1.24"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "200b9ff220857e53e184257720a14553b2f4aa02577d2ed9842d45d4b9654810"
+dependencies = [
+ "cc",
 ]
 
 [[package]]
@@ -12259,6 +12269,19 @@ name = "stable_deref_trait"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
+
+[[package]]
+name = "stacker"
+version = "0.1.25"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "707f49d46706bacf8a2b00d51dace3f9de527c13eec3778f570c411f89e69967"
+dependencies = [
+ "cc",
+ "cfg-if",
+ "libc",
+ "psm",
+ "windows-sys 0.60.2",
+]
 
 [[package]]
 name = "static_assertions"
