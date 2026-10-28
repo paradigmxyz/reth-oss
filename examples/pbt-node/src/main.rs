@@ -4,9 +4,12 @@
 //! This example exercises live engine processing, not staged or snap synchronization.
 
 use alloy_primitives::U256;
-use reth_engine_tree::tree::{
-    state_root_strategy::{pbt::PbtStateRootStrategy, StateRootStrategy},
-    BasicEngineValidator, TreeConfig,
+use reth_engine_tree::{
+    backfill::{BackfillAction, BackfillEvent, BackfillSync},
+    tree::{
+        state_root_strategy::{pbt::PbtStateRootStrategy, StateRootStrategy},
+        BasicEngineValidator, TreeConfig,
+    },
 };
 use reth_ethereum::{
     chainspec::ChainSpec,
@@ -16,17 +19,22 @@ use reth_ethereum::{
                 BasicEngineApiBuilder, BasicEngineValidatorBuilder, EngineValidatorBuilder,
                 EthApiBuilder, Identity, RpcAddOns,
             },
+            sync::{BackfillContext, BackfillSyncBuilder},
             FullNodeComponents, NodeBuilder,
         },
         core::{args::RpcServerArgs, node_config::NodeConfig},
         EthereumAddOns, EthereumEngineValidatorBuilder, EthereumEthApiBuilder, EthereumNode,
     },
+    provider::{providers::ProviderNodeTypes, ProviderError},
     tasks::Runtime,
     EthPrimitives,
 };
 use reth_storage_overlay::OverlayManager;
 use reth_trie_pbt::{migration::DecodeLimits, persistence::SnapshotStore, AccountData, StateTree};
-use std::sync::Arc;
+use std::{
+    sync::Arc,
+    task::{Context, Poll},
+};
 
 #[derive(Clone, Debug)]
 struct PbtValidatorBuilder {
@@ -139,13 +147,46 @@ async fn main() -> eyre::Result<()> {
             ctx.auth_module.remove_auth_method("eth_getProof");
             Ok(())
         })
-        .launch_with_debug_capabilities()
+        .launch_with_debug_capabilities_and_backfill(PbtBackfill::default())
         .await?;
     println!(
         "PBT dev node running; HTTP RPC: {:?}",
         handle.node.rpc_server_handles.rpc.http_local_addr()
     );
     handle.wait_for_node_exit().await
+}
+
+/// Refuses sync paths that still validate MPT roots outside the installed live strategy.
+#[derive(Debug, Default)]
+struct PbtBackfill {
+    requested: bool,
+}
+
+impl<N: ProviderNodeTypes, C> BackfillSyncBuilder<N, C> for PbtBackfill {
+    type Backfill = Self;
+
+    fn build(self, _ctx: BackfillContext<N, C>) -> eyre::Result<Self::Backfill> {
+        Ok(self)
+    }
+}
+
+impl BackfillSync for PbtBackfill {
+    fn on_action(&mut self, action: BackfillAction) {
+        if matches!(action, BackfillAction::Start(_)) {
+            self.requested = true;
+        }
+    }
+
+    fn poll(&mut self, _cx: &mut Context<'_>) -> Poll<BackfillEvent> {
+        if !std::mem::take(&mut self.requested) {
+            return Poll::Pending
+        }
+        Poll::Ready(BackfillEvent::Finished(Err(ProviderError::other(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "PBT dev node does not support staged/backfill sync",
+        ))
+        .into())))
+    }
 }
 
 #[cfg(test)]
@@ -197,7 +238,7 @@ mod tests {
                 ctx.auth_module.remove_auth_method("eth_getProof");
                 Ok(())
             })
-            .launch_with_debug_capabilities()
+            .launch_with_debug_capabilities_and_backfill(PbtBackfill::default())
             .await?;
         let node =
             NodeTestContext::new(node, move |timestamp| eth_payload_attributes(&*chain, timestamp))
@@ -341,5 +382,22 @@ mod tests {
             .await;
         assert!(matches!(result, Some(Err(_))));
         Ok(())
+    }
+
+    #[test]
+    fn unsupported_backfill_fails_before_running_pipeline() {
+        let mut backfill = PbtBackfill::default();
+        let mut cx = Context::from_waker(std::task::Waker::noop());
+        assert!(backfill.poll(&mut cx).is_pending());
+        backfill.on_action(BackfillAction::UpdateFinalized(B256::repeat_byte(1)));
+        backfill.on_action(BackfillAction::UpdateTarget(B256::repeat_byte(2)));
+        assert!(backfill.poll(&mut cx).is_pending());
+
+        backfill.on_action(BackfillAction::Start(B256::repeat_byte(3).into()));
+        let Poll::Ready(BackfillEvent::Finished(Err(error))) = backfill.poll(&mut cx) else {
+            panic!("unsupported backfill must fail immediately");
+        };
+        assert_eq!(error.to_string(), "PBT dev node does not support staged/backfill sync");
+        assert!(backfill.poll(&mut cx).is_pending());
     }
 }

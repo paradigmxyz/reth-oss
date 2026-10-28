@@ -15,6 +15,7 @@ Internal PBT proof generation/verification is available in `reth-trie-pbt`.
 
 The tests cover transfers, contract deployment and overflow storage, competing
 branches, reorgs, timestamp activation, BAL replay, early empty payloads, and
-missing-checkpoint failures. This example does not support staged/backfill
-or PBT-native snap sync. See the [PBT crate](../../crates/trie/pbt/README.md) for the
+missing-checkpoint failures. The example refuses staged/backfill sync with an
+explicit error before the stock MPT pipeline can execute. It does not support
+PBT-native snap sync. See the [PBT crate](../../crates/trie/pbt/README.md) for the
 implemented surfaces and remaining production integration work.

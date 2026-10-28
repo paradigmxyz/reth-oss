@@ -89,7 +89,7 @@ impl<H: TreeHasher> SnapshotStore<H> {
         let root = state.root();
         let mut cache = self.cache.lock().map_err(|_| StoreError::Poisoned)?;
         let artifacts = Artifacts::from_state(state)?;
-        atomic_write(&self.state_path(root), |file| -> std::io::Result<()> {
+        reth_fs_util::atomic_write_file(&self.state_path(root), |file| -> std::io::Result<()> {
             file.write_all(&(artifacts.preimages.len() as u64).to_be_bytes())?;
             file.write_all(&artifacts.preimages)?;
             file.write_all(&artifacts.snapshot)
@@ -104,9 +104,10 @@ impl<H: TreeHasher> SnapshotStore<H> {
     pub fn save_block(&self, block: B256, state: &StateTree<H>) -> Result<B256, StoreError> {
         let root = self.save(state)?;
         let _guard = self.cache.lock().map_err(|_| StoreError::Poisoned)?;
-        atomic_write(&self.path.join("blocks").join(block.to_string()), |file| {
-            file.write_all(root.as_slice())
-        })?;
+        reth_fs_util::atomic_write_file(
+            &self.path.join("blocks").join(block.to_string()),
+            |file| file.write_all(root.as_slice()),
+        )?;
         Ok(root)
     }
 
@@ -144,28 +145,4 @@ fn cache_state<H>(cache: &mut BTreeMap<B256, StateTree<H>>, root: B256, state: S
         cache.pop_first();
     }
     cache.insert(root, state);
-}
-
-fn atomic_write(
-    path: &Path,
-    write: impl FnOnce(&mut std::fs::File) -> std::io::Result<()>,
-) -> Result<(), reth_fs_util::FsPathError> {
-    #[cfg(unix)]
-    {
-        reth_fs_util::atomic_write_file(path, write)
-    }
-    // Windows cannot open a directory through File::open for the parent-directory flush
-    // performed by atomic_write_file. File contents are still flushed before replacement.
-    #[cfg(not(unix))]
-    {
-        let temporary = path.with_extension("tmp");
-        let mut file = reth_fs_util::create_file(&temporary)?;
-        if let Err(error) = write(&mut file).and_then(|()| file.sync_all()) {
-            drop(file);
-            let _ = reth_fs_util::remove_file_if_exists(&temporary);
-            return Err(reth_fs_util::FsPathError::write(error, &temporary));
-        }
-        drop(file);
-        reth_fs_util::rename(&temporary, path)
-    }
 }

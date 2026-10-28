@@ -8,8 +8,8 @@ use alloy_eip7928::{
 };
 use alloy_primitives::{Address, B256, U256};
 use reth_trie_pbt::{
-    replay::{replay, ReplayChain},
-    AccountData, Blake3Hasher, StateTree,
+    replay::{replay, ReplayChain, ReplayError},
+    AccountData, Blake3Hasher, StateError, StateTree,
 };
 
 fn balance(address: Address, value: u64) -> AccountChanges {
@@ -92,4 +92,104 @@ fn read_only_bal_does_not_create_accounts_and_bad_hash_is_rejected() {
     assert!(replay(&parent, &bal, B256::ZERO).is_err());
     let bal = vec![balance(Address::ZERO, 1), balance(Address::ZERO, 2)];
     assert!(replay(&parent, &bal, compute_block_access_list_hash(&bal)).is_err());
+}
+
+#[test]
+fn noncanonical_storage_reads_are_rejected_without_retaining_a_layer() {
+    let address = Address::repeat_byte(1);
+    let anchor = B256::repeat_byte(1);
+    let child = B256::repeat_byte(2);
+    let mut parent = StateTree::<Blake3Hasher>::new();
+    parent.set_account(address, AccountData { nonce: 1, ..Default::default() }).unwrap();
+    let mut chain = ReplayChain::new(anchor, parent.clone());
+    for reads in [vec![U256::from(2), U256::from(1)], vec![U256::from(1); 2]] {
+        let mut changes = balance(address, 10);
+        changes.storage_reads = reads;
+        let bal = vec![changes];
+        assert!(matches!(
+            chain.insert(child, anchor, &bal, compute_block_access_list_hash(&bal)),
+            Err(ReplayError::InvalidOrder)
+        ));
+        assert!(chain.state(child).is_none());
+        assert_eq!(chain.state(anchor).unwrap().root(), parent.root());
+    }
+
+    let mut changes = balance(address, 10);
+    changes.storage_reads = vec![U256::from(1), U256::from(2)];
+    let bal = vec![changes];
+    chain.insert(child, anchor, &bal, compute_block_access_list_hash(&bal)).unwrap();
+    assert_eq!(chain.state(child).unwrap().account(address).unwrap().balance, U256::from(10));
+    assert_eq!(chain.state(anchor).unwrap().root(), parent.root());
+}
+
+#[test]
+fn storage_slots_cannot_be_both_reads_and_writes() {
+    let address = Address::repeat_byte(1);
+    let mut parent = StateTree::<Blake3Hasher>::new();
+    parent.set_account(address, AccountData { nonce: 1, ..Default::default() }).unwrap();
+    let root = parent.root();
+    let mut changes = AccountChanges::new(address);
+    changes.storage_reads = vec![U256::from(1), U256::from(2)];
+    changes.storage_changes.push(SlotChanges::new(
+        U256::from(2),
+        vec![StorageChange::new(BlockAccessIndex::new(1), U256::from(10))],
+    ));
+    let bal = vec![changes];
+    assert!(matches!(
+        replay(&parent, &bal, compute_block_access_list_hash(&bal)),
+        Err(ReplayError::InvalidOrder)
+    ));
+    assert_eq!(parent.root(), root);
+}
+
+#[test]
+fn storage_write_lists_cannot_be_empty() {
+    let mut changes = AccountChanges::new(Address::ZERO);
+    changes.storage_changes.push(SlotChanges::new(U256::from(1), Vec::new()));
+    let bal = vec![changes];
+    assert!(matches!(
+        replay(&StateTree::<Blake3Hasher>::new(), &bal, compute_block_access_list_hash(&bal)),
+        Err(ReplayError::EmptyStorageChanges)
+    ));
+}
+
+#[test]
+fn nonzero_storage_requires_a_surviving_account() {
+    let address = Address::repeat_byte(1);
+    for exists in [false, true] {
+        let mut parent = StateTree::<Blake3Hasher>::new();
+        if exists {
+            parent
+                .set_account(address, AccountData { balance: U256::from(1), ..Default::default() })
+                .unwrap();
+            parent.set_storage(address, U256::from(1), B256::repeat_byte(1)).unwrap();
+        }
+        let root = parent.root();
+        let mut changes = balance(address, 0);
+        changes.storage_changes.push(SlotChanges::new(
+            U256::from(1),
+            vec![StorageChange::new(BlockAccessIndex::new(1), U256::from(10))],
+        ));
+        let bal = vec![changes];
+        assert!(matches!(
+            replay(&parent, &bal, compute_block_access_list_hash(&bal)),
+            Err(ReplayError::State(StateError::MissingAccount(missing))) if missing == address
+        ));
+        assert_eq!(parent.root(), root);
+    }
+}
+
+#[test]
+fn zero_storage_for_an_absent_account_remains_a_deletion() {
+    let mut changes = AccountChanges::new(Address::ZERO);
+    changes.storage_changes.push(SlotChanges::new(
+        U256::from(1),
+        vec![StorageChange::new(BlockAccessIndex::new(1), U256::ZERO)],
+    ));
+    let bal = vec![changes];
+    let state =
+        replay(&StateTree::<Blake3Hasher>::new(), &bal, compute_block_access_list_hash(&bal))
+            .unwrap();
+    assert_eq!(state.root(), B256::ZERO);
+    assert!(state.account(Address::ZERO).is_none());
 }

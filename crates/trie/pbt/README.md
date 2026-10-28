@@ -20,8 +20,10 @@ are drafts. BLAKE3 is the reference/devnet configuration, not a final hash decis
   anchor MPT roots, checks code hashes and PUSH metadata, and rejects noncanonical
   or surplus records. It does not use the older RLP snapshot format.
 - The `bal` feature authenticates access lists against a caller-supplied header
-  commitment and replays post-values. `ReplayChain` retains competing branches by
-  block hash and discards incompatible layers when finality advances.
+  commitment and replays post-values. It rejects noncanonical read/write lists
+  and nonzero storage writes without a surviving account. `ReplayChain` retains
+  competing branches by block hash and discards incompatible layers when finality
+  advances.
 - The `persistence` feature atomically checkpoints complete canonical artifacts
   and publishes block-to-PBT-root references after the state is saved. Reopening
   verifies the checkpoint against its root. All checkpoints remain on disk.
@@ -40,8 +42,9 @@ cargo +nightly run -p example-pbt-node
 cargo +nightly nextest run -p example-pbt-node
 ```
 
-Use a Rust toolchain satisfying the workspace MSRV. Full node tests require a
-supported Unix environment; the portable PBT crate also runs on Windows.
+Use a Rust toolchain satisfying the workspace MSRV in a supported Unix
+environment. Persistence uses Reth's atomic writes, including parent-directory
+sync, without a platform fallback.
 
 See [`testdata/README.md`](testdata/README.md) for the pinned EELS vectors.
 
@@ -72,6 +75,8 @@ every distinct state until operators remove an obsolete devnet directory.
 
 The engine strategy covers live validation, payload construction, shadow roots,
 and fork selection. Staged/backfill sync and snap protocol paths still use MPT.
+The dev-node example explicitly refuses staged/backfill sync before the MPT
+pipeline can run; it must stay within live engine processing.
 External users must integrate or disable those paths before running a PBT network
 that enters backfill. Automatic anchor discovery, downloading snapshots, fetching
 missing BAL ranges, finalized checkpoint pruning, and a public PBT proof RPC are

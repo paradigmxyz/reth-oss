@@ -27,10 +27,18 @@ pub fn replay<H: TreeHasher>(
         validate_indices(changes.balance_changes.iter().map(|change| change.block_access_index))?;
         validate_indices(changes.nonce_changes.iter().map(|change| change.block_access_index))?;
         validate_indices(changes.code_changes.iter().map(|change| change.block_access_index))?;
-        if changes.storage_changes.windows(2).any(|pair| pair[0].slot >= pair[1].slot) {
+        if changes.storage_changes.windows(2).any(|pair| pair[0].slot >= pair[1].slot) ||
+            changes.storage_reads.windows(2).any(|pair| pair[0] >= pair[1])
+        {
             return Err(ReplayError::InvalidOrder);
         }
         for slot in &changes.storage_changes {
+            if slot.changes.is_empty() {
+                return Err(ReplayError::EmptyStorageChanges);
+            }
+            if changes.storage_reads.binary_search(&slot.slot).is_ok() {
+                return Err(ReplayError::InvalidOrder);
+            }
             validate_indices(slot.changes.iter().map(|change| change.block_access_index))?;
         }
         if !changes.has_changes() {
@@ -47,8 +55,10 @@ pub fn replay<H: TreeHasher>(
             account.code = code.clone();
         }
         state.apply_account(changes.address, Some(account))?;
-        if state.account(changes.address).is_some() {
-            for (slot, value) in changes.storage_post_states() {
+        let has_account = state.account(changes.address).is_some();
+        for (slot, value) in changes.storage_post_states() {
+            // A zero post-value only deletes a leaf, but a nonzero value requires an account.
+            if has_account || !value.is_zero() {
                 state.set_storage(changes.address, slot, B256::from(value))?;
             }
         }
@@ -140,7 +150,8 @@ pub enum ReplayError {
     /// Received BAL does not match the trusted header commitment.
     #[error("block access list hash mismatch")]
     BalHashMismatch,
-    /// Addresses, slots, or change indices are duplicated or not strictly ascending.
+    /// Addresses, slots, or change indices are duplicated or not strictly ascending, including
+    /// a slot present in both reads and writes.
     #[error("block access list changes are not strictly ordered")]
     InvalidOrder,
     /// The parent or finality target is outside retained state.
@@ -152,6 +163,9 @@ pub enum ReplayError {
     /// Invalid state encoding.
     #[error(transparent)]
     State(#[from] StateError),
+    /// A storage write slot has no recorded post-values.
+    #[error("block access list storage change list is empty")]
+    EmptyStorageChanges,
 }
 
 #[derive(Clone, Debug)]

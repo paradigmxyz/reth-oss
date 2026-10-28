@@ -121,4 +121,50 @@ proptest! {
         prop_assert!(tree.is_empty());
         prop_assert_eq!(tree.root(), B256::ZERO);
     }
+
+    #[test]
+    fn repeated_variable_length_mutations_match_model(
+        operations in collection::vec(
+            (collection::vec(0u8..4, 1..4), proptest::option::of(any::<[u8; 32]>())),
+            0..100,
+        ),
+    ) {
+        // The small key space deliberately repeats keys and generates proper-prefix conflicts.
+        let mut tree = tree();
+        let mut model = BTreeMap::<Vec<u8>, B256>::new();
+        for (key, value) in operations {
+            let snapshot = tree.clone();
+            let before = snapshot.root();
+            let before_entries = model.clone();
+            if let Some(value) = value {
+                let value = B256::from(value);
+                let conflict = model.keys().any(|stored| {
+                    stored != &key && (stored.starts_with(&key) || key.starts_with(stored))
+                });
+                if conflict {
+                    prop_assert_eq!(tree.insert(key.clone(), value), Err(TreeError::PrefixConflict));
+                    prop_assert_eq!(tree.root(), before);
+                } else {
+                    prop_assert_eq!(tree.insert(key.clone(), value).unwrap(), model.insert(key.clone(), value));
+                }
+            } else {
+                prop_assert_eq!(tree.remove(&key), model.remove(&key));
+            }
+            prop_assert_eq!(snapshot.root(), before);
+            prop_assert_eq!(
+                snapshot.entries().map(|(key, value)| (key.to_vec(), value)).collect::<BTreeMap<_, _>>(),
+                before_entries,
+            );
+            let rebuilt = BinaryTree::<Blake3Hasher>::from_sorted_entries(
+                model.iter().map(|(key, value)| (key.clone(), *value)),
+            ).unwrap();
+            prop_assert_eq!(tree.root(), rebuilt.root());
+            prop_assert_eq!(tree.len(), model.len());
+            prop_assert_eq!(tree.get(&key), model.get(&key).copied());
+            prop_assert_eq!(tree.proof(&key).verify::<Blake3Hasher>(tree.root(), &key).unwrap(), model.get(&key).copied());
+            for (stored, value) in &model {
+                prop_assert_eq!(tree.proof(stored).verify::<Blake3Hasher>(tree.root(), stored).unwrap(), Some(*value));
+            }
+        }
+    }
 }
