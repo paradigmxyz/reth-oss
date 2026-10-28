@@ -32,6 +32,52 @@ pub(super) fn test_root_cached_returns_without_recomputation<T: SparseTrie>(new_
     assert_eq!(root2, root1, "second root call should return the same cached hash");
 }
 
+/// Cached roots stay valid across subtrie hashing calls and are invalidated by leaf updates.
+pub(super) fn test_root_cached_across_subtrie_updates<T: SparseTrie>(new_trie: fn() -> T) {
+    let mut storage = BTreeMap::new();
+    for prefix in 0..16u8 {
+        for suffix in 1..=2u8 {
+            let mut key = B256::ZERO;
+            key.0[0] = prefix << 4;
+            key.0[31] = suffix;
+            storage.insert(key, U256::from(suffix));
+        }
+    }
+    let harness = SuiteTestHarness::new(storage.clone());
+    let mut trie = harness.init_trie_fully_revealed(true, new_trie);
+    let original_root = trie.root(epoch(1));
+    assert_eq!(original_root, harness.original_root());
+    let original_epoch = trie.root_epoch();
+    let _ = trie.take_updates();
+
+    trie.update_subtrie_hashes(epoch(2));
+    assert_eq!(trie.root(epoch(2)), original_root);
+    assert_eq!(trie.root_epoch(), original_epoch);
+    let updates = trie.take_updates();
+    assert!(updates.updated_nodes.is_empty());
+    assert!(updates.removed_nodes.is_empty());
+
+    let mut key = B256::ZERO;
+    key.0[0] = 0x70;
+    key.0[31] = 1;
+    storage.insert(key, U256::from(999));
+    let mut updates = SuiteTestHarness::leaf_updates(&BTreeMap::from([(key, U256::from(999))]));
+    harness.reveal_and_update(&mut trie, &mut updates);
+    assert!(!trie.is_root_cached());
+
+    let updated_root = trie.root(epoch(2));
+    assert_ne!(updated_root, original_root);
+    assert_eq!(updated_root, SuiteTestHarness::new(storage).original_root());
+    assert_eq!(trie.root_epoch(), Some(epoch(2)));
+    let _ = trie.take_updates();
+    trie.update_subtrie_hashes(epoch(3));
+    assert_eq!(trie.root(epoch(3)), updated_root);
+    assert_eq!(trie.root_epoch(), Some(epoch(2)));
+    let updates = trie.take_updates();
+    assert!(updates.updated_nodes.is_empty());
+    assert!(updates.removed_nodes.is_empty());
+}
+
 /// Single update changes root.
 ///
 /// After modifying one leaf's value, `root()` should differ from the original and
