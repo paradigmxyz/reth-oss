@@ -3146,4 +3146,20 @@ Post-merge hard forks (timestamp based):
             }
         )
     }
+
+    #[test]
+    fn eip8253_hive_config_preserves_target_accounts() {
+        let address = Address::with_last_byte(1);
+        let genesis: Genesis = serde_json::from_value(serde_json::json!({
+            "config": {
+                "bogotaTime": 15_000,
+                "zeroNonceStorageAccounts": [address]
+            },
+            "alloc": {}
+        }))
+        .unwrap();
+        let spec = ChainSpec::from(genesis);
+        assert_eq!(spec.eip8253_accounts(), &[address]);
+        assert!(spec.genesis.alloc.is_empty());
+    }
 }
