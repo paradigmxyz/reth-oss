@@ -74,10 +74,7 @@ impl InvalidTxError for EthInvalidTxError {
     }
 
     fn is_gas_limit_too_low(&self) -> bool {
-        matches!(
-            self.0,
-            HandlerError::IntrinsicGasTooLow { .. } | HandlerError::GasFloorTooLow { .. }
-        )
+        matches!(self.0, HandlerError::IntrinsicGasTooLow { .. })
     }
 
     /// Exposes the wrapped [`HandlerError`] so RPC layers can recover the structured error.
@@ -100,7 +97,6 @@ impl TryFrom<HandlerError> for EthInvalidTxError {
             HandlerError::InvalidChainId { .. } |
             HandlerError::MissingChainId |
             HandlerError::IntrinsicGasTooLow { .. } |
-            HandlerError::GasFloorTooLow { .. } |
             HandlerError::InsufficientFunds { .. } |
             HandlerError::RejectCallerWithCode |
             HandlerError::NonceOverflow |
@@ -1134,15 +1130,6 @@ mod tests {
                 }) if actual == hash && error.as_any().downcast_ref::<HandlerError>() == Some(&expected)
             ));
         }
-    }
-
-    #[test]
-    fn calldata_floor_errors_preserve_gas_limit_classification() {
-        let error = HandlerError::GasFloorTooLow { required: 66_200, got: 60_000 };
-        let invalid = EthInvalidTxError::try_from(error.clone()).unwrap();
-        assert!(invalid.is_gas_limit_too_low());
-        assert_eq!(invalid.to_string(), "gas floor (66200) exceeds the gas limit (60000)");
-        assert_eq!(invalid.as_any().downcast_ref::<HandlerError>(), Some(&error));
     }
 
     fn return_byte_code(value: u8) -> Bytecode {
