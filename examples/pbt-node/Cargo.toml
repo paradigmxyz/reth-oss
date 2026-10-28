@@ -1,0 +1,28 @@
+[package]
+name = "example-pbt-node"
+version = "0.0.0"
+publish = false
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+reth-ethereum = { workspace = true, features = ["node", "test-utils"] }
+reth-engine-tree = { workspace = true, features = ["pbt"] }
+reth-trie-pbt = { workspace = true, features = ["execution", "persistence"] }
+reth-storage-overlay.workspace = true
+alloy-primitives.workspace = true
+alloy-rpc-types-engine.workspace = true
+eyre.workspace = true
+tokio.workspace = true
+tempfile.workspace = true
+
+[dev-dependencies]
+alloy-eip7928.workspace = true
+alloy-rlp.workspace = true
+reth-e2e-test-utils.workspace = true
+reth-tracing.workspace = true
+reth-payload-primitives.workspace = true
+reth-trie-pbt = { workspace = true, features = ["bal"] }
+
+[lints]
+workspace = true

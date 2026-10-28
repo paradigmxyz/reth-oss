@@ -1,0 +1,33 @@
+[package]
+name = "reth-trie-pbt"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Partitioned binary state tree (EIP-8297)"
+
+[lints]
+workspace = true
+
+[dependencies]
+alloy-primitives = { workspace = true, features = ["std"] }
+alloy-trie = { workspace = true, features = ["std", "ethereum"], optional = true }
+blake3.workspace = true
+thiserror = { workspace = true, features = ["std"] }
+reth-trie-common = { workspace = true, features = ["std"], optional = true }
+alloy-eip7928 = { workspace = true, optional = true }
+reth-fs-util = { workspace = true, optional = true }
+
+[dev-dependencies]
+proptest.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+
+[features]
+default = []
+migration = ["dep:alloy-trie"]
+execution = ["dep:reth-trie-common"]
+bal = ["dep:alloy-eip7928"]
+persistence = ["migration", "dep:reth-fs-util"]
