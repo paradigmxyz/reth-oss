@@ -919,7 +919,9 @@ mod tests {
             api.fill_transaction(request).await.unwrap_err(),
             EthApiError::InvalidTransaction(
                 reth_rpc_eth_types::RpcInvalidTransactionError::FrameTransaction(
-                    evm2::registry::HandlerError::InvalidFrameTransaction("VERIFY frame failed")
+                    evm2::registry::HandlerError::InvalidFrameTransaction(
+                        "EIP-8141 VERIFY frame failed"
+                    )
                 )
             )
         ));
@@ -1116,10 +1118,7 @@ mod tests {
         .await
         .unwrap();
         assert!(!result.valid);
-        assert_eq!(
-            result.violation.as_deref(),
-            Some("invalid frame transaction: VERIFY frame failed")
-        );
+        assert_eq!(result.violation.as_deref(), Some("EIP-8141 VERIFY frame failed"));
     }
 
     #[tokio::test]

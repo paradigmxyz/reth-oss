@@ -530,7 +530,7 @@ pub trait EstimateCall: Call {
                                     Some(EthApiError::InvalidTransaction(
                                         RpcInvalidTransactionError::FrameTransaction(
                                             evm2::registry::HandlerError::InvalidFrameTransaction(
-                                                "VERIFY frame failed"
+                                                "EIP-8141 VERIFY frame failed"
                                             )
                                         )
                                     ))

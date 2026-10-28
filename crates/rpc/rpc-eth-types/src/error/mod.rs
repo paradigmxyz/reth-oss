@@ -904,7 +904,9 @@ impl From<HandlerError> for RpcInvalidTransactionError {
             HandlerError::InvalidChainId { .. } | HandlerError::MissingChainId => {
                 Self::InvalidChainId
             }
-            HandlerError::IntrinsicGasTooLow { .. } => Self::GasTooLow,
+            HandlerError::IntrinsicGasTooLow { .. } | HandlerError::GasFloorTooLow { .. } => {
+                Self::GasTooLow
+            }
             HandlerError::InsufficientFunds { fee, balance } => {
                 Self::InsufficientFunds { cost: fee, balance }
             }
@@ -1324,5 +1326,15 @@ mod tests {
         let err = RevertError::new(revert.abi_encode().into());
         let msg = err.to_string();
         assert_eq!(msg, "execution reverted: test_revert_reason");
+    }
+
+    #[test]
+    fn calldata_floor_error_keeps_intrinsic_gas_rpc_response() {
+        let error = RpcInvalidTransactionError::from(HandlerError::GasFloorTooLow {
+            required: 66_200,
+            got: 60_000,
+        });
+        assert!(matches!(error, RpcInvalidTransactionError::GasTooLow));
+        assert_eq!(error.to_string(), "intrinsic gas too low");
     }
 }

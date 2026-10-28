@@ -611,7 +611,7 @@ mod tests {
             } else {
                 assert_eq!(
                     result.unwrap_err(),
-                    HandlerError::InvalidFrameTransaction("VERIFY frame failed")
+                    HandlerError::InvalidFrameTransaction("EIP-8141 VERIFY frame failed")
                 );
             }
             let inspector = evm.clear_inspector_as::<FrameValidationInspector>().unwrap();

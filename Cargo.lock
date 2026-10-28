@@ -2524,8 +2524,8 @@ dependencies = [
  "compression-core",
  "flate2",
  "memchr",
- "zstd 0.14.0",
- "zstd-safe 8.0.0",
+ "zstd",
+ "zstd-safe",
 ]
 
 [[package]]
@@ -3642,7 +3642,7 @@ dependencies = [
 [[package]]
 name = "evm2"
 version = "0.1.0"
-source = "git+https://github.com/Rimeeeeee/evm2?branch=bogota-plan#9b76f41b10cd570a9da0571f4d8bccc31f4a47bc"
+source = "git+https://github.com/Rimeeeeee/evm2?branch=bogota-plan#3cebdb2313bb863ef0a4d047d7d096c4be9174ac"
 dependencies = [
  "alloy-consensus",
  "alloy-eip7928",
@@ -3681,7 +3681,7 @@ dependencies = [
 [[package]]
 name = "evm2-inspectors"
 version = "0.1.0"
-source = "git+https://github.com/Rimeeeeee/evm2?branch=bogota-plan#9b76f41b10cd570a9da0571f4d8bccc31f4a47bc"
+source = "git+https://github.com/Rimeeeeee/evm2?branch=bogota-plan#3cebdb2313bb863ef0a4d047d7d096c4be9174ac"
 dependencies = [
  "alloy-consensus",
  "alloy-eip2930",
@@ -3704,7 +3704,7 @@ dependencies = [
 [[package]]
 name = "evm2-jit"
 version = "0.1.0"
-source = "git+https://github.com/Rimeeeeee/evm2?branch=bogota-plan#9b76f41b10cd570a9da0571f4d8bccc31f4a47bc"
+source = "git+https://github.com/Rimeeeeee/evm2?branch=bogota-plan#3cebdb2313bb863ef0a4d047d7d096c4be9174ac"
 dependencies = [
  "evm2",
  "evm2-jit-backend",
@@ -3719,7 +3719,7 @@ dependencies = [
 [[package]]
 name = "evm2-jit-backend"
 version = "0.1.0"
-source = "git+https://github.com/Rimeeeeee/evm2?branch=bogota-plan#9b76f41b10cd570a9da0571f4d8bccc31f4a47bc"
+source = "git+https://github.com/Rimeeeeee/evm2?branch=bogota-plan#3cebdb2313bb863ef0a4d047d7d096c4be9174ac"
 dependencies = [
  "eyre",
  "ruint",
@@ -3728,12 +3728,12 @@ dependencies = [
 [[package]]
 name = "evm2-jit-build"
 version = "0.1.0"
-source = "git+https://github.com/Rimeeeeee/evm2?branch=bogota-plan#9b76f41b10cd570a9da0571f4d8bccc31f4a47bc"
+source = "git+https://github.com/Rimeeeeee/evm2?branch=bogota-plan#3cebdb2313bb863ef0a4d047d7d096c4be9174ac"
 
 [[package]]
 name = "evm2-jit-builtins"
 version = "0.1.0"
-source = "git+https://github.com/Rimeeeeee/evm2?branch=bogota-plan#9b76f41b10cd570a9da0571f4d8bccc31f4a47bc"
+source = "git+https://github.com/Rimeeeeee/evm2?branch=bogota-plan#3cebdb2313bb863ef0a4d047d7d096c4be9174ac"
 dependencies = [
  "alloy-primitives",
  "evm2",
@@ -3746,7 +3746,7 @@ dependencies = [
 [[package]]
 name = "evm2-jit-codegen"
 version = "0.1.0"
-source = "git+https://github.com/Rimeeeeee/evm2?branch=bogota-plan#9b76f41b10cd570a9da0571f4d8bccc31f4a47bc"
+source = "git+https://github.com/Rimeeeeee/evm2?branch=bogota-plan#3cebdb2313bb863ef0a4d047d7d096c4be9174ac"
 dependencies = [
  "alloy-primitives",
  "bitflags 2.13.2",
@@ -3769,7 +3769,7 @@ dependencies = [
 [[package]]
 name = "evm2-jit-context"
 version = "0.1.0"
-source = "git+https://github.com/Rimeeeeee/evm2?branch=bogota-plan#9b76f41b10cd570a9da0571f4d8bccc31f4a47bc"
+source = "git+https://github.com/Rimeeeeee/evm2?branch=bogota-plan#3cebdb2313bb863ef0a4d047d7d096c4be9174ac"
 dependencies = [
  "alloy-primitives",
  "evm2",
@@ -3779,7 +3779,7 @@ dependencies = [
 [[package]]
 name = "evm2-jit-llvm"
 version = "0.1.0"
-source = "git+https://github.com/Rimeeeeee/evm2?branch=bogota-plan#9b76f41b10cd570a9da0571f4d8bccc31f4a47bc"
+source = "git+https://github.com/Rimeeeeee/evm2?branch=bogota-plan#3cebdb2313bb863ef0a4d047d7d096c4be9174ac"
 dependencies = [
  "alloy-primitives",
  "cc",
@@ -3792,7 +3792,7 @@ dependencies = [
 [[package]]
 name = "evm2-jit-runtime"
 version = "0.1.0"
-source = "git+https://github.com/Rimeeeeee/evm2?branch=bogota-plan#9b76f41b10cd570a9da0571f4d8bccc31f4a47bc"
+source = "git+https://github.com/Rimeeeeee/evm2?branch=bogota-plan#3cebdb2313bb863ef0a4d047d7d096c4be9174ac"
 dependencies = [
  "alloy-primitives",
  "crossbeam-channel",
@@ -3820,7 +3820,7 @@ dependencies = [
 [[package]]
 name = "evm2-macros"
 version = "0.1.0"
-source = "git+https://github.com/Rimeeeeee/evm2?branch=bogota-plan#9b76f41b10cd570a9da0571f4d8bccc31f4a47bc"
+source = "git+https://github.com/Rimeeeeee/evm2?branch=bogota-plan#3cebdb2313bb863ef0a4d047d7d096c4be9174ac"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -8078,7 +8078,7 @@ dependencies = [
  "tokio",
  "toml",
  "tracing",
- "zstd 0.13.3",
+ "zstd",
 ]
 
 [[package]]
@@ -8289,7 +8289,7 @@ dependencies = [
  "toml",
  "tracing",
  "url",
- "zstd 0.13.3",
+ "zstd",
 ]
 
 [[package]]
@@ -8325,7 +8325,7 @@ dependencies = [
 [[package]]
 name = "reth-codecs"
 version = "0.8.2"
-source = "git+https://github.com/Rimeeeeee/reth-core?branch=bogota-evm2#64fe4c410584e3179b139b4c975787707ce0af2d"
+source = "git+https://github.com/Rimeeeeee/reth-core?branch=bogota-evm2#32b691f44cf8930ef86e00207bab324729ab2a15"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -8346,7 +8346,7 @@ dependencies = [
 [[package]]
 name = "reth-codecs-derive"
 version = "0.8.2"
-source = "git+https://github.com/Rimeeeeee/reth-core?branch=bogota-evm2#64fe4c410584e3179b139b4c975787707ce0af2d"
+source = "git+https://github.com/Rimeeeeee/reth-core?branch=bogota-evm2#32b691f44cf8930ef86e00207bab324729ab2a15"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -9694,7 +9694,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tracing",
- "zstd 0.13.3",
+ "zstd",
 ]
 
 [[package]]
@@ -9726,8 +9726,8 @@ version = "2.8.1"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
+ "alloy-network",
  "alloy-primitives",
- "alloy-provider",
  "alloy-rpc-types",
  "alloy-rpc-types-engine",
  "aquamarine",
@@ -9773,7 +9773,9 @@ dependencies = [
  "reth-rpc",
  "reth-rpc-api",
  "reth-rpc-builder",
+ "reth-rpc-convert",
  "reth-rpc-engine-api",
+ "reth-rpc-eth-api",
  "reth-rpc-eth-types",
  "reth-rpc-layer",
  "reth-stages",
@@ -10100,7 +10102,7 @@ dependencies = [
 [[package]]
 name = "reth-primitives-traits"
 version = "0.8.2"
-source = "git+https://github.com/Rimeeeeee/reth-core?branch=bogota-evm2#64fe4c410584e3179b139b4c975787707ce0af2d"
+source = "git+https://github.com/Rimeeeeee/reth-core?branch=bogota-evm2#32b691f44cf8930ef86e00207bab324729ab2a15"
 dependencies = [
  "alloy-consensus",
  "alloy-eip7928",
@@ -10286,7 +10288,6 @@ dependencies = [
  "reth-network-api",
  "reth-network-peers",
  "reth-network-types",
- "reth-node-api",
  "reth-payload-primitives",
  "reth-primitives-traits",
  "reth-provider",
@@ -10504,7 +10505,6 @@ dependencies = [
  "reth-evm",
  "reth-execution-types",
  "reth-network-api",
- "reth-node-api",
  "reth-primitives-traits",
  "reth-prune-types",
  "reth-rpc-convert",
@@ -10588,7 +10588,7 @@ dependencies = [
  "tower",
  "tower-http",
  "tracing",
- "zstd 0.13.3",
+ "zstd",
 ]
 
 [[package]]
@@ -10608,7 +10608,7 @@ dependencies = [
 [[package]]
 name = "reth-rpc-traits"
 version = "0.8.2"
-source = "git+https://github.com/Rimeeeeee/reth-core?branch=bogota-evm2#64fe4c410584e3179b139b4c975787707ce0af2d"
+source = "git+https://github.com/Rimeeeeee/reth-core?branch=bogota-evm2#32b691f44cf8930ef86e00207bab324729ab2a15"
 dependencies = [
  "alloy-consensus",
  "alloy-network",
@@ -11226,9 +11226,9 @@ dependencies = [
 [[package]]
 name = "reth-zstd-compressors"
 version = "0.8.2"
-source = "git+https://github.com/Rimeeeeee/reth-core?branch=bogota-evm2#64fe4c410584e3179b139b4c975787707ce0af2d"
+source = "git+https://github.com/Rimeeeeee/reth-core?branch=bogota-evm2#32b691f44cf8930ef86e00207bab324729ab2a15"
 dependencies = [
- "zstd 0.13.3",
+ "zstd",
 ]
 
 [[package]]
@@ -11355,9 +11355,9 @@ checksum = "afab94fb28594581f62d981211a9a4d53cc8130bbcbbb89a0440d9b8e81a7746"
 
 [[package]]
 name = "ruint"
-version = "1.20.1"
+version = "1.21.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2973657b5127d510e230f5c63d2d106af9c8f79393d8b9f4647323e8196bdde5"
+checksum = "a0de3fa9b4dac39cc2bd65679bacf9f531899d933605e2963b40c2129cdb55f2"
 dependencies = [
  "alloy-rlp",
  "arbitrary",
@@ -11374,6 +11374,7 @@ dependencies = [
  "parity-scale-codec",
  "primitive-types",
  "proptest",
+ "rand 0.10.3",
  "rand 0.8.8",
  "rand 0.9.5",
  "rlp",
@@ -12174,9 +12175,9 @@ dependencies = [
 
 [[package]]
 name = "smolgen"
-version = "0.1.0"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9452d78a58bf7d7ccaf0b935af070b2a37660de91c767a559e0e0c2c5168cd69"
+checksum = "40c9a98255db4f93af8770f11f42b5a7f345cd93b96dafe7b1ae72ef99a16386"
 
 [[package]]
 name = "snap"
@@ -14302,45 +14303,27 @@ checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
 
 [[package]]
 name = "zstd"
-version = "0.13.3"
+version = "0.14.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e91ee311a569c327171651566e07972200e76fcfe2242a4fa446149a3881c08a"
+checksum = "db3ae9bf90af6e40197bef767eeefc46ad6397420fe873830bd85e5fbbfb3c70"
 dependencies = [
- "zstd-safe 7.3.0",
-]
-
-[[package]]
-name = "zstd"
-version = "0.14.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bf06bd8162af0734b344780deb55b42a2429ae430870d13fcc12f238e880fe6e"
-dependencies = [
- "zstd-safe 8.0.0",
+ "zstd-safe",
 ]
 
 [[package]]
 name = "zstd-safe"
-version = "7.3.0"
+version = "8.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "64d80649ab6db9d9f6f9c80a40becd948eda4714a0a5ac8c4d157a32231c7882"
-dependencies = [
- "zstd-sys",
-]
-
-[[package]]
-name = "zstd-safe"
-version = "8.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ae42c0555055784c70058d19ba8e275528e8a99a706684868ace5da4e716a4ab"
+checksum = "ded520f16b29e1a9b771c722221b2b0a0398c2316d9bb3c42b458a5414d7434b"
 dependencies = [
  "zstd-sys",
 ]
 
 [[package]]
 name = "zstd-sys"
-version = "2.1.0+zstd.1.5.7"
+version = "2.1.2+zstd.1.5.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0ef0a8027ec3ee71300ab3bcbcd0393f434aa72b91ca6d635a39941deae8eea0"
+checksum = "481ada9c543b2323cbb7bbdbb5249177fbf0188ed959ed2c15e4b22421c84ed3"
 dependencies = [
  "cc",
  "pkg-config",
