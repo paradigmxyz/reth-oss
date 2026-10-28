@@ -32,7 +32,10 @@ impl<H: TreeHasher> PbtStateRootStrategy<H> {
         &self.store
     }
 
-    fn parent_state(
+    /// Restores a trusted header's state, authenticating the pre-activation MPT commitment
+    /// or the post-activation PBT commitment. Call this before resuming a persisted chain;
+    /// a missing or mismatched checkpoint is an error, never an MPT fallback.
+    pub fn restore_parent(
         &self,
         hash: B256,
         state_root: B256,
@@ -49,6 +52,11 @@ impl<H: TreeHasher> PbtStateRootStrategy<H> {
             }
             Ok(state)
         }
+    }
+
+    /// Returns the timestamp at which headers start committing to PBT roots.
+    pub const fn activation_timestamp(&self) -> u64 {
+        self.activation_timestamp
     }
 }
 
@@ -71,7 +79,7 @@ where
         ctx: StateRootJobContext<'_, N, P, Evm>,
     ) -> ProviderResult<PreparedStateRootJob<N>> {
         let parent = ctx.parent_header();
-        let state = self.parent_state(parent.hash(), parent.state_root(), parent.timestamp())?;
+        let state = self.restore_parent(parent.hash(), parent.state_root(), parent.timestamp())?;
         let active = ctx.env().evm_env.block_env().timestamp.saturating_to::<u64>() >=
             self.activation_timestamp;
         Ok(PreparedStateRootJob::new(
@@ -95,7 +103,7 @@ where
         // Preparation errors are treated as an optional optimization failure by the engine.
         // Retain a failing output backend so a missing checkpoint cannot select an MPT root.
         let parent = self
-            .parent_state(
+            .restore_parent(
                 ctx.parent_hash(),
                 ctx.parent_state_root(),
                 ctx.parent_header().timestamp(),

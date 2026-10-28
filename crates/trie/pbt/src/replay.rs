@@ -3,7 +3,7 @@
 use crate::{StateError, StateTree, TreeHasher};
 use alloy_eip7928::{compute_block_access_list_hash, AccountChanges, BlockAccessIndex};
 use alloy_primitives::B256;
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, num::NonZeroUsize};
 
 /// Replays authenticated post-values without EVM execution.
 ///
@@ -69,19 +69,32 @@ pub fn replay<H: TreeHasher>(
 /// Discardable replay layers keyed by block hash, with a finalized base.
 ///
 /// Switching branches selects a stored parent snapshot, rather than inverting BAL post-values.
-/// Persistence of the finalized base is the caller's responsibility.
+/// Persistence of the finalized base is the caller's responsibility. Retention is bounded:
+/// inserting a new layer at the limit fails without evicting any unfinalized branch. Advance
+/// finality or obtain a recent finalized anchor before continuing replay.
 #[derive(Clone, Debug)]
 pub struct ReplayChain<H> {
     finalized: B256,
     blocks: BTreeMap<B256, ReplayLayer<H>>,
+    max_layers: NonZeroUsize,
 }
 
 impl<H: TreeHasher> ReplayChain<H> {
-    /// Starts from a verified finalized anchor.
+    /// Starts from a verified finalized anchor, retaining at most 1024 layers including it.
     pub fn new(anchor: B256, state: StateTree<H>) -> Self {
+        Self::with_limit(anchor, state, DEFAULT_MAX_LAYERS)
+    }
+
+    /// Starts from a verified finalized anchor with an explicit retained-layer limit.
+    ///
+    /// The anchor counts toward `max_layers`. A limit of one retains only the anchor and
+    /// rejects every insertion. This is a local operator budget, not a protocol limit. It
+    /// bounds the number of snapshots, not their byte size.
+    pub fn with_limit(anchor: B256, state: StateTree<H>, max_layers: NonZeroUsize) -> Self {
         Self {
             finalized: anchor,
             blocks: BTreeMap::from([(anchor, ReplayLayer { parent: None, state })]),
+            max_layers,
         }
     }
 
@@ -96,6 +109,9 @@ impl<H: TreeHasher> ReplayChain<H> {
     }
 
     /// Replays a child of any retained block. Competing branches are independent.
+    ///
+    /// At the retained-layer limit, fails before authenticating or applying the BAL. Existing
+    /// layers remain available for branch selection and finalization.
     pub fn insert(
         &mut self,
         hash: B256,
@@ -107,6 +123,9 @@ impl<H: TreeHasher> ReplayChain<H> {
             return Err(ReplayError::DuplicateBlock);
         }
         let parent_state = self.state(parent).ok_or(ReplayError::UnknownParent)?;
+        if self.blocks.len() >= self.max_layers.get() {
+            return Err(ReplayError::LayerLimitExceeded { max_layers: self.max_layers.get() });
+        }
         let state = replay(parent_state, bal, expected_bal_hash)?;
         let root = state.root();
         self.blocks.insert(hash, ReplayLayer { parent: Some(parent), state });
@@ -166,6 +185,12 @@ pub enum ReplayError {
     /// A storage write slot has no recorded post-values.
     #[error("block access list storage change list is empty")]
     EmptyStorageChanges,
+    /// Retaining another replay snapshot would exceed the configured layer budget.
+    #[error("replay retained-layer limit of {max_layers} reached; finalize or obtain a recent finalized anchor")]
+    LayerLimitExceeded {
+        /// Maximum retained layers, including the finalized anchor.
+        max_layers: usize,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -186,3 +211,6 @@ fn validate_indices(
     }
     Ok(())
 }
+
+const DEFAULT_MAX_LAYERS: NonZeroUsize =
+    NonZeroUsize::new(1024).expect("replay layer limit is nonzero");
