@@ -1,10 +1,11 @@
 //! Ethereum transaction validator.
 
-use super::constants::DEFAULT_MAX_TX_INPUT_BYTES;
+use super::{constants::DEFAULT_MAX_TX_INPUT_BYTES, FrameValidation};
 use crate::{
     blobstore::{BlobStore, PooledBlobSidecar},
     error::{
-        Eip4844PoolTransactionError, Eip7702PoolTransactionError, InvalidPoolTransactionError,
+        Eip4844PoolTransactionError, Eip7702PoolTransactionError, Eip8141PoolTransactionError,
+        InvalidPoolTransactionError,
     },
     metrics::TxPoolValidationMetrics,
     traits::TransactionOrigin,
@@ -21,7 +22,8 @@ use alloy_consensus::{
     BlockHeader,
 };
 use alloy_eips::{
-    eip4844::env_settings::EnvKzgSettings, eip7840::BlobParams, merge::SLOT_DURATION_SECS, BlockId,
+    eip2718::EIP8141_TX_TYPE_ID, eip4844::env_settings::EnvKzgSettings, eip7840::BlobParams,
+    merge::SLOT_DURATION_SECS, BlockId,
 };
 use alloy_primitives::U256;
 use alloy_rlp::Encodable;
@@ -53,6 +55,37 @@ use std::{
 pub type StatelessValidationFn<T> =
     Arc<dyn Fn(TransactionOrigin, &T) -> Result<(), InvalidPoolTransactionError> + Send + Sync>;
 
+/// Executes public frame validation against one pinned canonical state snapshot.
+pub type FrameValidationFn<T> =
+    Arc<dyn Fn(&T) -> Result<Arc<FrameValidation>, FrameValidationError> + Send + Sync>;
+
+/// Separates invalid frame transactions from failures of the canonical validation snapshot.
+#[derive(Debug, thiserror::Error)]
+pub enum FrameValidationError {
+    /// The transaction violates consensus or public-pool policy.
+    #[error(transparent)]
+    Invalid(#[from] InvalidPoolTransactionError),
+    /// The canonical snapshot cannot provide the environment required for validation.
+    #[error("{0}")]
+    Unavailable(&'static str),
+    /// A provider or EVM configuration failed while validating the transaction.
+    #[error(transparent)]
+    Other(Box<dyn core::error::Error + Send + Sync>),
+}
+
+impl FrameValidationError {
+    /// Preserves a provider or configuration failure without rejecting the transaction as invalid.
+    pub fn other(error: impl core::error::Error + Send + Sync + 'static) -> Self {
+        Self::Other(Box::new(error))
+    }
+}
+
+impl From<ProviderError> for FrameValidationError {
+    fn from(error: ProviderError) -> Self {
+        Self::other(error)
+    }
+}
+
 /// Additional stateful validation function signature.
 ///
 /// Receives the transaction origin, a reference to the transaction, and an account state reader.
@@ -71,6 +104,7 @@ pub type StatefulValidationFn<T> = Arc<
 /// - EIP-1559
 /// - EIP-4844
 /// - EIP-7702
+/// - EIP-8141
 ///
 /// And enforces additional constraints such as:
 /// - Maximum transaction size
@@ -132,6 +166,8 @@ pub struct EthTransactionValidator<Client, T, Evm> {
     /// Optional additional stateful validation check applied at the end of
     /// [`validate_stateful`](Self::validate_stateful).
     additional_stateful_validation: Option<StatefulValidationFn<T>>,
+    /// Prefix executor installed by the node's EVM configuration.
+    frame_validation: Option<FrameValidationFn<T>>,
 }
 
 impl<Client, Tx, Evm> fmt::Debug for EthTransactionValidator<Client, Tx, Evm> {
@@ -162,6 +198,11 @@ impl<Client, Tx, Evm> fmt::Debug for EthTransactionValidator<Client, Tx, Evm> {
 }
 
 impl<Client, Tx, Evm> EthTransactionValidator<Client, Tx, Evm> {
+    /// Installs public frame validation. Pool admission must also enforce reservations.
+    pub fn set_frame_validation(&mut self, validation: FrameValidationFn<Tx>) {
+        self.frame_validation = Some(validation);
+    }
+
     /// Returns the configured chain spec
     pub fn chain_spec(&self) -> Arc<Client::ChainSpec>
     where
@@ -477,9 +518,13 @@ where
             EIP7702_TX_TYPE_ID if !self.eip7702 => {
                 return Err(InvalidTransactionError::Eip7702Disabled.into())
             }
+            // Reject EIP-8141 transactions until Bogotá activates.
+            EIP8141_TX_TYPE_ID if !self.fork_tracker.is_bogota_activated() => {
+                return Err(InvalidTransactionError::TxTypeNotSupported.into())
+            }
             // Accept known transaction types when their respective fork is active
             LEGACY_TX_TYPE_ID | EIP2930_TX_TYPE_ID | EIP1559_TX_TYPE_ID | EIP4844_TX_TYPE_ID |
-            EIP7702_TX_TYPE_ID => {}
+            EIP7702_TX_TYPE_ID | EIP8141_TX_TYPE_ID => {}
 
             ty if !self.other_tx_types.bit(ty as usize) => {
                 return Err(InvalidTransactionError::TxTypeNotSupported.into())
@@ -487,6 +532,18 @@ where
 
             _ => {}
         };
+
+        if transaction.is_eip8141() {
+            transaction
+                .validate_eip8141_structure()
+                .map_err(Eip8141PoolTransactionError::InvalidTransaction)?;
+
+            // Generic validators fail closed without the node's prefix executor. Explicitly
+            // local/private transactions retain their non-propagating devnet behavior.
+            if origin.is_external() && self.frame_validation.is_none() {
+                return Err(Eip8141PoolTransactionError::PublicMempoolValidationUnavailable.into())
+            }
+        }
 
         // Reject transactions with a nonce equal to U64::max according to EIP-2681
         if transaction.requires_nonce_bound_check() && transaction.nonce() == u64::MAX {
@@ -507,6 +564,14 @@ where
             );
             if tx_size > self.max_tx_input_bytes {
                 self.validation_metrics.rejected_oversized_data.increment(1);
+                return Err(InvalidPoolTransactionError::OversizedData {
+                    size: tx_size,
+                    limit: self.max_tx_input_bytes,
+                })
+            }
+        } else if transaction.is_blob_transaction() {
+            let tx_size = transaction.encoded_2718_consensus().len();
+            if tx_size > self.max_tx_input_bytes {
                 return Err(InvalidPoolTransactionError::OversizedData {
                     size: tx_size,
                     limit: self.max_tx_input_bytes,
@@ -533,10 +598,12 @@ where
 
         // Checks for gas limit
         let transaction_gas_limit = transaction.gas_limit();
+        let (execution_reservation, state_reservation) = transaction.gas_reservations();
+        let block_reservation = execution_reservation.max(state_reservation);
         let block_gas_limit = self.max_gas_limit();
-        if transaction_gas_limit > block_gas_limit {
+        if block_reservation > block_gas_limit {
             return Err(InvalidPoolTransactionError::ExceedsGasLimit(
-                transaction_gas_limit,
+                block_reservation,
                 block_gas_limit,
             ))
         }
@@ -552,7 +619,9 @@ where
         }
 
         // Ensure max_priority_fee_per_gas (if EIP1559) is less than max_fee_per_gas if any.
-        if transaction.max_priority_fee_per_gas() > Some(transaction.max_fee_per_gas()) {
+        if !transaction.is_eip8141() &&
+            transaction.max_priority_fee_per_gas() > Some(transaction.max_fee_per_gas())
+        {
             self.validation_metrics.rejected_tip_above_fee_cap.increment(1);
             return Err(InvalidTransactionError::TipAboveFeeCap.into())
         }
@@ -618,8 +687,8 @@ where
             })?;
 
         // light blob tx pre-checks
-        if transaction.is_eip4844() {
-            // Cancun fork is required for blob txs
+        if transaction.is_blob_transaction() {
+            // Cancun fork is required for blob txs, including blob-carrying frames.
             if !self.fork_tracker.is_cancun_activated() {
                 return Err(InvalidTransactionError::TxTypeNotSupported.into())
             }
@@ -648,7 +717,7 @@ where
         // Transaction gas limit validation (EIP-7825 for Osaka+)
         let tx_gas_limit_cap =
             self.fork_tracker.tx_gas_limit_cap.load(std::sync::atomic::Ordering::Relaxed);
-        if tx_gas_limit_cap > 0 && transaction.gas_limit() > tx_gas_limit_cap {
+        if tx_gas_limit_cap > 0 && execution_reservation > tx_gas_limit_cap {
             return Err(InvalidTransactionError::GasLimitTooHigh.into())
         }
 
@@ -674,19 +743,62 @@ where
         P: AccountInfoReader,
     {
         // Use provider to get account info
-        let account = match state.basic_account(transaction.sender_ref()) {
-            Ok(account) => account.unwrap_or_default(),
-            Err(err) => {
-                return TransactionValidationOutcome::Error(*transaction.hash(), Box::new(err))
+        let frame_metadata = if transaction.is_eip8141() && !origin.is_private() {
+            match &self.frame_validation {
+                Some(validate) => match validate(&transaction) {
+                    Ok(metadata) => Some(metadata),
+                    Err(FrameValidationError::Invalid(err)) => {
+                        return TransactionValidationOutcome::Invalid(transaction, err)
+                    }
+                    Err(err) => {
+                        return TransactionValidationOutcome::Error(
+                            *transaction.hash(),
+                            Box::new(err),
+                        )
+                    }
+                },
+                None => None,
+            }
+        } else {
+            None
+        };
+        let mut account = if let Some(metadata) = frame_metadata {
+            let account = Account::new(
+                metadata.state_nonce,
+                metadata.sender_balance,
+                metadata.sender_code_hash,
+            );
+            if let Err(reason) = transaction.set_frame_validation(metadata) {
+                return TransactionValidationOutcome::Invalid(
+                    transaction,
+                    Eip8141PoolTransactionError::PublicMempoolPolicy(reason).into(),
+                )
+            }
+            account
+        } else {
+            match state.basic_account(transaction.sender_ref()) {
+                Ok(account) => account.unwrap_or_default(),
+                Err(err) => {
+                    return TransactionValidationOutcome::Error(*transaction.hash(), Box::new(err))
+                }
             }
         };
 
+        if transaction.frame_validation().is_none() &&
+            transaction.eip8250_nonce_keys().is_some_and(|keys| !keys.is_empty())
+        {
+            // Private frames are checked during execution; account nonces do not order keyed lanes.
+            account.nonce = transaction.nonce();
+        }
+
         // check for bytecode
-        match self.validate_sender_bytecode(&transaction, &account, &state) {
-            Err(outcome) => return outcome,
-            Ok(Err(err)) => return TransactionValidationOutcome::Invalid(transaction, err),
-            _ => {}
-        };
+        if !transaction.is_eip8141() {
+            match self.validate_sender_bytecode(&transaction, &account, &state) {
+                Err(outcome) => return outcome,
+                Ok(Err(err)) => return TransactionValidationOutcome::Invalid(transaction, err),
+                _ => {}
+            };
+        }
 
         // Checks for nonce
         if transaction.requires_nonce_check() &&
@@ -696,7 +808,9 @@ where
         }
 
         // checks for max cost not exceedng account_balance
-        if let Err(err) = self.validate_sender_balance(&transaction, &account) {
+        if !transaction.is_eip8141() &&
+            let Err(err) = self.validate_sender_balance(&transaction, &account)
+        {
             return TransactionValidationOutcome::Invalid(transaction, err)
         }
 
@@ -714,6 +828,8 @@ where
         }
 
         let authorities = self.recover_authorities(&transaction);
+        let unvalidated_frame =
+            transaction.is_eip8141() && transaction.frame_validation().is_none();
         // Return the valid transaction
         TransactionValidationOutcome::Valid {
             balance: account.balance,
@@ -721,12 +837,16 @@ where
             bytecode_hash: account.bytecode_hash,
             transaction: ValidTransaction::new(transaction, maybe_blob_sidecar),
             // by this point assume all external transactions should be propagated
-            propagate: match origin {
-                TransactionOrigin::External => true,
-                TransactionOrigin::Local => {
-                    self.local_transactions_config.propagate_local_transactions
+            propagate: if unvalidated_frame {
+                false
+            } else {
+                match origin {
+                    TransactionOrigin::External => true,
+                    TransactionOrigin::Local => {
+                        self.local_transactions_config.propagate_local_transactions
+                    }
+                    TransactionOrigin::Private => false,
                 }
-                TransactionOrigin::Private => false,
             },
             authorities,
         }
@@ -813,7 +933,7 @@ where
         let mut maybe_blob_sidecar = None;
 
         // heavy blob tx validation
-        if transaction.is_eip4844() {
+        if transaction.is_blob_transaction() {
             // extract the blob from the transaction
             match transaction.take_blob() {
                 EthBlobTransactionSidecar::None => {
@@ -944,6 +1064,10 @@ where
             self.fork_tracker.amsterdam.store(true, std::sync::atomic::Ordering::Relaxed);
         }
 
+        if self.chain_spec().is_bogota_active_at_timestamp(new_tip_block.timestamp()) {
+            self.fork_tracker.bogota.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+
         self.fork_tracker
             .tip_timestamp
             .store(new_tip_block.timestamp(), std::sync::atomic::Ordering::Relaxed);
@@ -1048,6 +1172,8 @@ pub struct EthTransactionValidatorBuilder<Client, Evm> {
     osaka: bool,
     /// Fork indicator whether we are in the Amsterdam hardfork.
     amsterdam: bool,
+    /// Fork indicator whether we are in the Bogotá hardfork.
+    bogota: bool,
     /// Timestamp of the tip block.
     tip_timestamp: u64,
     /// Max blob count at the block's timestamp.
@@ -1140,6 +1266,7 @@ impl<Client, Evm> EthTransactionValidatorBuilder<Client, Evm> {
             prague: chain_spec.is_prague_active_at_timestamp(tip.timestamp()),
             osaka: chain_spec.is_osaka_active_at_timestamp(tip.timestamp()),
             amsterdam: chain_spec.is_amsterdam_active_at_timestamp(tip.timestamp()),
+            bogota: chain_spec.is_bogota_active_at_timestamp(tip.timestamp()),
 
             tip_timestamp: tip.timestamp(),
 
@@ -1222,6 +1349,17 @@ impl<Client, Evm> EthTransactionValidatorBuilder<Client, Evm> {
     /// Set the Amsterdam fork.
     pub const fn set_amsterdam(mut self, amsterdam: bool) -> Self {
         self.amsterdam = amsterdam;
+        self
+    }
+
+    /// Disables the Bogotá fork.
+    pub const fn no_bogota(self) -> Self {
+        self.set_bogota(false)
+    }
+
+    /// Sets the Bogotá fork activation state.
+    pub const fn set_bogota(mut self, bogota: bool) -> Self {
+        self.bogota = bogota;
         self
     }
 
@@ -1363,6 +1501,7 @@ impl<Client, Evm> EthTransactionValidatorBuilder<Client, Evm> {
             prague,
             osaka,
             amsterdam,
+            bogota,
             tip_timestamp,
             eip2718,
             eip1559,
@@ -1389,6 +1528,7 @@ impl<Client, Evm> EthTransactionValidatorBuilder<Client, Evm> {
             prague: AtomicBool::new(prague),
             osaka: AtomicBool::new(osaka),
             amsterdam: AtomicBool::new(amsterdam),
+            bogota: AtomicBool::new(bogota),
             tip_timestamp: AtomicU64::new(tip_timestamp),
             max_blob_count: AtomicU64::new(max_blob_count),
             max_initcode_size: AtomicUsize::new(validation_rules.max_initcode_size),
@@ -1422,6 +1562,7 @@ impl<Client, Evm> EthTransactionValidatorBuilder<Client, Evm> {
             eip7594,
             additional_stateless_validation: None,
             additional_stateful_validation: None,
+            frame_validation: None,
         }
     }
 
@@ -1458,6 +1599,8 @@ pub struct ForkTracker {
     pub osaka: AtomicBool,
     /// Tracks if amsterdam is activated at the block's timestamp.
     pub amsterdam: AtomicBool,
+    /// Tracks if Bogotá is activated at the block's timestamp.
+    pub bogota: AtomicBool,
     /// Tracks max blob count per transaction at the block's timestamp.
     pub max_blob_count: AtomicU64,
     /// Tracks the timestamp of the tip block.
@@ -1549,6 +1692,11 @@ impl ForkTracker {
         self.amsterdam.load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// Returns `true` if Bogotá fork is activated.
+    pub fn is_bogota_activated(&self) -> bool {
+        self.bogota.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// Returns the timestamp of the tip block.
     pub fn tip_timestamp(&self) -> u64 {
         self.tip_timestamp.load(std::sync::atomic::Ordering::Relaxed)
@@ -1568,6 +1716,11 @@ pub fn ensure_intrinsic_gas<T: EthPoolTransaction>(
     transaction: &T,
     gas_rules: &EvmTransactionValidationGasRules,
 ) -> Result<(), InvalidPoolTransactionError> {
+    // Native frame validation owns the derived intrinsic and calldata-floor rules.
+    if transaction.is_eip8141() {
+        return Ok(())
+    }
+
     let access_list_accounts =
         transaction.access_list().map(|l| l.len()).unwrap_or_default() as u64;
     let access_list_storage_keys =
@@ -1606,14 +1759,15 @@ mod tests {
         blobstore::InMemoryBlobStore, error::PoolErrorKind, test_utils::TransactionBuilder,
         traits::PoolTransaction, CoinbaseTipOrdering, EthPooledTransaction, Pool, TransactionPool,
     };
-    use alloy_consensus::{Header, Transaction};
+    use alloy_consensus::{Header, Transaction, TxEip8141};
     use alloy_eips::{
         eip1559::ETHEREUM_BLOCK_GAS_LIMIT_30M,
         eip2718::{Decodable2718, Encodable2718},
         eip2930::{AccessList, AccessListItem},
         eip7702::Authorization,
+        eip8141::{Frame, TransactionFees},
     };
-    use alloy_primitives::{hex, Address, Bytes, Signature, B256, U256};
+    use alloy_primitives::{hex, Address, Bytes, Sealable, Signature, B256, U256};
     use reth_chainspec::{ChainSpecBuilder, MAINNET};
     use reth_ethereum_primitives::PooledTransactionVariant;
     use reth_evm_ethereum::EthEvmConfig;
@@ -1680,6 +1834,260 @@ mod tests {
             alloy_consensus::transaction::Recovered::new_unchecked(signed, sender),
             200,
         )
+    }
+
+    fn eip8141_tx(chain_id: u64, sender: Address) -> EthPooledTransaction {
+        eip8141_tx_with_blobs(chain_id, sender, 0)
+    }
+
+    fn eip8141_tx_with_blobs(chain_id: u64, sender: Address, blobs: usize) -> EthPooledTransaction {
+        let tx = TxEip8141 {
+            chain_id,
+            sender,
+            frames: vec![Frame::default()],
+            fees: TransactionFees { max_priority_fee_per_gas: U256::ZERO, max_fee: U256::from(1) },
+            blob_versioned_hashes: vec![B256::repeat_byte(1); blobs],
+            ..Default::default()
+        };
+        let encoded_length = tx.eip2718_encoded_length();
+        let tx = reth_ethereum_primitives::TransactionSigned::Eip8141(tx.seal_slow());
+        EthPooledTransaction::new(
+            alloy_consensus::transaction::Recovered::new_unchecked(tx, sender),
+            encoded_length,
+        )
+    }
+
+    #[test]
+    fn eip8141_validated_prefix_still_checks_state_nonce() {
+        let sender = Address::repeat_byte(0x41);
+        for (tx_nonce, state_nonce, valid) in [(0, 0, true), (0, 1, false), (2, 1, true)] {
+            let provider = MockEthProvider::default().with_genesis_block();
+            let mut validator =
+                EthTransactionValidatorBuilder::new(provider.clone(), test_evm_config())
+                    .set_bogota(true)
+                    .build(InMemoryBlobStore::default());
+            validator.set_frame_validation(Arc::new(move |tx: &EthPooledTransaction| {
+                Ok(Arc::new(FrameValidation {
+                    sender,
+                    sender_nonce: tx.nonce(),
+                    nonce_keys: None,
+                    state_nonce,
+                    sender_balance: U256::MAX,
+                    sender_code_hash: None,
+                    payer: sender,
+                    max_cost: U256::ZERO,
+                    payer_balance: U256::MAX,
+                    head_hash: B256::ZERO,
+                    dependencies: Default::default(),
+                    expires_at: None,
+                    recent_root_dependencies: vec![],
+                    exclusive_payer: false,
+                }))
+            }));
+            let mut frame = eip8141_tx(validator.chain_id(), sender)
+                .transaction
+                .as_eip8141()
+                .unwrap()
+                .clone()
+                .into_inner();
+            frame.nonce = tx_nonce;
+            let encoded_length = frame.eip2718_encoded_length();
+            let transaction = EthPooledTransaction::new(
+                alloy_consensus::transaction::Recovered::new_unchecked(
+                    reth_ethereum_primitives::TransactionSigned::Eip8141(frame.seal_slow()),
+                    sender,
+                ),
+                encoded_length,
+            );
+            let outcome =
+                validator.validate_stateful(TransactionOrigin::External, transaction, &provider);
+            if valid {
+                assert!(outcome.is_valid());
+            } else {
+                assert!(matches!(
+                    outcome,
+                    TransactionValidationOutcome::Invalid(
+                        _,
+                        InvalidPoolTransactionError::Consensus(
+                            InvalidTransactionError::NonceNotConsistent { tx: 0, state: 1 }
+                        )
+                    )
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn frame_provider_failure_preserves_source_and_is_not_invalid() {
+        let provider = MockEthProvider::default().with_genesis_block();
+        let mut validator =
+            EthTransactionValidatorBuilder::new(provider.clone(), test_evm_config())
+                .set_bogota(true)
+                .build(InMemoryBlobStore::default());
+        validator.set_frame_validation(Arc::new(|_| {
+            Err(FrameValidationError::other(std::io::Error::other("frame snapshot unavailable")))
+        }));
+        let transaction = eip8141_tx(validator.chain_id(), Address::repeat_byte(1));
+        let hash = *transaction.hash();
+        let outcome =
+            validator.validate_stateful(TransactionOrigin::External, transaction, &provider);
+        let TransactionValidationOutcome::Error(actual_hash, error) = outcome else {
+            panic!("provider failure must remain a validation service error")
+        };
+        assert_eq!(actual_hash, hash);
+        let FrameValidationError::Other(source) = error.downcast_ref().unwrap() else {
+            panic!("provider failure source was not preserved")
+        };
+        let source = source.downcast_ref::<std::io::Error>().unwrap();
+        assert_eq!(source.kind(), std::io::ErrorKind::Other);
+        assert_eq!(source.to_string(), "frame snapshot unavailable");
+    }
+
+    #[test]
+    fn unavailable_frame_snapshot_is_not_invalid() {
+        let provider = MockEthProvider::default().with_genesis_block();
+        let mut validator =
+            EthTransactionValidatorBuilder::new(provider.clone(), test_evm_config())
+                .set_bogota(true)
+                .build(InMemoryBlobStore::default());
+        validator.set_frame_validation(Arc::new(|_| {
+            Err(FrameValidationError::Unavailable("canonical head unavailable"))
+        }));
+        let outcome = validator.validate_stateful(
+            TransactionOrigin::External,
+            eip8141_tx(validator.chain_id(), Address::repeat_byte(1)),
+            &provider,
+        );
+        let TransactionValidationOutcome::Error(_, error) = outcome else {
+            panic!("an unavailable canonical snapshot must remain a validation service error")
+        };
+        assert!(matches!(
+            error.downcast_ref::<FrameValidationError>(),
+            Some(FrameValidationError::Unavailable("canonical head unavailable"))
+        ));
+    }
+
+    #[test]
+    fn frame_policy_failure_is_invalid() {
+        let provider = MockEthProvider::default().with_genesis_block();
+        let mut validator =
+            EthTransactionValidatorBuilder::new(provider.clone(), test_evm_config())
+                .set_bogota(true)
+                .build(InMemoryBlobStore::default());
+        validator.set_frame_validation(Arc::new(|_| {
+            Err(FrameValidationError::Invalid(
+                Eip8141PoolTransactionError::PublicMempoolPolicy("invalid validation prefix")
+                    .into(),
+            ))
+        }));
+        let outcome = validator.validate_stateful(
+            TransactionOrigin::External,
+            eip8141_tx(validator.chain_id(), Address::repeat_byte(1)),
+            &provider,
+        );
+        assert!(matches!(
+            outcome,
+            TransactionValidationOutcome::Invalid(
+                _,
+                InvalidPoolTransactionError::Eip8141(
+                    Eip8141PoolTransactionError::PublicMempoolPolicy("invalid validation prefix")
+                )
+            )
+        ));
+    }
+
+    #[test]
+    fn private_keyed_frame_does_not_use_the_legacy_nonce_lane() {
+        let sender = Address::repeat_byte(0x41);
+        let provider = MockEthProvider::default().with_genesis_block();
+        provider.add_account(sender, ExtendedAccount::new(7, U256::MAX));
+        let validator = EthTransactionValidatorBuilder::new(provider.clone(), test_evm_config())
+            .set_bogota(true)
+            .build(InMemoryBlobStore::default());
+        for keys in [vec![], vec![U256::ZERO], vec![U256::from(1)]] {
+            let mut frame = eip8141_tx(validator.chain_id(), sender)
+                .transaction
+                .as_eip8141()
+                .unwrap()
+                .clone()
+                .into_inner();
+            frame.nonce_keys = Some(keys.clone());
+            let encoded_length = frame.eip2718_encoded_length();
+            let transaction = EthPooledTransaction::new(
+                alloy_consensus::transaction::Recovered::new_unchecked(
+                    reth_ethereum_primitives::TransactionSigned::Eip8141(frame.seal_slow()),
+                    sender,
+                ),
+                encoded_length,
+            );
+            let outcome =
+                validator.validate_stateful(TransactionOrigin::Private, transaction, &provider);
+            if keys.is_empty() {
+                assert!(matches!(outcome, TransactionValidationOutcome::Invalid(..)));
+            } else {
+                assert!(matches!(
+                    outcome,
+                    TransactionValidationOutcome::Valid { state_nonce: 0, propagate: false, .. }
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn eip8141_external_transactions_require_public_validation() {
+        let provider = MockEthProvider::default().with_genesis_block();
+        let validator = EthTransactionValidatorBuilder::new(provider, test_evm_config())
+            .set_bogota(true)
+            .build(InMemoryBlobStore::default());
+        let transaction = eip8141_tx(validator.chain_id(), Address::repeat_byte(0x41));
+
+        assert!(matches!(
+            validator.validate_stateless(TransactionOrigin::External, &transaction),
+            Err(InvalidPoolTransactionError::Eip8141(
+                Eip8141PoolTransactionError::PublicMempoolValidationUnavailable
+            ))
+        ));
+    }
+
+    #[test]
+    fn eip8141_blob_count_obeys_active_limit() {
+        let provider = mock_provider();
+        let validator = EthTransactionValidatorBuilder::new(provider, test_evm_config())
+            .set_bogota(true)
+            .set_cancun(true)
+            .build(InMemoryBlobStore::default());
+        validator.fork_tracker.max_blob_count.store(1, std::sync::atomic::Ordering::Relaxed);
+        let sender = Address::repeat_byte(0x41);
+        for count in [0, 1] {
+            let transaction = eip8141_tx_with_blobs(validator.chain_id(), sender, count);
+            validator.validate_stateless(TransactionOrigin::Local, &transaction).unwrap();
+        }
+        let transaction = eip8141_tx_with_blobs(validator.chain_id(), sender, 2);
+        assert!(matches!(
+            validator.validate_stateless(TransactionOrigin::Local, &transaction),
+            Err(InvalidPoolTransactionError::Eip4844(
+                Eip4844PoolTransactionError::TooManyEip4844Blobs { have: 2, permitted: 1 }
+            ))
+        ));
+    }
+
+    #[test]
+    fn eip8141_local_transaction_skips_eoa_and_sender_balance_checks() {
+        let sender = Address::repeat_byte(0x41);
+        let provider = mock_provider();
+        provider.add_account(
+            sender,
+            ExtendedAccount::new(0, U256::ZERO).with_bytecode(Bytes::from_static(&[0x60, 0x00])),
+        );
+        let validator = EthTransactionValidatorBuilder::new(provider, test_evm_config())
+            .set_bogota(true)
+            .build(InMemoryBlobStore::default());
+        let transaction = eip8141_tx(validator.chain_id(), sender);
+
+        assert!(matches!(
+            validator.validate_one(TransactionOrigin::Local, transaction),
+            TransactionValidationOutcome::Valid { propagate: false, .. }
+        ));
     }
 
     /// EIP-2780 replaces the flat 21k intrinsic base with a decomposed one: 12k base, plus a cold

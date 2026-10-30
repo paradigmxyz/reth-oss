@@ -438,9 +438,9 @@ reth-trie-sparse = { path = "crates/trie/sparse", default-features = false }
 reth-zstd-compressors = { version = "0.8.2", default-features = false }
 
 # evm2
-evm2 = { git = "https://github.com/alloy-rs/evm2", rev = "4a53ec080dfbb904e98e3ca8f0abcc11ab8abae0", default-features = false }
-evm2-inspectors = { git = "https://github.com/alloy-rs/evm2", rev = "4a53ec080dfbb904e98e3ca8f0abcc11ab8abae0", default-features = false }
-evm2-jit = { git = "https://github.com/alloy-rs/evm2", rev = "4a53ec080dfbb904e98e3ca8f0abcc11ab8abae0", default-features = false }
+evm2 = { git = "https://github.com/Rimeeeeee/evm2", branch = "bogota-plan", default-features = false }
+evm2-inspectors = { git = "https://github.com/Rimeeeeee/evm2", branch = "bogota-plan", default-features = false }
+evm2-jit = { git = "https://github.com/Rimeeeeee/evm2", branch = "bogota-plan", default-features = false }
 
 # eth
 alloy-dyn-abi = "1.6.1"
@@ -671,20 +671,46 @@ walkdir = "2.3.3"
 # networking
 ipnet = "2.11"
 
-# evm2 is patched through its pre-transfer URL, which redirects to alloy-rs/evm2, because Cargo
-# rejects a patch from the same source.
-[patch."https://github.com/alloy-rs/evm2"]
-evm2 = { git = "https://github.com/DaniPopes/evm2", rev = "4a53ec080dfbb904e98e3ca8f0abcc11ab8abae0" }
-evm2-inspectors = { git = "https://github.com/DaniPopes/evm2", rev = "4a53ec080dfbb904e98e3ca8f0abcc11ab8abae0" }
-evm2-jit = { git = "https://github.com/DaniPopes/evm2", rev = "4a53ec080dfbb904e98e3ca8f0abcc11ab8abae0" }
-
 [patch.crates-io]
 # LLVM 23 support is not released yet.
 inkwell = { git = "https://github.com/TheDan64/inkwell", rev = "c9d9734ae17dbaf1d9902dab3b8ee9d2041781ff" }
 
 # reth-core
-reth-codecs = { git = "https://github.com/paradigmxyz/reth-core", rev = "33bfe6e8b7bacc4f2e464497262ee3f87c6c86ce" }
-reth-codecs-derive = { git = "https://github.com/paradigmxyz/reth-core", rev = "33bfe6e8b7bacc4f2e464497262ee3f87c6c86ce" }
-reth-primitives-traits = { git = "https://github.com/paradigmxyz/reth-core", rev = "33bfe6e8b7bacc4f2e464497262ee3f87c6c86ce" }
-reth-rpc-traits = { git = "https://github.com/paradigmxyz/reth-core", rev = "33bfe6e8b7bacc4f2e464497262ee3f87c6c86ce" }
-reth-zstd-compressors = { git = "https://github.com/paradigmxyz/reth-core", rev = "33bfe6e8b7bacc4f2e464497262ee3f87c6c86ce" }
+reth-codecs = { git = "https://github.com/Rimeeeeee/reth-core", branch = "bogota-evm2" }
+reth-codecs-derive = { git = "https://github.com/Rimeeeeee/reth-core", branch = "bogota-evm2" }
+reth-primitives-traits = { git = "https://github.com/Rimeeeeee/reth-core", branch = "bogota-evm2" }
+reth-rpc-traits = { git = "https://github.com/Rimeeeeee/reth-core", branch = "bogota-evm2" }
+reth-zstd-compressors = { git = "https://github.com/Rimeeeeee/reth-core", branch = "bogota-evm2" }
+
+alloy-consensus = { git = "https://github.com/Rimeeeeee/alloy", rev = "5cfb4a1554c3b792221a8ba2debce1182f60d759" }
+alloy-consensus-any = { git = "https://github.com/Rimeeeeee/alloy", rev = "5cfb4a1554c3b792221a8ba2debce1182f60d759" }
+alloy-contract = { git = "https://github.com/Rimeeeeee/alloy", rev = "5cfb4a1554c3b792221a8ba2debce1182f60d759" }
+alloy-eip7928 = { git = "https://github.com/Rimeeeeee/eips", rev = "eb1b963d6386c618bdb10b4216c801466f22b4eb" }
+alloy-eips = { git = "https://github.com/Rimeeeeee/alloy", rev = "5cfb4a1554c3b792221a8ba2debce1182f60d759" }
+alloy-genesis = { git = "https://github.com/Rimeeeeee/alloy", rev = "5cfb4a1554c3b792221a8ba2debce1182f60d759" }
+alloy-json-rpc = { git = "https://github.com/Rimeeeeee/alloy", rev = "5cfb4a1554c3b792221a8ba2debce1182f60d759" }
+alloy-network = { git = "https://github.com/Rimeeeeee/alloy", rev = "5cfb4a1554c3b792221a8ba2debce1182f60d759" }
+alloy-network-primitives = { git = "https://github.com/Rimeeeeee/alloy", rev = "5cfb4a1554c3b792221a8ba2debce1182f60d759" }
+alloy-node-bindings = { git = "https://github.com/Rimeeeeee/alloy", rev = "5cfb4a1554c3b792221a8ba2debce1182f60d759" }
+alloy-provider = { git = "https://github.com/Rimeeeeee/alloy", rev = "5cfb4a1554c3b792221a8ba2debce1182f60d759" }
+alloy-pubsub = { git = "https://github.com/Rimeeeeee/alloy", rev = "5cfb4a1554c3b792221a8ba2debce1182f60d759" }
+alloy-rpc-client = { git = "https://github.com/Rimeeeeee/alloy", rev = "5cfb4a1554c3b792221a8ba2debce1182f60d759" }
+alloy-rpc-types = { git = "https://github.com/Rimeeeeee/alloy", rev = "5cfb4a1554c3b792221a8ba2debce1182f60d759" }
+alloy-rpc-types-admin = { git = "https://github.com/Rimeeeeee/alloy", rev = "5cfb4a1554c3b792221a8ba2debce1182f60d759" }
+alloy-rpc-types-anvil = { git = "https://github.com/Rimeeeeee/alloy", rev = "5cfb4a1554c3b792221a8ba2debce1182f60d759" }
+alloy-rpc-types-any = { git = "https://github.com/Rimeeeeee/alloy", rev = "5cfb4a1554c3b792221a8ba2debce1182f60d759" }
+alloy-rpc-types-beacon = { git = "https://github.com/Rimeeeeee/alloy", rev = "5cfb4a1554c3b792221a8ba2debce1182f60d759" }
+alloy-rpc-types-debug = { git = "https://github.com/Rimeeeeee/alloy", rev = "5cfb4a1554c3b792221a8ba2debce1182f60d759" }
+alloy-rpc-types-engine = { git = "https://github.com/Rimeeeeee/alloy", rev = "5cfb4a1554c3b792221a8ba2debce1182f60d759" }
+alloy-rpc-types-eth = { git = "https://github.com/Rimeeeeee/alloy", rev = "5cfb4a1554c3b792221a8ba2debce1182f60d759" }
+alloy-rpc-types-mev = { git = "https://github.com/Rimeeeeee/alloy", rev = "5cfb4a1554c3b792221a8ba2debce1182f60d759" }
+alloy-rpc-types-trace = { git = "https://github.com/Rimeeeeee/alloy", rev = "5cfb4a1554c3b792221a8ba2debce1182f60d759" }
+alloy-rpc-types-txpool = { git = "https://github.com/Rimeeeeee/alloy", rev = "5cfb4a1554c3b792221a8ba2debce1182f60d759" }
+alloy-serde = { git = "https://github.com/Rimeeeeee/alloy", rev = "5cfb4a1554c3b792221a8ba2debce1182f60d759" }
+alloy-signer = { git = "https://github.com/Rimeeeeee/alloy", rev = "5cfb4a1554c3b792221a8ba2debce1182f60d759" }
+alloy-signer-local = { git = "https://github.com/Rimeeeeee/alloy", rev = "5cfb4a1554c3b792221a8ba2debce1182f60d759" }
+alloy-transport = { git = "https://github.com/Rimeeeeee/alloy", rev = "5cfb4a1554c3b792221a8ba2debce1182f60d759" }
+alloy-transport-http = { git = "https://github.com/Rimeeeeee/alloy", rev = "5cfb4a1554c3b792221a8ba2debce1182f60d759" }
+alloy-transport-ipc = { git = "https://github.com/Rimeeeeee/alloy", rev = "5cfb4a1554c3b792221a8ba2debce1182f60d759" }
+alloy-transport-ws = { git = "https://github.com/Rimeeeeee/alloy", rev = "5cfb4a1554c3b792221a8ba2debce1182f60d759" }
+alloy-tx-macros = { git = "https://github.com/Rimeeeeee/alloy", rev = "5cfb4a1554c3b792221a8ba2debce1182f60d759" }

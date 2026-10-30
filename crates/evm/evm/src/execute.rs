@@ -31,6 +31,7 @@ use reth_execution_types::BundleSource;
 #[cfg(feature = "std")]
 use reth_primitives_traits::BlockTy;
 
+pub use evm2::ethereum::eip8141::FrameValidationResult;
 pub use reth_execution_errors::{
     BlockExecutionError, BlockValidationError, InternalBlockExecutionError, InvalidTxError,
 };
@@ -103,14 +104,14 @@ pub trait ReceiptBuilder {
     /// Receipt produced by this builder.
     type Receipt: reth_primitives_traits::Receipt;
 
-    /// Builds a receipt for the transaction execution result.
+    /// Builds a receipt, rejecting execution results missing required consensus receipt data.
     fn build_receipt<T: evm2::EvmTypes>(
         &self,
         ctx: ReceiptBuilderCtx<
             <Self::Transaction as TransactionEnvelope>::TxType,
             evm2::TxResult<T>,
         >,
-    ) -> Self::Receipt;
+    ) -> Result<Self::Receipt, BlockExecutionError>;
 }
 
 /// A detached block transaction output containing its raw execution result.
@@ -192,6 +193,27 @@ pub trait Evm {
         transaction: &Recovered<Self::Transaction>,
         observe: impl FnOnce(&evm2::ExecutedTx<'_, '_, Self::EvmTypes>) -> R,
     ) -> Result<R, BlockExecutionError>;
+
+    /// Validates a frame prefix and returns the inspector together with the validation result.
+    ///
+    /// The inspector observes interpreted prefix execution. Prefix writes are discarded on both
+    /// success and error, and the inspector is detached before this method returns.
+    fn validate_frame_prefix_with_inspector<I>(
+        &mut self,
+        _: &Recovered<Self::Transaction>,
+        _: usize,
+        inspector: I,
+    ) -> (I, Result<FrameValidationResult, BlockExecutionError>)
+    where
+        I: evm2::Inspector<Self::EvmTypes>,
+    {
+        (
+            inspector,
+            Err(map_handler_error(HandlerError::InvalidFrameTransaction(
+                "frame prefix validation is not supported",
+            ))),
+        )
+    }
 }
 
 impl<'a, T: evm2::EvmTypes<Tx: Typed2718>> Evm for evm2::Evm<'a, T> {
@@ -224,17 +246,12 @@ impl<'a, T: evm2::EvmTypes<Tx: Typed2718>> Evm for evm2::Evm<'a, T> {
     fn transact_with_inspector<I: evm2::Inspector<T> + 'a>(
         &mut self,
         transaction: &Recovered<Self::Transaction>,
-        inspector: I,
+        mut inspector: I,
     ) -> Result<(I, evm2::TxResultWithState<T>), BlockExecutionError> {
-        // TODO(dani): use either `&mut Inspector` or `clear_inspector_as`.
-        evm2::Evm::set_inspector(self, inspector);
-        let result = evm2::Evm::transact(self, transaction)
+        let result = evm2::Evm::transact_with_inspector(self, transaction, &mut inspector)
             .map(|executed| executed.detach())
             .map_err(map_handler_error);
-        let inspector = self.clear_inspector().expect("inspector was set before execution");
-        // SAFETY: the boxed inspector was created from `I` immediately above and was not replaced.
-        let inspector = unsafe { Box::from_raw(Box::into_raw(inspector).cast::<I>()) };
-        result.map(|result| (*inspector, result))
+        result.map(|result| (inspector, result))
     }
 
     fn set_inspector<I: evm2::Inspector<T> + 'a>(&mut self, inspector: I) {
@@ -284,6 +301,25 @@ impl<'a, T: evm2::EvmTypes<Tx: Typed2718>> Evm for evm2::Evm<'a, T> {
         let observed = observe(&executed);
         drop(executed);
         Ok(observed)
+    }
+
+    fn validate_frame_prefix_with_inspector<I>(
+        &mut self,
+        transaction: &Recovered<Self::Transaction>,
+        prefix_end: usize,
+        mut inspector: I,
+    ) -> (I, Result<FrameValidationResult, BlockExecutionError>)
+    where
+        I: evm2::Inspector<T>,
+    {
+        let result = evm2::Evm::validate_frame_prefix_with_inspector(
+            self,
+            transaction,
+            prefix_end,
+            &mut inspector,
+        )
+        .map_err(map_handler_error);
+        (inspector, result)
     }
 }
 
@@ -985,6 +1021,11 @@ pub trait Executor<DB: Database>: Sized {
 
     /// Takes the canonical block access list from executor.
     fn take_bal(&mut self) -> Option<BlockAccessList>;
+
+    /// Supplies the actual parent's timestamp before executing the first block in a batch.
+    /// Executors that do not use parent-dependent transitions may ignore it. Implementations
+    /// should advance it only after a block executes successfully.
+    fn set_parent_timestamp(&mut self, _parent_timestamp: u64) {}
 }
 
 /// Generic block executor backed by a [`ConfigureEvm`] implementation.
@@ -995,6 +1036,7 @@ pub struct BasicBlockExecutor<Evm, DB: Database> {
     batch_database: CacheDB<Db<DB>>,
     batch_state: BundleState,
     block_access_list: Option<BlockAccessList>,
+    parent_timestamp: Option<u64>,
 }
 
 #[cfg(feature = "std")]
@@ -1006,6 +1048,7 @@ impl<Evm, DB: Database> BasicBlockExecutor<Evm, DB> {
             batch_database: CacheDB::new(Db::new(database)),
             batch_state: BundleState::default(),
             block_access_list: None,
+            parent_timestamp: None,
         }
     }
 }
@@ -1035,11 +1078,18 @@ where
         evm_config: &Evm,
         block: &RecoveredBlock<BlockTy<Evm::Primitives>>,
         database: impl DynDatabase,
+        parent_timestamp: Option<u64>,
     ) -> Result<
         (BlockExecutionOutput<ReceiptTy<Evm::Primitives>>, Option<BlockAccessList>),
         BlockExecutionError,
     > {
-        Self::execute_block_with_database_and_state_hook(evm_config, block, database, None)
+        Self::execute_block_with_database_and_state_hook(
+            evm_config,
+            block,
+            database,
+            parent_timestamp,
+            None,
+        )
     }
 
     #[expect(clippy::type_complexity)]
@@ -1047,6 +1097,7 @@ where
         evm_config: &Evm,
         block: &RecoveredBlock<BlockTy<Evm::Primitives>>,
         database: impl DynDatabase,
+        parent_timestamp: Option<u64>,
         state_hook: Option<Box<dyn FnMut(StateUpdate) + Send>>,
     ) -> Result<
         (BlockExecutionOutput<ReceiptTy<Evm::Primitives>>, Option<BlockAccessList>),
@@ -1054,9 +1105,13 @@ where
     > {
         let evm_env = evm_config.evm_env(block.header()).map_err(BlockExecutionError::other)?;
         let evm = evm_config.block_executor_factory().evm_with_env(database, evm_env);
-        let ctx = evm_config
-            .context_for_block(block.sealed_block())
-            .map_err(BlockExecutionError::other)?;
+        let ctx = match parent_timestamp {
+            Some(timestamp) => {
+                evm_config.context_for_block_with_parent_timestamp(block.sealed_block(), timestamp)
+            }
+            None => evm_config.context_for_block(block.sealed_block()),
+        }
+        .map_err(BlockExecutionError::other)?;
         let mut executor = evm_config.block_executor_factory().create_executor(evm, ctx);
         if block.header().block_access_list_hash().is_some() {
             executor.enable_block_access_list_builder();
@@ -1090,8 +1145,13 @@ where
         block: &RecoveredBlock<<Self::Primitives as NodePrimitives>::Block>,
     ) -> Result<BlockExecutionResult<<Self::Primitives as NodePrimitives>::Receipt>, Self::Error>
     {
-        let (output, block_access_list) =
-            Self::execute_block_with_database(&self.evm_config, block, &mut self.batch_database)?;
+        let (output, block_access_list) = Self::execute_block_with_database(
+            &self.evm_config,
+            block,
+            &mut self.batch_database,
+            self.parent_timestamp,
+        )?;
+        self.parent_timestamp = Some(block.header().timestamp());
         self.block_access_list = block_access_list;
         self.batch_database.commit_source(&BundleSource(&output.state));
 
@@ -1113,8 +1173,10 @@ where
             &self.evm_config,
             block,
             &mut self.batch_database,
+            self.parent_timestamp,
             Some(Box::new(state_hook)),
         )?;
+        self.parent_timestamp = Some(block.header().timestamp());
         self.block_access_list = block_access_list;
         self.batch_database.commit_source(&BundleSource(&output.state));
 
@@ -1129,8 +1191,13 @@ where
         block: &RecoveredBlock<<Self::Primitives as NodePrimitives>::Block>,
     ) -> Result<BlockExecutionOutput<<Self::Primitives as NodePrimitives>::Receipt>, Self::Error>
     {
-        let Self { evm_config, batch_database, batch_state, .. } = self;
-        let (output, _) = Self::execute_block_with_database(&evm_config, block, batch_database)?;
+        let Self { evm_config, batch_database, batch_state, parent_timestamp, .. } = self;
+        let (output, _) = Self::execute_block_with_database(
+            &evm_config,
+            block,
+            batch_database,
+            parent_timestamp,
+        )?;
         Ok(Self::merge_batch_output(batch_state, output))
     }
 
@@ -1142,11 +1209,12 @@ where
     where
         F: FnMut(StateUpdate) + Send + 'static,
     {
-        let Self { evm_config, batch_database, batch_state, .. } = self;
+        let Self { evm_config, batch_database, batch_state, parent_timestamp, .. } = self;
         let (output, _) = Self::execute_block_with_database_and_state_hook(
             &evm_config,
             block,
             batch_database,
+            parent_timestamp,
             Some(Box::new(state_hook)),
         )?;
         Ok(Self::merge_batch_output(batch_state, output))
@@ -1162,6 +1230,10 @@ where
 
     fn take_bal(&mut self) -> Option<BlockAccessList> {
         self.block_access_list.take()
+    }
+
+    fn set_parent_timestamp(&mut self, parent_timestamp: u64) {
+        self.parent_timestamp = Some(parent_timestamp);
     }
 }
 
@@ -1438,10 +1510,10 @@ where
 /// Implementations update the transaction fields only: values derived when the environment was
 /// created (sender, recovered authorities, or other cached metadata) are preserved.
 pub trait TransactionEnvMut: Transaction + Clone {
-    /// Sets the gas limit.
+    /// Sets an ordinary transaction's gas limit. Frame budgets are set per frame.
     fn set_gas_limit(&mut self, gas_limit: u64);
 
-    /// Sets the access list.
+    /// Sets an ordinary transaction's access list. Frame transactions have no access list.
     fn set_access_list(&mut self, access_list: AccessList);
 }
 
@@ -1453,6 +1525,8 @@ impl TransactionEnvMut for evm2::ethereum::TxEnvelope {
             Self::Eip1559(tx) => tx.gas_limit = gas_limit,
             Self::Eip4844(tx) => AsMut::<TxEip4844>::as_mut(tx).gas_limit = gas_limit,
             Self::Eip7702(tx) => tx.gas_limit = gas_limit,
+            // Frame transactions carry independent budgets on each frame.
+            Self::Eip8141(_) => {}
         }
     }
 
@@ -1478,6 +1552,7 @@ impl TransactionEnvMut for evm2::ethereum::TxEnvelope {
             Self::Eip1559(tx) => tx.access_list = access_list,
             Self::Eip4844(tx) => AsMut::<TxEip4844>::as_mut(tx).access_list = access_list,
             Self::Eip7702(tx) => tx.access_list = access_list,
+            Self::Eip8141(_) => {}
         }
     }
 }

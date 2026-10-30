@@ -4,9 +4,10 @@ use reth_execution_types::{BlockState, StateUpdate};
 use crate::{
     execution::{
         base_block_reward, block_requests_from_receipts, commit_detached_transaction,
-        commit_pending_state, execute_transaction_without_commit, map_transaction_error,
-        post_block_balance_state_changes, post_execution_system_call_state_changes,
-        pre_execution_system_call_state_changes, BlockExecutionContext, BlockSystemCalls,
+        commit_pending_state, eip8253_state_changes, execute_transaction_without_commit,
+        map_transaction_error, post_block_balance_state_changes,
+        post_execution_system_call_state_changes, pre_execution_system_call_state_changes,
+        BlockExecutionContext, BlockSystemCalls,
     },
     factory::{EthBlockExecutorFactory, EvmFactory},
     EthBlockExecutionCtx, EthEvmEnv, RethReceiptBuilder,
@@ -18,10 +19,12 @@ use alloy_consensus::{
 };
 use alloy_eip7928::{BlockAccessIndex, BlockAccessList};
 use alloy_eips::{eip2718::Typed2718, eip4895::Withdrawal, eip7685::Requests};
-use alloy_primitives::{Address, B256};
+use alloy_primitives::{Address, B256, U256};
 use evm2::{
-    ethereum::TxEnvelope, evm::Bal, interpreter::Host, BaseEvmTypes, Evm, EvmTypes,
-    TxResultWithState,
+    ethereum::{eip8141::FrameGas, TxEnvelope},
+    evm::Bal,
+    interpreter::Host,
+    BaseEvmTypes, Evm, EvmTypes, TxResultWithState,
 };
 use reth_chainspec::EthChainSpec;
 use reth_ethereum_forks::{EthereumHardfork, EthereumHardforks};
@@ -46,6 +49,8 @@ where
     spec_id: evm2::SpecId,
     base_block_reward: Option<u128>,
     dao_fork_transition: bool,
+    eip8253_accounts: &'a [Address],
+    bogota_activation_timestamp: Option<u64>,
     deposit_contract_address: Option<Address>,
     /// Accumulated state changes, including state committed through the executor's hooks.
     pub block_state: BlockState,
@@ -102,7 +107,7 @@ where
     pub fn new<C>(
         mut evm: Evm<'a, T>,
         ctx: EthBlockExecutionCtx<'a>,
-        chain_spec: &C,
+        chain_spec: &'a C,
         receipt_builder: R,
     ) -> Self
     where
@@ -126,6 +131,11 @@ where
             spec_id,
             base_block_reward: base_block_reward(chain_spec, block_number),
             dao_fork_transition,
+            eip8253_accounts: chain_spec.eip8253_accounts(),
+            bogota_activation_timestamp: chain_spec
+                .ethereum_fork_activation(EthereumHardfork::Bogota)
+                .as_timestamp()
+                .filter(|timestamp| *timestamp > chain_spec.genesis().timestamp),
             deposit_contract_address: chain_spec
                 .deposit_contract()
                 .map(|contract| contract.address),
@@ -194,6 +204,34 @@ where
             self.evm.state_mut().set_bal_index(BlockAccessIndex::new(index));
         }
     }
+
+    fn validate_transaction_gas_reservations(
+        &mut self,
+        transaction: &R::Transaction,
+    ) -> Result<(), BlockExecutionError> {
+        let Some(frame) = transaction.frame_transaction() else {
+            return self.validate_transaction_gas_limit(transaction.gas_limit());
+        };
+        let gas = FrameGas::calculate(frame, self.evm.version())
+            .map_err(|error| map_transaction_error(error, *transaction.tx_hash()))?;
+        let block_gas_limit = self.evm.block_env().gas_limit.to::<u64>();
+        let separate =
+            [(gas.execution, self.block_regular_gas_used), (gas.state, self.block_state_gas_used)];
+        let combined = [(gas.maximum, self.cumulative_gas_used)];
+        let reservations =
+            if self.separate_block_gas { separate.as_slice() } else { combined.as_slice() };
+        for &(transaction_gas_limit, used) in reservations {
+            let block_available_gas = block_gas_limit.saturating_sub(used);
+            if transaction_gas_limit > block_available_gas {
+                return Err(BlockValidationError::TransactionGasLimitMoreThanAvailableBlockGas {
+                    transaction_gas_limit,
+                    block_available_gas,
+                }
+                .into());
+            }
+        }
+        Ok(())
+    }
 }
 
 impl<'a, T, R> BlockExecutor for EthBlockExecutor<'a, T, R>
@@ -248,6 +286,25 @@ where
     }
 
     fn apply_pre_execution_changes(&mut self) -> Result<(), BlockExecutionError> {
+        if !self.eip8253_accounts.is_empty() &&
+            self.evm.block_env().number != U256::ZERO &&
+            let Some(activation) = self.bogota_activation_timestamp &&
+            self.evm.block_env().timestamp >= U256::from(activation)
+        {
+            let parent_timestamp = self
+                .ctx
+                .parent_timestamp
+                .ok_or_else(|| BlockExecutionError::other(MissingEip8253ParentTimestamp))?;
+            if parent_timestamp < activation {
+                eip8253_state_changes(
+                    &mut self.evm,
+                    &mut self.block_state,
+                    self.state_update_hook.is_some(),
+                    &mut |state| emit_state(&mut self.state_update_hook, state),
+                    self.eip8253_accounts,
+                )?;
+            }
+        }
         let context = Self::block_context(
             self.deposit_contract_address,
             self.ctx.parent_hash,
@@ -310,7 +367,7 @@ where
     ) -> Result<Option<GasOutput>, BlockExecutionError> {
         let (transaction, tx) = transaction.into_parts();
         self.set_transaction_block_access_index();
-        self.validate_transaction_gas_limit(tx.tx().gas_limit())?;
+        self.validate_transaction_gas_reservations(tx.tx())?;
         let blob_gas_used = tx.tx().blob_gas_used().unwrap_or_default();
         let tx_type = tx.tx().tx_type();
         let Some(outcome) = crate::execution::execute_transaction_with_condition(
@@ -336,7 +393,7 @@ where
             tx_type,
             result: outcome,
             cumulative_gas_used: self.cumulative_gas_used,
-        }));
+        })?);
         Ok(Some(GasOutput::new_with_regular(tx_gas_used, regular_gas_used, state_gas_used)))
     }
 
@@ -346,8 +403,7 @@ where
     ) -> Result<Self::TransactionResultWithState, BlockExecutionError> {
         let (transaction, tx) = transaction.into_parts();
         self.set_transaction_block_access_index();
-        let transaction_gas_limit = tx.tx().gas_limit();
-        self.validate_transaction_gas_limit(transaction_gas_limit)?;
+        self.validate_transaction_gas_reservations(tx.tx())?;
         let blob_gas_used = tx.tx().blob_gas_used().unwrap_or_default();
         let tx_type = tx.tx().tx_type();
         let result = execute_transaction_without_commit(&mut self.evm, &transaction)
@@ -380,7 +436,7 @@ where
             tx_type,
             result: outcome,
             cumulative_gas_used: self.cumulative_gas_used,
-        }));
+        })?);
         Ok(GasOutput::new_with_regular(tx_gas_used, regular_gas_used, state_gas_used))
     }
 
@@ -584,6 +640,17 @@ struct FinishedBigBlockSegment {
     blob_gas_used: u64,
 }
 
+#[derive(Debug)]
+struct MissingEip8253ParentTimestamp;
+
+impl core::fmt::Display for MissingEip8253ParentTimestamp {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("parent timestamp is required for the configured EIP-8253 fork transition")
+    }
+}
+
+impl core::error::Error for MissingEip8253ParentTimestamp {}
+
 /// Block executor for merged payloads that switches the EVM context at block boundaries.
 #[expect(missing_debug_implementations)]
 pub struct EthBigBlockExecutor<'a, C, F = crate::factory::RethEvmFactory>
@@ -774,7 +841,11 @@ where
 
     fn after_committed_transaction(&mut self) -> Result<(), BlockExecutionError> {
         if let Some(receipt) = self.inner.receipts.last_mut() {
-            receipt.cumulative_gas_used += self.receipt_gas_used_offset;
+            let cumulative_gas_used = receipt
+                .cumulative_gas_used()
+                .checked_add(self.receipt_gas_used_offset)
+                .ok_or(BlockValidationError::BlockGasExceeded)?;
+            receipt.set_cumulative_gas_used(cumulative_gas_used);
         }
         self.tx_counter += 1;
         while self.worker_segment.is_none() &&
@@ -982,21 +1053,27 @@ fn emit_state(hook: &mut StateUpdateHook, state: StateUpdate) {
 mod tests {
     use super::*;
     use crate::dao_fork;
-    use alloy_consensus::{SignableTransaction, TxEip4844, TxLegacy};
+    use alloy_consensus::{SignableTransaction, TxEip4844, TxEip8141, TxLegacy, TxReceipt};
     use alloy_eip7928::BlockAccessIndex;
-    use alloy_primitives::{address, Address, Bytes, Signature, TxKind, B256, U256};
+    use alloy_eips::eip8141::{Frame, FrameLimits, FrameMode};
+    use alloy_primitives::{address, Address, Bytes, Sealable, Signature, TxKind, B256, U256};
     use evm2::{
         bytecode::Bytecode,
         env::BlockEnv,
-        evm::{AccountInfo, Database, Db},
-        interpreter::Word,
+        evm::{AccountInfo, Database, Db, InMemoryDB, BEACON_ROOTS_ADDRESS},
+        interpreter::{InstrStop, Word},
+        registry::HandlerError,
         BaseEvmTypes, SpecId,
     };
     use reth_chainspec::{Chain, ChainSpecBuilder, EthereumHardfork, ForkCondition};
-    use reth_ethereum_primitives::TransactionSigned;
-    use reth_evm::{BlockExecutor, BlockExecutorFactory, CommitChanges};
-    use reth_primitives_traits::Recovered;
-    use std::{collections::BTreeMap, convert::Infallible, sync::Arc};
+    use reth_ethereum_primitives::{Block, BlockBody, TransactionSigned};
+    use reth_evm::{BlockExecutor, BlockExecutorFactory, CommitChanges, ConfigureEvm, Executor};
+    use reth_primitives_traits::{Recovered, RecoveredBlock};
+    use std::{
+        collections::BTreeMap,
+        convert::Infallible,
+        sync::{Arc, Mutex},
+    };
 
     fn segment(
         start_tx: usize,
@@ -1011,6 +1088,7 @@ mod tests {
             ctx: EthBlockExecutionCtx {
                 tx_count_hint: Some(1),
                 parent_hash,
+                parent_timestamp: None,
                 parent_beacon_block_root: None,
                 ommers: &[],
                 withdrawals: None,
@@ -1232,6 +1310,7 @@ mod tests {
             EthBlockExecutionCtx {
                 tx_count_hint: Some(0),
                 parent_hash: B256::ZERO,
+                parent_timestamp: None,
                 parent_beacon_block_root: None,
                 ommers: &[],
                 withdrawals: None,
@@ -1396,11 +1475,33 @@ mod tests {
             receipt_gas += gas.tx_gas_used();
             block_gas += segment_block_gas;
             let receipt = executor.receipts().last().unwrap();
-            assert!(receipt.success);
-            assert_eq!(receipt.cumulative_gas_used, receipt_gas);
+            assert!(receipt.success());
+            assert_eq!(receipt.cumulative_gas_used(), receipt_gas);
         }
         let (output, _) = executor.finish_with_block_access_list().unwrap();
         assert_eq!(output.result.gas_used, block_gas);
+    }
+
+    #[test]
+    fn big_block_receipt_offset_rejects_gas_overflow() {
+        let plan = EthBigBlockPlan::new(vec![segment(0, 1, B256::ZERO)], Vec::new(), 1);
+        let factory = super::super::factory::EthBigBlockExecutorFactory::new(
+            super::super::factory::EthBlockExecutorFactory::new(Arc::new(
+                ChainSpecBuilder::mainnet().paris_activated().build(),
+            )),
+        );
+        let evm = factory
+            .evm_with_env(Db::new(TestDatabase::default()), plan.segments[0].evm_env.clone());
+        let mut executor = factory.create_executor(evm, plan);
+        executor.inner.receipts.push(Receipt::standard(EthTxType::Legacy, true, 1, Vec::new()));
+        executor.receipt_gas_used_offset = u64::MAX;
+
+        assert!(matches!(
+            executor.after_committed_transaction(),
+            Err(BlockExecutionError::Validation(BlockValidationError::BlockGasExceeded))
+        ));
+        assert_eq!(executor.inner.receipts[0].cumulative_gas_used(), 1);
+        assert_eq!(executor.tx_counter, 0);
     }
 
     #[test]
@@ -1459,6 +1560,374 @@ mod tests {
         };
         executor.execute_transaction(blob_tx(0)).expect("seven blobs fit the first segment cap");
         let err = executor.execute_transaction(blob_tx(1)).unwrap_err();
-        assert!(err.to_string().contains("too many blobs: have 7, max 6"), "{err}");
+        assert!(matches!(
+            err,
+            BlockExecutionError::Validation(BlockValidationError::InvalidTx { error, .. })
+                if error.as_any().downcast_ref::<HandlerError>()
+                    == Some(&HandlerError::TooManyBlobs { have: 7, max: 6 })
+        ));
+    }
+
+    #[test]
+    fn frame_admission_reserves_execution_and_state_independently() {
+        let factory = super::super::factory::EthBlockExecutorFactory::new(Arc::new(
+            ChainSpecBuilder::mainnet().bogota_activated().build(),
+        ));
+        let env = EthEvmEnv::new(
+            SpecId::BOGOTA,
+            BlockEnv::<BaseEvmTypes> { gas_limit: U256::from(1_000_000), ..Default::default() },
+            1,
+        );
+        let evm = factory.evm_with_env(Db::new(TestDatabase::default()), env);
+        let mut executor = factory.create_executor(evm, segment(0, 1, B256::ZERO).ctx);
+        let payload = TxEip8141 {
+            chain_id: 1,
+            sender: Address::with_last_byte(1),
+            nonce_keys: Some(vec![]),
+            frames: vec![Frame {
+                mode: FrameMode::Verify,
+                flags: 3,
+                limits: FrameLimits { execution: 600_000, state: 600_000 },
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let gas = FrameGas::calculate(&payload, executor.evm.version()).unwrap();
+        let transaction = TransactionSigned::Eip8141(payload.seal_slow());
+        assert!(gas.maximum > 1_000_000);
+        executor.validate_transaction_gas_reservations(&transaction).unwrap();
+        for (execution_used, state_used, required) in
+            [(1_000_001 - gas.execution, 0, gas.execution), (0, 1_000_001 - gas.state, gas.state)]
+        {
+            executor.block_regular_gas_used = execution_used;
+            executor.block_state_gas_used = state_used;
+            let error = executor.validate_transaction_gas_reservations(&transaction).unwrap_err();
+            assert!(matches!(error, BlockExecutionError::Validation(
+                BlockValidationError::TransactionGasLimitMoreThanAvailableBlockGas {
+                    transaction_gas_limit,
+                    block_available_gas,
+                }
+            ) if transaction_gas_limit == required && block_available_gas == required - 1));
+        }
+        executor.separate_block_gas = false;
+        let error = executor.validate_transaction_gas_reservations(&transaction).unwrap_err();
+        assert!(matches!(error, BlockExecutionError::Validation(
+            BlockValidationError::TransactionGasLimitMoreThanAvailableBlockGas {
+                transaction_gas_limit,
+                block_available_gas: 1_000_000,
+            }
+        ) if transaction_gas_limit == gas.maximum));
+    }
+
+    #[test]
+    fn eip8253_runs_only_at_explicit_fork_boundary() {
+        let address = Address::with_last_byte(0x42);
+        let code = Bytecode::new_legacy(Bytes::from_static(&[0]));
+        let original =
+            AccountInfo::default().with_balance(U256::from(19)).with_nonce(7).with_code(code);
+        for (number, parent, timestamp, activation, transition) in [
+            (1, Some(8), 9, 10, false),
+            (2, Some(9), 10, 10, true),
+            (2, Some(9), 25, 10, true),
+            (3, Some(10), 25, 10, false),
+            (0, None, 10, 10, false),
+            (1, None, 1, 0, false),
+        ] {
+            let mut genesis = alloy_genesis::Genesis::default();
+            genesis.config.eip8253_accounts = Some(vec![address]);
+            let chain_spec = ChainSpecBuilder::mainnet()
+                .genesis(genesis)
+                .amsterdam_activated()
+                .with_bogota_at(activation)
+                .build();
+            let factory = super::super::factory::EthBlockExecutorFactory::new(Arc::new(chain_spec));
+            let mut db = InMemoryDB::default();
+            db.insert_account_info(&address, original.clone());
+            db.insert_account_storage(&address, &U256::from(3), &U256::from(37));
+            let env = EthEvmEnv::new(
+                if timestamp >= activation { SpecId::BOGOTA } else { SpecId::AMSTERDAM },
+                BlockEnv::<BaseEvmTypes> {
+                    number: U256::from(number),
+                    timestamp: U256::from(timestamp),
+                    ..Default::default()
+                },
+                1,
+            );
+            let mut ctx = segment(0, number, B256::ZERO).ctx;
+            ctx.parent_timestamp = parent;
+            ctx.parent_beacon_block_root = Some(B256::ZERO);
+            let evm = factory.evm_with_env(db, env);
+            let mut executor = factory.create_executor(evm, ctx);
+            executor.enable_block_access_list_builder();
+            executor.apply_pre_execution_changes().unwrap();
+            let mut expected = original.clone();
+            expected.nonce = if transition { 1 } else { original.nonce };
+            assert_eq!(executor.evm.read_account_info(&address).unwrap(), Some(expected));
+            assert_eq!(
+                executor.evm.state_mut().storage_slot_untracked(&address, &U256::from(3)).unwrap(),
+                U256::from(37)
+            );
+            let bal = executor.take_block_access_list().unwrap();
+            let account = bal.iter().find(|account| account.address == address);
+            if transition {
+                let account = account.unwrap();
+                assert_eq!(account.nonce_changes.len(), 1);
+                assert_eq!(account.nonce_changes[0].new_nonce, 1);
+                assert_eq!(account.nonce_changes[0].block_access_index, BlockAccessIndex::new(0));
+                assert!(account.balance_changes.is_empty());
+                assert!(account.code_changes.is_empty());
+                assert!(account.storage_changes.is_empty());
+            } else {
+                assert!(account.is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn eip8253_requires_parent_timestamp_for_transition_detection() {
+        let mut genesis = alloy_genesis::Genesis::default();
+        genesis.config.eip8253_accounts = Some(vec![Address::with_last_byte(0x42)]);
+        let factory = super::super::factory::EthBlockExecutorFactory::new(Arc::new(
+            ChainSpecBuilder::mainnet()
+                .genesis(genesis)
+                .amsterdam_activated()
+                .with_bogota_at(10)
+                .build(),
+        ));
+        let env = EthEvmEnv::new(
+            SpecId::BOGOTA,
+            BlockEnv::<BaseEvmTypes> {
+                number: U256::from(2),
+                timestamp: U256::from(10),
+                ..Default::default()
+            },
+            1,
+        );
+        let evm = factory.evm_with_env(InMemoryDB::default(), env);
+        let mut executor = factory.create_executor(evm, segment(0, 2, B256::ZERO).ctx);
+        executor.enable_block_access_list_builder();
+        let error = executor.apply_pre_execution_changes().unwrap_err();
+        assert_eq!(error.to_string(), MissingEip8253ParentTimestamp.to_string());
+        assert!(executor.evm.state().bal_builder().unwrap().accounts.is_empty());
+    }
+
+    #[test]
+    fn eip8253_prevents_first_transaction_creation_collision() {
+        let sender = Address::with_last_byte(0x42);
+        let target = sender.create(0);
+        for timestamp in [9, 10] {
+            let mut genesis = alloy_genesis::Genesis::default();
+            genesis.config.eip8253_accounts = Some(vec![target]);
+            let factory = super::super::factory::EthBlockExecutorFactory::new(Arc::new(
+                ChainSpecBuilder::mainnet()
+                    .genesis(genesis)
+                    .amsterdam_activated()
+                    .with_bogota_at(10)
+                    .build(),
+            ));
+            let mut db = InMemoryDB::default();
+            db.insert_account_info(
+                &sender,
+                AccountInfo::default().with_balance(U256::from(10_000_000)),
+            );
+            db.insert_account_info(&target, AccountInfo::default());
+            db.insert_account_storage(&target, &U256::ZERO, &U256::from(37));
+            let env = EthEvmEnv::new(
+                if timestamp == 10 { SpecId::BOGOTA } else { SpecId::AMSTERDAM },
+                BlockEnv::<BaseEvmTypes> {
+                    number: U256::from(2),
+                    timestamp: U256::from(timestamp),
+                    gas_limit: U256::from(1_000_000),
+                    ..Default::default()
+                },
+                1,
+            );
+            let mut ctx = segment(0, 2, B256::ZERO).ctx;
+            ctx.parent_timestamp = Some(9);
+            ctx.parent_beacon_block_root = Some(B256::ZERO);
+            let evm = factory.evm_with_env(db, env);
+            let mut executor = factory.create_executor(evm, ctx);
+            executor.apply_pre_execution_changes().unwrap();
+            let tx = TransactionSigned::Legacy(
+                TxLegacy {
+                    chain_id: Some(1),
+                    // Leave room for Amsterdam's separate account-creation state gas.
+                    gas_limit: 500_000,
+                    gas_price: 1,
+                    to: TxKind::Create,
+                    input: Bytes::from_static(&[0]),
+                    ..Default::default()
+                }
+                .into_signed(Signature::test_signature()),
+            );
+            let output = executor
+                .execute_transaction_without_commit(Recovered::new_unchecked(tx, sender))
+                .unwrap();
+            if timestamp == 10 {
+                assert_eq!(output.result().result.stop, InstrStop::CreateCollision);
+            }
+            executor.commit_transaction(output).unwrap();
+            assert_eq!(executor.receipts[0].status(), timestamp == 9);
+            assert_eq!(
+                executor.evm.state_mut().storage_slot_untracked(&target, &U256::ZERO).unwrap(),
+                if timestamp == 9 { U256::ZERO } else { U256::from(37) }
+            );
+        }
+    }
+
+    #[test]
+    fn eip8253_mainnet_defaults_precede_system_calls_and_allow_empty_override() {
+        for empty_override in [false, true] {
+            let mut chain_spec = ChainSpecBuilder::mainnet().with_bogota_at(10).build();
+            if empty_override {
+                chain_spec.genesis.config.eip8253_accounts = Some(vec![]);
+            }
+            let factory = super::super::factory::EthBlockExecutorFactory::new(Arc::new(chain_spec));
+            let addresses = &alloy_genesis::EIP8253_MAINNET_ACCOUNTS;
+            let original = AccountInfo::default().with_balance(U256::from(19));
+            let mut db = InMemoryDB::default();
+            for address in addresses {
+                db.insert_account_info(address, original.clone());
+                db.insert_account_storage(address, &U256::ZERO, &U256::from(37));
+            }
+            db.insert_account_info(
+                &BEACON_ROOTS_ADDRESS,
+                AccountInfo::default().with_code(Bytecode::new_legacy(Bytes::from_static(&[
+                    0x60, 7, 0x60, 1, 0x55, 0,
+                ]))),
+            );
+            let env = EthEvmEnv::new(
+                SpecId::BOGOTA,
+                BlockEnv::<BaseEvmTypes> {
+                    number: U256::from(2),
+                    timestamp: U256::from(25),
+                    ..Default::default()
+                },
+                1,
+            );
+            let mut ctx = segment(0, 2, B256::ZERO).ctx;
+            ctx.parent_timestamp = (!empty_override).then_some(9);
+            ctx.parent_beacon_block_root = Some(B256::ZERO);
+            let evm = factory.evm_with_env(db, env);
+            let mut executor = factory.create_executor(evm, ctx);
+            let updates = Arc::new(Mutex::new(Vec::new()));
+            let hook_updates = updates.clone();
+            executor.set_state_hook(move |update| hook_updates.lock().unwrap().push(update));
+            executor.enable_block_access_list_builder();
+            executor.apply_pre_execution_changes().unwrap();
+            for address in addresses {
+                let mut expected = original.clone();
+                expected.nonce = u64::from(!empty_override);
+                assert_eq!(executor.evm.read_account_info(address).unwrap(), Some(expected));
+                assert_eq!(
+                    executor.evm.state_mut().storage_slot_untracked(address, &U256::ZERO).unwrap(),
+                    U256::from(37)
+                );
+            }
+            let updates = updates.lock().unwrap();
+            if empty_override {
+                assert_eq!(updates.len(), 1);
+            } else {
+                assert_eq!(updates.len(), 2);
+                assert_eq!(updates[0].accounts.len(), addresses.len());
+                for address in addresses {
+                    let account = updates[0].account(address).unwrap();
+                    assert_eq!(account.current.as_ref().unwrap().nonce, 1);
+                    assert!(account.storage.is_empty());
+                    assert!(!account.created);
+                    assert!(!account.wiped);
+                }
+            }
+            let system_call = updates.last().unwrap().account(&BEACON_ROOTS_ADDRESS).unwrap();
+            assert_eq!(system_call.storage.len(), 1);
+            assert_eq!(system_call.storage[0].0, U256::from(1));
+            let bal = executor.take_block_access_list().unwrap();
+            for address in addresses {
+                let account = bal.iter().find(|account| account.address == *address);
+                if empty_override {
+                    assert!(account.is_none());
+                } else {
+                    let account = account.unwrap();
+                    assert_eq!(account.nonce_changes.len(), 1);
+                    assert_eq!(account.nonce_changes[0].new_nonce, 1);
+                    assert_eq!(
+                        account.nonce_changes[0].block_access_index,
+                        BlockAccessIndex::new(0)
+                    );
+                    assert!(account.balance_changes.is_empty());
+                    assert!(account.code_changes.is_empty());
+                    assert!(account.storage_changes.is_empty());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn eip8253_batch_tracks_successful_parent_across_failed_block_retry() {
+        let sender = Address::with_last_byte(0x42);
+        let recipient = Address::with_last_byte(0x43);
+        let mut genesis = alloy_genesis::Genesis::default();
+        genesis.config.chain_id = 1;
+        genesis.config.eip8253_accounts = Some(vec![sender]);
+        let config = crate::EthEvmConfig::new(Arc::new(
+            ChainSpecBuilder::mainnet()
+                .genesis(genesis)
+                .amsterdam_activated()
+                .with_bogota_at(10)
+                .build(),
+        ));
+        let mut database = InMemoryDB::default();
+        database.insert_account_info(
+            &sender,
+            AccountInfo::default().with_balance(U256::from(10_000_000)),
+        );
+        database.insert_account_info(
+            &recipient,
+            AccountInfo::default().with_nonce(1).with_balance(U256::from(1)),
+        );
+        let block = |number, timestamp, nonce| {
+            let (transaction, signer) = transfer(sender, recipient, nonce).into_parts();
+            RecoveredBlock::new_unhashed(
+                Block {
+                    header: Header {
+                        number,
+                        timestamp,
+                        gas_limit: 1_000_000,
+                        base_fee_per_gas: Some(0),
+                        excess_blob_gas: Some(0),
+                        parent_beacon_block_root: Some(B256::ZERO),
+                        block_access_list_hash: Some(B256::ZERO),
+                        ..Default::default()
+                    },
+                    body: BlockBody {
+                        transactions: vec![transaction],
+                        withdrawals: Some(Default::default()),
+                        ..Default::default()
+                    },
+                },
+                vec![signer],
+            )
+        };
+        let mut executor = config.batch_executor(database);
+        executor.set_parent_timestamp(9);
+        let invalid = block(2, 10, 99);
+        let error = executor.execute_one(&invalid).unwrap_err();
+        let expected = map_transaction_error(
+            evm2::registry::HandlerError::InvalidNonce { expected: 1, got: 99 },
+            *invalid.body().transactions[0].tx_hash(),
+        );
+        assert_eq!(error.to_string(), expected.to_string());
+        assert!(executor.take_bal().is_none());
+        executor.execute_one(&block(2, 10, 1)).unwrap();
+        let bal = executor.take_bal().unwrap();
+        let changes = &bal.iter().find(|account| account.address == sender).unwrap().nonce_changes;
+        assert_eq!(changes.len(), 2);
+        assert_eq!((changes[0].block_access_index.get(), changes[0].new_nonce), (0, 1));
+        assert_eq!((changes[1].block_access_index.get(), changes[1].new_nonce), (1, 2));
+        executor.execute_one(&block(3, 25, 2)).unwrap();
+        let bal = executor.take_bal().unwrap();
+        let changes = &bal.iter().find(|account| account.address == sender).unwrap().nonce_changes;
+        assert_eq!(changes.len(), 1);
+        assert_eq!((changes[0].block_access_index.get(), changes[0].new_nonce), (1, 3));
     }
 }

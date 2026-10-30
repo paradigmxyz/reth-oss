@@ -17,8 +17,9 @@ use reth_rpc_server_types::result::{
     internal_rpc_err, invalid_params_rpc_err, rpc_err, rpc_error_with_code,
 };
 use reth_transaction_pool::error::{
-    Eip4844PoolTransactionError, Eip7702PoolTransactionError, InvalidPoolTransactionError,
-    PoolError, PoolErrorKind, PoolTransactionError, RawPoolTransactionError,
+    Eip4844PoolTransactionError, Eip7702PoolTransactionError, Eip8141PoolTransactionError,
+    InvalidPoolTransactionError, PoolError, PoolErrorKind, PoolTransactionError,
+    RawPoolTransactionError,
 };
 use std::convert::Infallible;
 use tokio::sync::oneshot::error::RecvError;
@@ -217,6 +218,15 @@ pub enum EthApiError {
     /// Error thrown when trying to access block access list for blocks before Amsterdam
     #[error("Block access list not available for pre-Amsterdam blocks")]
     BlockAccessListNotAvailablePreAmsterdam,
+    /// Error thrown when a frame transaction method targets a block before Bogota.
+    #[error("frame transactions are not active at the requested block")]
+    FrameTransactionsNotActive,
+    /// A keyed nonce query targets a block before EIP-8250 activation.
+    #[error("keyed nonces are not active at the requested block")]
+    KeyedNoncesNotActive,
+    /// The selected nonce domains have different sequences.
+    #[error("nonce keys do not share one sequence")]
+    NonceKeysNotSynchronized,
     /// Any other error
     #[error("{0}")]
     Other(Box<dyn ToRpcError>),
@@ -333,6 +343,9 @@ impl From<EthApiError> for jsonrpsee_types::error::ErrorObject<'static> {
             EthApiError::TransactionConversionError(_) |
             EthApiError::InvalidRewardPercentiles |
             EthApiError::InvalidBytecode(_) => invalid_params_rpc_err(error.to_string()),
+            EthApiError::KeyedNoncesNotActive | EthApiError::NonceKeysNotSynchronized => {
+                rpc_error_with_code(EthRpcErrorCode::InvalidInput.code(), error.to_string())
+            }
             EthApiError::InvalidTransaction(err) => err.into(),
             EthApiError::PoolError(err) => err.into(),
             EthApiError::Internal(RethError::Provider(
@@ -345,7 +358,8 @@ impl From<EthApiError> for jsonrpsee_types::error::ErrorObject<'static> {
             EthApiError::EvmCustom(_) => internal_rpc_err(error.to_string()),
             EthApiError::UnknownBlockOrTxIndex |
             EthApiError::TransactionNotFound |
-            EthApiError::BlockAccessListNotAvailablePreAmsterdam => {
+            EthApiError::BlockAccessListNotAvailablePreAmsterdam |
+            EthApiError::FrameTransactionsNotActive => {
                 rpc_error_with_code(EthRpcErrorCode::ResourceNotFound.code(), error.to_string())
             }
             EthApiError::TracingTransactionNotFound | EthApiError::GenesisNotTraceable => {
@@ -467,6 +481,8 @@ impl From<EthTxEnvError> for EthApiError {
                 Self::InvalidTransaction(RpcInvalidTransactionError::TipVeryHigh)
             }
             EthTxEnvError::Input(err) => Self::TransactionInputError(err),
+            err @ (EthTxEnvError::Eip8141InvalidOuterFields |
+            EthTxEnvError::Eip8141InvalidFields(_)) => Self::InvalidParams(err.to_string()),
             EthTxEnvError::BlobTransactionIsCreate => {
                 Self::InvalidTransaction(RpcInvalidTransactionError::BlobTransactionIsCreate)
             }
@@ -634,6 +650,9 @@ impl From<Infallible> for EthApiError {
 ///   `tip` for `max_priority_fee_per_gas`
 #[derive(thiserror::Error, Debug)]
 pub enum RpcInvalidTransactionError {
+    /// Native frame transaction validation failed before execution could complete.
+    #[error(transparent)]
+    FrameTransaction(HandlerError),
     /// returned if the nonce of a transaction is lower than the one present in the local chain.
     #[error("nonce too low: next nonce {state}, tx nonce {tx}")]
     NonceTooLow {
@@ -876,6 +895,8 @@ impl From<InvalidTransactionError> for RpcInvalidTransactionError {
 impl From<HandlerError> for RpcInvalidTransactionError {
     fn from(err: HandlerError) -> Self {
         match err {
+            err @ (HandlerError::InvalidFrameTransaction(_) |
+            HandlerError::FrameFeeBudgetTooLow { .. }) => Self::FrameTransaction(err),
             HandlerError::InvalidNonce { expected, got } if got < expected => {
                 Self::NonceTooLow { tx: got, state: expected }
             }
@@ -1015,6 +1036,9 @@ pub enum RpcPoolError {
     /// EIP-7702 related error
     #[error(transparent)]
     Eip7702(#[from] Eip7702PoolTransactionError),
+    /// EIP-8141 related error
+    #[error(transparent)]
+    Eip8141(#[from] Eip8141PoolTransactionError),
     /// Thrown if a conflicting transaction type is already in the pool
     ///
     /// In other words, thrown if a transaction with the same sender that violates the exclusivity
@@ -1046,6 +1070,7 @@ impl From<RpcPoolError> for jsonrpsee_types::error::ErrorObject<'static> {
             RpcPoolError::PoolTransactionError(_) |
             RpcPoolError::Eip4844(_) |
             RpcPoolError::Eip7702(_) |
+            RpcPoolError::Eip8141(_) |
             RpcPoolError::AddressAlreadyReserved => {
                 rpc_error_with_code(EthRpcErrorCode::InvalidInput.code(), error.to_string())
             }
@@ -1095,6 +1120,7 @@ impl From<InvalidPoolTransactionError> for RpcPoolError {
             InvalidPoolTransactionError::Other(err) => Self::PoolTransactionError(err),
             InvalidPoolTransactionError::Eip4844(err) => Self::Eip4844(err),
             InvalidPoolTransactionError::Eip7702(err) => Self::Eip7702(err),
+            InvalidPoolTransactionError::Eip8141(err) => Self::Eip8141(err),
             InvalidPoolTransactionError::Overdraft { cost, balance } => {
                 Self::Invalid(RpcInvalidTransactionError::InsufficientFunds { cost, balance })
             }
@@ -1143,6 +1169,17 @@ mod tests {
     fn timed_out_error() {
         let err = EthApiError::ExecutionTimedOut(Duration::from_secs(10));
         assert_eq!(err.to_string(), "execution aborted (timeout = 10s)");
+    }
+
+    #[test]
+    fn frame_outer_fields_error_is_invalid_params() {
+        let err = EthApiError::from(EthTxEnvError::Eip8141InvalidOuterFields);
+        let err: jsonrpsee_types::error::ErrorObject<'static> = err.into();
+        assert_eq!(err.code(), -32602);
+        assert_eq!(
+            err.message(),
+            "EIP-8141 transaction request contains non-canonical outer fields"
+        );
     }
 
     #[test]

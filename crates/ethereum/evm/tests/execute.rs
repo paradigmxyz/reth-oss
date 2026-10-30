@@ -603,7 +603,7 @@ fn eip_7002() {
         .unwrap();
 
     let receipt = receipts.first().unwrap();
-    assert!(receipt.success);
+    assert!(receipt.success());
 
     // There should be exactly one entry with withdrawal requests
     assert_eq!(requests.len(), 1);
@@ -803,7 +803,7 @@ fn prepared_block_access_list_keeps_legacy_ef01_code() {
 
     let alloy_bal = BlockAccessList::from(&bal.unwrap());
     let created = alloy_bal.iter().find(|account| account.address == sender_address.create(0));
-    assert_eq!(created.unwrap().code_changes[0].new_code, runtime);
+    assert_eq!(created.unwrap().code_changes[0].new_code(), &runtime);
     // Reparsing the canonical BAL into evm2's representation rejects the same code.
     assert!(evm2::evm::Bal::try_from(alloy_bal).is_err());
 }

@@ -6,7 +6,9 @@ use crate::{
     helpers::estimate::EstimateCall, FromEvmError, FullEthApiTypes, RpcBlock, RpcNodeCore,
 };
 use alloy_consensus::{transaction::Transaction, BlockHeader};
-use alloy_eips::{eip1559::calc_effective_gas_price, eip2930::AccessListResult};
+use alloy_eips::{
+    eip1559::calc_effective_gas_price, eip2718::Decodable2718, eip2930::AccessListResult,
+};
 use alloy_network::TransactionBuilder;
 use alloy_primitives::{Bytes, B256, U256};
 use alloy_rpc_types_eth::{
@@ -22,8 +24,8 @@ use reth_errors::{ProviderError, RethError};
 use reth_evm::{
     database::StateProviderDatabase,
     execute::{BlockBuilder, BlockExecutor},
-    BundleState, ConfigureEvm, Database, Evm, EvmEnv, EvmEnvFor, EvmTypesFor, TransactionEnvMut,
-    TxEnvFor, TxResultWithStateFor,
+    BlockExecutionError, BundleState, ConfigureEvm, Database, Evm, EvmEnv, EvmEnvFor, EvmTypesFor,
+    FromRecoveredTx, TransactionEnvMut, TxEnvFor, TxResultWithStateFor,
 };
 use reth_execution_types::BundleSource;
 use reth_primitives_traits::{BlockBody, Recovered};
@@ -34,11 +36,17 @@ use reth_rpc_eth_types::{
         attach_bal_before_tx,
     },
     error::{AsEthApiError, FromEthApiError},
-    simulate::{self, EthSimulateError, SimulatedState},
+    simulate::{
+        self, EthSimulateError, FrameSimulationFrameResult, FrameSimulationPrefixShape,
+        FrameSimulationResult, SimulatedState,
+    },
     EthApiError, RpcInvalidTransactionError, StateCacheDb,
 };
-use reth_storage_api::{BlockIdReader, ProviderTx, StateProvider};
+use reth_storage_api::{
+    BlockIdReader, BlockReaderIdExt, HeaderProvider, ProviderTx, StateProvider,
+};
 use reth_tasks::{cancel::is_cancelled, CancelOnDrop};
+use reth_transaction_pool::validate::{FrameValidationInspector, FrameValidationPolicy};
 use std::fmt;
 use tracing::{debug, trace};
 
@@ -272,6 +280,198 @@ pub trait EthCall: EstimateCall + LoadBlock + FullEthApiTypes {
         }
     }
 
+    /// Validates a canonical raw frame envelope and simulates its execution without committing.
+    /// Prefix validity follows public transaction-pool policy; the full execution retains the
+    /// selected block's nonce checks and reports each frame's outcome and independent gas use.
+    /// Recent-root validation and full execution use the pending slot, or the next slot after a
+    /// selected canonical block.
+    fn simulate_frame_transaction(
+        &self,
+        raw: Bytes,
+        block: Option<BlockId>,
+    ) -> impl Future<Output = Result<FrameSimulationResult, Self::Error>> + Send {
+        async move {
+            let permit = self
+                .acquire_owned_blocking_io()
+                .await
+                .map_err(|_| EthApiError::InternalEthError)?;
+            let transaction =
+                ProviderTx::<Self::Provider>::decode_2718_exact(&raw).map_err(|error| {
+                    EthApiError::InvalidParams(format!(
+                        "invalid frame transaction envelope: {error}"
+                    ))
+                })?;
+            let frame = transaction.frame_transaction().ok_or_else(|| {
+                EthApiError::InvalidParams("expected a canonical frame transaction envelope".into())
+            })?;
+            frame.validate().map_err(|error| {
+                EthApiError::InvalidParams(format!("invalid frame transaction: {error}"))
+            })?;
+            let requested_block = block.unwrap_or_default();
+            let (evm_env, at) = self.evm_env_at(requested_block).await?;
+            let derived_pending = requested_block.is_pending() && !at.is_pending();
+            let timestamp = evm_env.block_env().timestamp.saturating_to::<u64>();
+            if !self.provider().chain_spec().is_bogota_active_at_timestamp(timestamp) {
+                return Err(EthApiError::FrameTransactionsNotActive.into());
+            }
+            let max_cost = frame.fees.max_fee;
+            let chain_id = self.provider().chain_spec().chain_id();
+            if frame.chain_id != chain_id {
+                return Ok(FrameSimulationResult::invalid(
+                    max_cost,
+                    None,
+                    format!(
+                        "chain ID does not match the selected chain (have={}, want={chain_id})",
+                        frame.chain_id
+                    ),
+                ));
+            }
+            let policy = match FrameValidationPolicy::new(frame, frame.signature_verification_gas())
+            {
+                Ok(policy) => policy,
+                Err(reason) => return Ok(FrameSimulationResult::invalid(max_cost, None, reason)),
+            };
+            let current_slot = if let Some(verifier) = &policy.recent_root {
+                let slot = u64::try_from(evm_env.block_env().slot_num)
+                    .map_err(|_| {
+                        EthApiError::InvalidParams("canonical slot number overflows".into())
+                    })?
+                    // Actual and derived pending environments already contain the pending slot.
+                    .checked_add(u64::from(!requested_block.is_pending()))
+                    .ok_or_else(|| {
+                        EthApiError::InvalidParams("canonical slot number overflows".into())
+                    })?;
+                if verifier.references.iter().any(|reference| {
+                    reference.slot >= slot || reference.dependency().expires_at_slot <= slot
+                }) {
+                    return Ok(FrameSimulationResult::invalid(
+                        max_cost,
+                        None,
+                        "recent root reference is outside the usable slot window",
+                    ));
+                }
+                Some(slot)
+            } else {
+                None
+            };
+            let prefix_shape = Some(
+                FrameSimulationPrefixShape::from_validation_prefix(
+                    // Recent-root verification does not change the sender/payer approval shape.
+                    policy.prefix_end.saturating_sub(usize::from(policy.recent_root.is_some())),
+                    policy.deploy_index,
+                    policy.expiry_index,
+                )
+                .ok_or_else(|| {
+                    EthApiError::EvmCustom("unknown frame validation prefix shape".into())
+                })?,
+            );
+            let block_gas_limit = evm_env.block_env().gas_limit.saturating_to::<u64>();
+            simulate::ensure_frame_simulation_gas(
+                frame,
+                evm_env.version(),
+                (self.call_gas_limit() != 0).then_some(self.call_gas_limit()),
+                block_gas_limit,
+                block_gas_limit,
+            )
+            .map_err(Self::Error::from_eth_err)?;
+            let sender = frame.sender;
+            let tx_env = TxEnvFor::<Self::Evm>::from_recovered_tx(Recovered::new_unchecked(
+                transaction,
+                sender,
+            ));
+            self.spawn_with_state_at_block(at, move |this, mut db| {
+                let _permit = permit;
+                let mut evm_env = evm_env;
+                if derived_pending {
+                    this.apply_pending_block_state_changes(&mut db, &evm_env, at)?;
+                }
+                if let Some(current_slot) = current_slot {
+                    evm_env.block_env_mut().slot_num = U256::from(current_slot);
+                }
+                let mut prefix_env = evm_env.clone();
+                prefix_env.version_mut().features.remove(evm2::EvmFeatures::NONCE_CHECK);
+                let inspector = FrameValidationInspector::new(sender, policy.clone());
+                let mut evm = this.evm_config().evm_with_env(&mut db, prefix_env);
+                let (inspector, prefix) =
+                    evm.validate_frame_prefix_with_inspector(&tx_env, policy.prefix_end, inspector);
+                drop(evm);
+                if let Some(error) = inspector.database_error() {
+                    return Err(Self::Error::from_eth_err(error.clone()));
+                }
+                let prefix = match prefix {
+                    Ok(result) => result,
+                    Err(error @ BlockExecutionError::Internal(_)) => {
+                        return Err(Self::Error::from_evm_err(error))
+                    }
+                    Err(error) => {
+                        return Ok(FrameSimulationResult::invalid(
+                            max_cost,
+                            prefix_shape,
+                            error.to_string(),
+                        ))
+                    }
+                };
+                if let Some(reason) = inspector.error() {
+                    return Ok(FrameSimulationResult::invalid(
+                        prefix.max_cost,
+                        prefix_shape,
+                        reason,
+                    ));
+                }
+                let violation = if !prefix.sender_approved || prefix.prefix_end != policy.prefix_end
+                {
+                    Some("validation prefix did not grant the required approvals")
+                } else if prefix.execution_gas > policy.declared_execution_gas {
+                    Some("validation prefix exceeded its declared execution-gas budget")
+                } else if prefix.state_gas > policy.state_gas {
+                    Some("validation prefix exceeded its declared state-gas budget")
+                } else if inspector.expiry().is_some_and(|deadline| deadline < timestamp) {
+                    Some("frame transaction expired")
+                } else {
+                    None
+                };
+                if let Some(reason) = violation {
+                    return Ok(FrameSimulationResult::invalid(
+                        prefix.max_cost,
+                        prefix_shape,
+                        reason,
+                    ));
+                }
+                if is_cancelled() {
+                    return Err(EthApiError::InternalEthError.into());
+                }
+                let mut evm = this.evm_config().evm_with_env(&mut db, evm_env);
+                let result = evm.transact_result(&tx_env).map_err(Self::Error::from_evm_err)?;
+                let gas_used = result.tx_gas_used();
+                let frame = result.frame.ok_or_else(|| {
+                    EthApiError::EvmCustom(
+                        "frame transaction execution returned a non-frame result".into(),
+                    )
+                })?;
+                Ok(FrameSimulationResult {
+                    valid: true,
+                    max_cost: prefix.max_cost,
+                    prefix_shape,
+                    payer: Some(frame.payer),
+                    violation: None,
+                    gas_used: Some(gas_used),
+                    frames: Some(
+                        frame
+                            .receipts
+                            .into_iter()
+                            .map(|receipt| FrameSimulationFrameResult {
+                                execution_gas: receipt.gas_used.execution,
+                                state_gas: receipt.gas_used.state,
+                                status: receipt.status,
+                            })
+                            .collect(),
+                    ),
+                })
+            })
+            .await
+        }
+    }
+
     /// Executes the call request (`eth_call`) and returns the output
     fn call(
         &self,
@@ -280,8 +480,20 @@ pub trait EthCall: EstimateCall + LoadBlock + FullEthApiTypes {
         overrides: EvmOverrides,
     ) -> impl Future<Output = Result<Bytes, Self::Error>> + Send {
         async move {
-            let res =
-                self.transact_call_at(request, block_number.unwrap_or_default(), overrides).await?;
+            let mut at = block_number.unwrap_or_default();
+            let request = if request.as_ref().frames.as_ref().is_some_and(|frames| {
+                frames
+                    .iter()
+                    .any(|frame| frame.execution_gas.is_none() || frame.state_gas.is_none())
+            }) {
+                if !at.is_pending() {
+                    (_, at) = self.evm_env_at(at).await?;
+                }
+                self.fill_frame_gas_at(request, at, overrides.clone()).await?
+            } else {
+                request
+            };
+            let res = self.transact_call_at(request, at, overrides).await?;
 
             Self::Error::ensure_success::<EvmTypesFor<Self::Evm>>(res.result)
         }
@@ -529,6 +741,36 @@ pub trait Call:
         self.eth_api_settings().compute_state_root_for_eth_simulate
     }
 
+    /// Applies pre-execution changes once when a derived pending environment uses parent state.
+    /// Historical and actual pending state already contain their block's pre-execution changes.
+    fn apply_pending_block_state_changes(
+        &self,
+        db: &mut StateCacheDb,
+        evm_env: &EvmEnvFor<Self::Evm>,
+        parent_id: BlockId,
+    ) -> Result<(), Self::Error>
+    where
+        Self: LoadPendingBlock,
+    {
+        let parent = self
+            .provider()
+            .sealed_header_by_id(parent_id)
+            .map_err(Self::Error::from_eth_err)?
+            .ok_or_else(|| EthApiError::HeaderNotFound(parent_id))?;
+        let context = self
+            .evm_config()
+            .context_for_next_block(&parent, self.next_env_attributes(&parent)?)
+            .map_err(RethError::other)
+            .map_err(Self::Error::from_eth_err)?;
+        let changes = self
+            .evm_config()
+            .pre_block_state_changes(&mut *db, evm_env.clone(), context)
+            .map_err(RethError::Other)
+            .map_err(Self::Error::from_eth_err)?;
+        db.commit_source(&BundleSource(&changes));
+        Ok(())
+    }
+
     /// Returns the maximum memory the EVM can allocate per RPC request.
     fn evm_memory_limit(&self) -> u64 {
         self.eth_api_settings().evm_memory_limit
@@ -689,8 +931,13 @@ pub trait Call:
         R: Send + 'static,
     {
         async move {
-            let (evm_env, at) = self.evm_env_at(at).await?;
+            let requested_block = at;
+            let (evm_env, at) = self.evm_env_at(requested_block).await?;
+            let derived_pending = requested_block.is_pending() && !at.is_pending();
             self.spawn_with_state_at_block(at, move |this, mut db| {
+                if derived_pending && request.as_ref().minimal_tx_type().is_eip8141() {
+                    this.apply_pending_block_state_changes(&mut db, &evm_env, at)?;
+                }
                 let (evm_env, tx_env) =
                     this.prepare_call_env(evm_env, request, &mut db, overrides)?;
 
@@ -753,9 +1000,17 @@ pub trait Call:
 
                 let block_txs = block.transactions_recovered();
 
+                let parent = this
+                    .provider()
+                    .header(parent_block)
+                    .map_err(Self::Error::from_eth_err)?
+                    .ok_or_else(|| EthApiError::HeaderNotFound(parent_block.into()))?;
                 let ctx = this
                     .evm_config()
-                    .context_for_block(block.sealed_block())
+                    .context_for_block_with_parent_timestamp(
+                        block.sealed_block(),
+                        parent.timestamp(),
+                    )
                     .map_err(RethError::other)
                     .map_err(Self::Error::from_eth_err)?;
                 let changes = this
@@ -829,13 +1084,60 @@ pub trait Call:
         mut request: RpcTxReq<<Self::RpcConvert as RpcConvert>::Network>,
         mut db: impl Database<Error: Into<EthApiError>>,
     ) -> Result<TxEnvFor<Self::Evm>, Self::Error> {
+        let is_frame = request.as_ref().minimal_tx_type().is_eip8141();
+        if is_frame &&
+            evm_env.version().feature(evm2::EvmFeatures::EIP8250) &&
+            request.as_ref().nonce_keys.is_none()
+        {
+            if request.as_ref().signatures.as_ref().is_some_and(|signatures| {
+                signatures.iter().any(|signature| {
+                    signature.scheme != alloy_eips::eip8141::SignatureScheme::Arbitrary &&
+                        !signature.signature.is_empty()
+                })
+            }) {
+                return Err(EthApiError::InvalidParams(
+                    "signed frame transactions must include nonceKeys".into(),
+                )
+                .into());
+            }
+            request.as_mut().nonce_keys = Some(Vec::new());
+        }
         if request.as_ref().nonce().is_none() {
-            let nonce = db
-                .get_account(&request.as_ref().from().unwrap_or_default())
-                .map_err(Into::into)
-                .map_err(Self::Error::from_eth_err)?
-                .map(|account| account.nonce)
-                .unwrap_or_default();
+            let mut keyed_nonce = None;
+            if let Some(keys) = request.as_ref().nonce_keys.as_ref() {
+                alloy_eips::eip8141::validate_nonce_keys(keys)
+                    .map_err(|reason| EthApiError::InvalidParams(reason.into()))?;
+                for key in keys {
+                    let value = db
+                        .get_storage(
+                            &alloy_eips::eip8141::NONCE_MANAGER,
+                            &alloy_eips::eip8141::nonce_slot(
+                                request.as_ref().from().unwrap_or_default(),
+                                *key,
+                            ),
+                        )
+                        .map_err(Into::into)
+                        .map_err(Self::Error::from_eth_err)?;
+                    if value >= U256::from(u64::MAX) ||
+                        keyed_nonce.is_some_and(|previous| previous != value)
+                    {
+                        return Err(EthApiError::InvalidParams(
+                            "nonce keys require one non-exhausted sequence".into(),
+                        )
+                        .into());
+                    }
+                    keyed_nonce = Some(value);
+                }
+            }
+            let nonce = if let Some(nonce) = keyed_nonce {
+                nonce.to::<u64>()
+            } else {
+                db.get_account(&request.as_ref().from().unwrap_or_default())
+                    .map_err(Into::into)
+                    .map_err(Self::Error::from_eth_err)?
+                    .map(|account| account.nonce)
+                    .unwrap_or_default()
+            };
             request.as_mut().set_nonce(nonce);
         }
 
@@ -868,6 +1170,11 @@ pub trait Call:
     {
         // track whether the request has a gas limit set
         let requested_gas = request.as_ref().gas_limit();
+        let is_frame = request.as_ref().minimal_tx_type().is_eip8141();
+        evm_env
+            .version_mut()
+            .features
+            .set(evm2::EvmFeatures::FRAME_SIGNATURE_PLACEHOLDERS, is_frame);
 
         // Disable block gas limit check to allow executing transactions with higher gas limit (call
         // gas limit): https://github.com/paradigmxyz/reth/issues/18577
@@ -904,7 +1211,9 @@ pub trait Call:
         evm_env.version_mut().memory_limit = self.evm_memory_limit();
 
         // set nonce to None so that the correct nonce is chosen by the EVM
-        request.as_mut().take_nonce();
+        if !is_frame {
+            request.as_mut().take_nonce();
+        }
 
         if let Some(block_overrides) = overrides.block {
             apply_block_overrides(*block_overrides, db, &mut evm_env);
@@ -919,6 +1228,22 @@ pub trait Call:
         // converting again with a changed gas limit could change the recovered caller or fee payer
         // when the signature commits to the gas limit.
         let mut tx_env = self.create_txn_env(&evm_env, request, &mut *db)?;
+
+        if is_frame {
+            let frame = tx_env
+                .frame_transaction()
+                .ok_or_else(|| EthApiError::EvmCustom("missing frame transaction".into()))?;
+            let gas = evm2::ethereum::eip8141::FrameGas::calculate(frame, evm_env.version())
+                .map_err(reth_evm::execute::map_handler_error)
+                .map_err(Self::Error::from_evm_err)?;
+            if self.call_gas_limit() != 0 && gas.maximum > self.call_gas_limit() {
+                return Err(EthApiError::InvalidParams(
+                    "frame transaction exceeds the RPC gas cap".into(),
+                )
+                .into());
+            }
+            return Ok((evm_env, tx_env));
+        }
 
         if let Some(requested_gas) = requested_gas {
             let global_gas_cap = self.call_gas_limit();
