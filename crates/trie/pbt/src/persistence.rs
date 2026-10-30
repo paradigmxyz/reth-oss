@@ -14,6 +14,13 @@ use std::{
     sync::Mutex,
 };
 
+const HASH_BYTES: usize = 32;
+const CHECKPOINT_LENGTH_BYTES: usize = 8;
+const PREIMAGE_ACCOUNT_BYTES: usize = 24;
+const SNAPSHOT_ACCOUNT_MAX_BYTES: usize = 130;
+const SNAPSHOT_LEAF_MAX_BYTES: usize = 68;
+const SNAPSHOT_TRAILER_BYTES: usize = 1 + HASH_BYTES;
+
 /// A durable state-snapshot store for experimental nodes and migration replay.
 ///
 /// This writes full canonical artifacts, not incremental database pages. Checkpoints remain
@@ -299,14 +306,11 @@ fn cache_state<H>(cache: &mut BTreeMap<B256, StateTree<H>>, root: B256, state: S
     cache.insert(root, state);
 }
 
-const HASH_BYTES: usize = 32;
-const CHECKPOINT_LENGTH_BYTES: usize = 8;
-
 fn preimage_byte_limit(limits: DecodeLimits) -> Result<usize, ArtifactError> {
     // Each account carries address[20] + slotCount[4], and each storage leaf at most one slot[32].
     limits
         .max_accounts
-        .checked_mul(24)
+        .checked_mul(PREIMAGE_ACCOUNT_BYTES)
         .and_then(|accounts| limits.max_leaves.checked_mul(HASH_BYTES)?.checked_add(accounts))
         .ok_or(ArtifactError::ResourceLimit)
 }
@@ -316,9 +320,11 @@ fn snapshot_byte_limit(limits: DecodeLimits) -> Result<usize, ArtifactError> {
     // Each leaf adds at most 34 bytes of group framing and 34 bytes for its index and value.
     limits
         .max_accounts
-        .checked_mul(130)
-        .and_then(|accounts| limits.max_leaves.checked_mul(68)?.checked_add(accounts))
-        .and_then(|records| records.checked_add(1 + HASH_BYTES))
+        .checked_mul(SNAPSHOT_ACCOUNT_MAX_BYTES)
+        .and_then(|accounts| {
+            limits.max_leaves.checked_mul(SNAPSHOT_LEAF_MAX_BYTES)?.checked_add(accounts)
+        })
+        .and_then(|records| records.checked_add(SNAPSHOT_TRAILER_BYTES))
         .ok_or(ArtifactError::ResourceLimit)
 }
 
