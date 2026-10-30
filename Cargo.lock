@@ -4180,6 +4180,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "example-pbt-node"
+version = "0.0.0"
+dependencies = [
+ "alloy-eip7928",
+ "alloy-primitives",
+ "alloy-rlp",
+ "alloy-rpc-types-engine",
+ "eyre",
+ "jsonrpsee",
+ "reth-e2e-test-utils",
+ "reth-engine-tree",
+ "reth-ethereum",
+ "reth-fs-util",
+ "reth-payload-primitives",
+ "reth-storage-overlay",
+ "reth-tracing",
+ "reth-trie-pbt",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "example-polygon-p2p"
 version = "0.0.0"
 dependencies = [
@@ -8875,6 +8899,7 @@ dependencies = [
  "reth-trie",
  "reth-trie-common",
  "reth-trie-parallel",
+ "reth-trie-pbt",
  "reth-trie-sparse",
  "schnellru",
  "thiserror 2.0.21",
@@ -11208,6 +11233,22 @@ dependencies = [
  "reth-trie",
  "thiserror 2.0.21",
  "tracing",
+]
+
+[[package]]
+name = "reth-trie-pbt"
+version = "2.8.1"
+dependencies = [
+ "alloy-eip7928",
+ "alloy-primitives",
+ "alloy-trie",
+ "blake3",
+ "proptest",
+ "reth-fs-util",
+ "reth-trie-common",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
