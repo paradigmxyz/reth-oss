@@ -283,7 +283,8 @@ pub trait EthCall: EstimateCall + LoadBlock + FullEthApiTypes {
     /// Validates a canonical raw frame envelope and simulates its execution without committing.
     /// Prefix validity follows public transaction-pool policy; the full execution retains the
     /// selected block's nonce checks and reports each frame's outcome and independent gas use.
-    /// Recent-root validation and full execution both use the next slot.
+    /// Recent-root validation and full execution use the pending slot, or the next slot after a
+    /// selected canonical block.
     fn simulate_frame_transaction(
         &self,
         raw: Bytes,
@@ -335,7 +336,8 @@ pub trait EthCall: EstimateCall + LoadBlock + FullEthApiTypes {
                     .map_err(|_| {
                         EthApiError::InvalidParams("canonical slot number overflows".into())
                     })?
-                    .checked_add(1)
+                    // Actual and derived pending environments already contain the pending slot.
+                    .checked_add(u64::from(!requested_block.is_pending()))
                     .ok_or_else(|| {
                         EthApiError::InvalidParams("canonical slot number overflows".into())
                     })?;

@@ -1,6 +1,6 @@
 //! Cancellation-aware ownership of temporarily withdrawn frame transactions.
 
-use crate::{PoolTransaction, ValidPoolTransaction};
+use crate::{PoolTransaction, SubPoolLimit, ValidPoolTransaction};
 use alloy_primitives::{
     map::{AddressMap, B256Map},
     Address, B256, U256,
@@ -24,10 +24,15 @@ impl<T: PoolTransaction> FrameRevalidationQueue<T> {
         self.transactions.is_empty()
     }
 
-    pub(super) fn insert(&mut self, tx: Arc<ValidPoolTransaction<T>>) {
-        let _ = self.cancel_sender(tx.sender());
+    /// Returns superseded ownership for cleanup, excluding refreshes of the same hash.
+    pub(super) fn insert(
+        &mut self,
+        tx: Arc<ValidPoolTransaction<T>>,
+    ) -> Option<Arc<ValidPoolTransaction<T>>> {
+        let superseded = self.cancel_sender(tx.sender()).filter(|old| old.hash() != tx.hash());
         self.senders.insert(tx.sender(), *tx.hash());
         self.transactions.insert(*tx.hash(), tx);
+        superseded
     }
 
     pub(super) fn cancel(&mut self, hash: &B256) {
@@ -78,6 +83,32 @@ impl<T: PoolTransaction> FrameRevalidationQueue<T> {
             false
         }
     }
+
+    pub(super) fn discard_worst(
+        &mut self,
+        limit: SubPoolLimit,
+    ) -> Vec<Arc<ValidPoolTransaction<T>>> {
+        let mut size = self
+            .transactions
+            .values()
+            .fold(0usize, |size, tx| size.saturating_add(tx.transaction.size()));
+        if !limit.is_exceeded(self.transactions.len(), size) {
+            return Vec::new()
+        }
+        let mut candidates = self.snapshot();
+        candidates.sort_unstable_by_key(|tx| (tx.timestamp, *tx.hash()));
+        let mut discarded = Vec::new();
+        for candidate in candidates {
+            if !limit.is_exceeded(self.transactions.len(), size) {
+                break
+            }
+            if let Some(tx) = self.remove(candidate.hash()) {
+                size = size.saturating_sub(tx.transaction.size());
+                discarded.push(tx);
+            }
+        }
+        discarded
+    }
 }
 
 #[cfg(test)]
@@ -101,7 +132,7 @@ mod tests {
         let mut factory = MockTransactionFactory::default();
         let tx = transaction(&mut factory, Address::repeat_byte(1), B256::repeat_byte(1), 0);
         let mut queue = FrameRevalidationQueue::default();
-        queue.insert(Arc::clone(&tx));
+        assert!(queue.insert(Arc::clone(&tx)).is_none());
         let snapshot = queue.snapshot();
 
         queue.cancel(tx.hash());
@@ -117,10 +148,11 @@ mod tests {
         let old = transaction(&mut factory, sender, B256::repeat_byte(1), 0);
         let new = transaction(&mut factory, sender, B256::repeat_byte(2), 1);
         let mut queue = FrameRevalidationQueue::default();
-        queue.insert(Arc::clone(&old));
+        assert!(queue.insert(Arc::clone(&old)).is_none());
         let snapshot = queue.snapshot();
 
-        queue.insert(Arc::clone(&new));
+        let superseded = queue.insert(Arc::clone(&new)).unwrap();
+        assert!(Arc::ptr_eq(&superseded, &old));
 
         assert!(!queue.take_current(&snapshot[0]));
         assert!(queue.take_current(&new));
@@ -135,8 +167,8 @@ mod tests {
         let old = transaction(&mut factory, sender, hash, 0);
         let new = transaction(&mut factory, sender, hash, 0);
         let mut queue = FrameRevalidationQueue::default();
-        queue.insert(Arc::clone(&old));
-        queue.insert(Arc::clone(&new));
+        assert!(queue.insert(Arc::clone(&old)).is_none());
+        assert!(queue.insert(Arc::clone(&new)).is_none());
 
         assert!(!queue.take_current(&old));
         assert!(queue.take_current(&new));
@@ -148,10 +180,37 @@ mod tests {
         let mut factory = MockTransactionFactory::default();
         let tx = transaction(&mut factory, Address::repeat_byte(4), B256::repeat_byte(4), 0);
         let mut queue = FrameRevalidationQueue::default();
-        queue.insert(Arc::clone(&tx));
+        assert!(queue.insert(Arc::clone(&tx)).is_none());
 
         assert!(queue.take_current(&tx));
         assert!(!queue.take_current(&tx));
+        assert!(queue.is_empty());
+    }
+
+    #[test]
+    fn retry_queue_limits_cancel_oldest_snapshots() {
+        let mut factory = MockTransactionFactory::default();
+        let mut first = transaction(&mut factory, Address::repeat_byte(1), B256::repeat_byte(1), 0);
+        let mut second =
+            transaction(&mut factory, Address::repeat_byte(2), B256::repeat_byte(2), 0);
+        Arc::make_mut(&mut first).transaction.set_size(100);
+        Arc::make_mut(&mut second).transaction.set_size(100);
+        Arc::make_mut(&mut second).timestamp = first.timestamp + std::time::Duration::from_secs(1);
+        let mut queue = FrameRevalidationQueue::default();
+        assert!(queue.insert(Arc::clone(&first)).is_none());
+        assert!(queue.insert(Arc::clone(&second)).is_none());
+
+        let discarded = queue.discard_worst(SubPoolLimit::new(1, usize::MAX));
+        assert_eq!(discarded.len(), 1);
+        assert_eq!(discarded[0].hash(), first.hash());
+        assert!(!queue.take_current(&first));
+        assert!(!queue.contains_sender(first.sender()));
+        assert!(queue.contains_sender(second.sender()));
+
+        let discarded = queue.discard_worst(SubPoolLimit::new(usize::MAX, 99));
+        assert_eq!(discarded.len(), 1);
+        assert_eq!(discarded[0].hash(), second.hash());
+        assert!(!queue.take_current(&second));
         assert!(queue.is_empty());
     }
 }

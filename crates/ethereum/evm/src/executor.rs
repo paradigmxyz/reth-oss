@@ -1062,6 +1062,7 @@ mod tests {
         env::BlockEnv,
         evm::{AccountInfo, Database, Db, InMemoryDB, BEACON_ROOTS_ADDRESS},
         interpreter::{InstrStop, Word},
+        registry::HandlerError,
         BaseEvmTypes, SpecId,
     };
     use reth_chainspec::{Chain, ChainSpecBuilder, EthereumHardfork, ForkCondition};
@@ -1559,7 +1560,12 @@ mod tests {
         };
         executor.execute_transaction(blob_tx(0)).expect("seven blobs fit the first segment cap");
         let err = executor.execute_transaction(blob_tx(1)).unwrap_err();
-        assert!(err.to_string().contains("too many blobs: have 7, max 6"), "{err}");
+        assert!(matches!(
+            err,
+            BlockExecutionError::Validation(BlockValidationError::InvalidTx { error, .. })
+                if error.as_any().downcast_ref::<HandlerError>()
+                    == Some(&HandlerError::TooManyBlobs { have: 7, max: 6 })
+        ));
     }
 
     #[test]

@@ -473,4 +473,107 @@ mod tests {
         assert!(buf.is_empty(), "buffer not fully consumed on decode");
         assert_eq!(decoded, resp);
     }
+
+    #[test]
+    fn frame_receipts_eth69_match_flat_network_vector() {
+        // [request_id, [[frame_receipt, ordinary_eip1559_receipt]]].
+        let expected = hex!(
+            "f507f3f2ec0682a410940404040404040404040404040404040404040404d2c580c20102c0c501c20304c0c502c20506c0c4020180c0"
+        );
+        let request = RequestPair {
+            request_id: 7,
+            message: Receipts69(vec![vec![
+                flat_frame_receipt(),
+                Receipt::standard(TxType::Eip1559, true, 0, vec![]),
+            ]]),
+        };
+        assert_eq!(alloy_rlp::encode(&request), expected);
+        assert_eq!(request.length(), expected.len());
+        assert_eq!(alloy_rlp::decode_exact::<RequestPair<Receipts69>>(&expected).unwrap(), request);
+        for end in 0..expected.len() {
+            assert_eq!(
+                RequestPair::<Receipts69>::decode(&mut &expected[..end]).unwrap_err(),
+                alloy_rlp::Error::InputTooShort
+            );
+        }
+        for (prefix, error) in
+            [(0xeb, alloy_rlp::Error::InputTooShort), (0xed, alloy_rlp::Error::UnexpectedLength)]
+        {
+            let mut malformed = expected;
+            malformed[4] = prefix;
+            assert_eq!(
+                RequestPair::<Receipts69>::decode(&mut malformed.as_slice()).unwrap_err(),
+                error
+            );
+        }
+    }
+
+    #[test]
+    fn frame_receipts_eth70_match_flat_network_vector() {
+        // [request_id, lastBlockIncomplete, [[frame_receipt, ordinary_eip1559_receipt]]].
+        let expected = hex!(
+            "f60780f3f2ec0682a410940404040404040404040404040404040404040404d2c580c20102c0c501c20304c0c502c20506c0c4020180c0"
+        );
+        for last_block_incomplete in [false, true] {
+            let mut expected = expected;
+            if last_block_incomplete {
+                expected[2] = 0x01;
+            }
+            let request = RequestPair {
+                request_id: 7,
+                message: Receipts70 {
+                    last_block_incomplete,
+                    receipts: vec![vec![
+                        flat_frame_receipt(),
+                        Receipt::standard(TxType::Eip1559, true, 0, vec![]),
+                    ]],
+                },
+            };
+            assert_eq!(alloy_rlp::encode(&request), expected);
+            assert_eq!(request.length(), expected.len());
+            assert_eq!(
+                alloy_rlp::decode_exact::<RequestPair<Receipts70>>(&expected).unwrap(),
+                request
+            );
+            for end in 0..expected.len() {
+                assert_eq!(
+                    RequestPair::<Receipts70>::decode(&mut &expected[..end]).unwrap_err(),
+                    alloy_rlp::Error::InputTooShort
+                );
+            }
+            for (prefix, error) in [
+                (0xeb, alloy_rlp::Error::InputTooShort),
+                (0xed, alloy_rlp::Error::UnexpectedLength),
+            ] {
+                let mut malformed = expected;
+                malformed[5] = prefix;
+                assert_eq!(
+                    RequestPair::<Receipts70>::decode(&mut malformed.as_slice()).unwrap_err(),
+                    error
+                );
+            }
+        }
+    }
+
+    fn flat_frame_receipt() -> Receipt {
+        Receipt::from(ReceiptEnvelope::Eip8141(
+            FrameReceiptPayload {
+                cumulative_gas_used: 42_000,
+                payer: Address::repeat_byte(4),
+                frame_receipts: [
+                    (FrameStatus::Failure, 1, 2),
+                    (FrameStatus::Success, 3, 4),
+                    (FrameStatus::SkippedAtomicBatch, 5, 6),
+                ]
+                .into_iter()
+                .map(|(status, execution, state)| FrameReceipt {
+                    status,
+                    gas_used: FrameGasUsed { execution, state },
+                    logs: vec![],
+                })
+                .collect(),
+            }
+            .into(),
+        ))
+    }
 }

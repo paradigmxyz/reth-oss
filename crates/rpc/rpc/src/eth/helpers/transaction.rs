@@ -132,8 +132,8 @@ mod tests {
     use alloy_eips::{
         eip2718::Encodable2718,
         eip4844::{Blob, Bytes48},
-        eip8141::{Frame, FrameAddress, FrameLimits, FrameMode, TransactionFees},
-        eip8272::{RECENT_ROOT_ADDRESS, RECENT_ROOT_CODE},
+        eip8141::{Frame, FrameAddress, FrameLimits, FrameMode, FrameStatus, TransactionFees},
+        eip8272::{RECENT_ROOT_ADDRESS, RECENT_ROOT_CODE, RECENT_ROOT_LENGTH},
     };
     use alloy_primitives::{bytes, map::AddressMap, Address, Bytes, Signature, U256};
     use alloy_rpc_types_eth::{
@@ -1194,6 +1194,117 @@ mod tests {
                     EthCall::simulate_frame_transaction(&api, raw, Some(BlockId::latest()),).await,
                     Err(EthApiError::InternalEthError)
                 ));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn simulate_frame_recent_root_uses_selected_pending_slot() {
+        for at in [BlockId::latest(), BlockId::pending()] {
+            for (parent_slot, reference_slot, valid) in [
+                (RECENT_ROOT_LENGTH - 2, 0, true),
+                (RECENT_ROOT_LENGTH - 1, 0, false),
+                (7, 8, false),
+            ] {
+                let sender = Address::repeat_byte(0x11);
+                let checker = Address::repeat_byte(0x22);
+                let reference = RecentRootReference {
+                    source_id: B256::repeat_byte(1),
+                    slot: reference_slot,
+                    root: B256::repeat_byte(2),
+                };
+                let dependency = reference.dependency();
+                let api = mock_frame_eth_api(AddressMap::from_iter([
+                    (
+                        sender,
+                        ExtendedAccount::new(0, U256::from(10_000_000_000_000_000_000u64))
+                            .with_bytecode(bytes!("60035f5faa00")),
+                    ),
+                    (
+                        checker,
+                        // Revert unless SLOTNUM equals the first calldata word.
+                        ExtendedAccount::new(0, U256::ZERO)
+                            .with_bytecode(bytes!("4b5f3514600a575f5ffd5b00")),
+                    ),
+                    (
+                        RECENT_ROOT_ADDRESS,
+                        ExtendedAccount::new(0, U256::ZERO)
+                            .with_bytecode(RECENT_ROOT_CODE.clone())
+                            .extend_storage([(
+                                dependency.storage_key.into(),
+                                dependency.entry_hash.into(),
+                            )]),
+                    ),
+                ]));
+                let header = Header {
+                    number: 1,
+                    timestamp: 13,
+                    gas_limit: 30_000_000,
+                    base_fee_per_gas: Some(1_000_000_000),
+                    excess_blob_gas: Some(0),
+                    blob_gas_used: Some(0),
+                    parent_beacon_block_root: Some(B256::ZERO),
+                    slot_number: Some(parent_slot),
+                    ..Default::default()
+                };
+                api.provider()
+                    .add_block(header.hash_slow(), Block::new(header, Default::default()));
+                let mut reference_data = reference.source_id.to_vec();
+                reference_data.extend_from_slice(&reference.slot.to_be_bytes());
+                reference_data.extend_from_slice(reference.root.as_slice());
+                let transaction = TxEip8141 {
+                    chain_id: 1,
+                    sender,
+                    nonce_keys: Some(vec![]),
+                    frames: vec![
+                        Frame {
+                            mode: FrameMode::Verify,
+                            target: RECENT_ROOT_ADDRESS.into(),
+                            limits: FrameLimits { execution: 20_000, state: 0 },
+                            data: reference_data.into(),
+                            ..Default::default()
+                        },
+                        Frame {
+                            mode: FrameMode::Verify,
+                            flags: 3,
+                            limits: FrameLimits { execution: 20_000, state: 0 },
+                            ..Default::default()
+                        },
+                        Frame {
+                            mode: FrameMode::Default,
+                            target: checker.into(),
+                            limits: FrameLimits { execution: 20_000, state: 0 },
+                            data: U256::from(parent_slot + 1).to_be_bytes::<32>().into(),
+                            ..Default::default()
+                        },
+                    ],
+                    fees: TransactionFees {
+                        max_fee: U256::from(1_000_000_000_000_000_000u64),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                };
+                let result = EthCall::simulate_frame_transaction(
+                    &api,
+                    transaction.encoded_2718().into(),
+                    Some(at),
+                )
+                .await
+                .unwrap();
+                assert_eq!(result.valid, valid, "at={at:?}, parent_slot={parent_slot}: {result:?}");
+                if valid {
+                    assert_eq!(result.violation, None);
+                    assert_eq!(result.prefix_shape, Some(FrameSimulationPrefixShape::SelfVerify));
+                    assert_eq!(result.payer, Some(sender));
+                    let frames = result.frames.unwrap();
+                    assert_eq!(frames.len(), transaction.frames.len());
+                    assert!(frames.iter().all(|frame| frame.status == FrameStatus::Success));
+                } else {
+                    assert_eq!(
+                        result.violation.as_deref(),
+                        Some("recent root reference is outside the usable slot window")
+                    );
+                }
             }
         }
     }

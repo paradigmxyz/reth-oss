@@ -2284,7 +2284,7 @@ checksum = "157a8ba7b480713b56f4c09fd13fc3e0a22a5dfab8097ba61cbc5feef950788a"
 dependencies = [
  "glob",
  "libc",
- "libloading 0.8.9",
+ "libloading",
 ]
 
 [[package]]
@@ -3642,7 +3642,7 @@ dependencies = [
 [[package]]
 name = "evm2"
 version = "0.1.0"
-source = "git+https://github.com/Rimeeeeee/evm2?branch=bogota-plan#3c9d38fa5b9ebeeeb306858fd9b869ffece17d8e"
+source = "git+https://github.com/Rimeeeeee/evm2?branch=bogota-plan#21339c7f3f6cd5e3e88759375e5c019a1e03d9ff"
 dependencies = [
  "alloy-consensus",
  "alloy-eip7928",
@@ -3657,6 +3657,7 @@ dependencies = [
  "aurora-engine-modexp",
  "auto_impl",
  "aws-lc-rs",
+ "bitflags 2.13.2",
  "blst",
  "c-kzg",
  "derive-where",
@@ -3676,12 +3677,13 @@ dependencies = [
  "thiserror 2.0.21",
  "triomphe",
  "typeid",
+ "wincode",
 ]
 
 [[package]]
 name = "evm2-inspectors"
 version = "0.1.0"
-source = "git+https://github.com/Rimeeeeee/evm2?branch=bogota-plan#3c9d38fa5b9ebeeeb306858fd9b869ffece17d8e"
+source = "git+https://github.com/Rimeeeeee/evm2?branch=bogota-plan#21339c7f3f6cd5e3e88759375e5c019a1e03d9ff"
 dependencies = [
  "alloy-consensus",
  "alloy-eip2930",
@@ -3704,7 +3706,7 @@ dependencies = [
 [[package]]
 name = "evm2-jit"
 version = "0.1.0"
-source = "git+https://github.com/Rimeeeeee/evm2?branch=bogota-plan#3c9d38fa5b9ebeeeb306858fd9b869ffece17d8e"
+source = "git+https://github.com/Rimeeeeee/evm2?branch=bogota-plan#21339c7f3f6cd5e3e88759375e5c019a1e03d9ff"
 dependencies = [
  "evm2",
  "evm2-jit-backend",
@@ -3719,7 +3721,7 @@ dependencies = [
 [[package]]
 name = "evm2-jit-backend"
 version = "0.1.0"
-source = "git+https://github.com/Rimeeeeee/evm2?branch=bogota-plan#3c9d38fa5b9ebeeeb306858fd9b869ffece17d8e"
+source = "git+https://github.com/Rimeeeeee/evm2?branch=bogota-plan#21339c7f3f6cd5e3e88759375e5c019a1e03d9ff"
 dependencies = [
  "eyre",
  "ruint",
@@ -3728,12 +3730,12 @@ dependencies = [
 [[package]]
 name = "evm2-jit-build"
 version = "0.1.0"
-source = "git+https://github.com/Rimeeeeee/evm2?branch=bogota-plan#3c9d38fa5b9ebeeeb306858fd9b869ffece17d8e"
+source = "git+https://github.com/Rimeeeeee/evm2?branch=bogota-plan#21339c7f3f6cd5e3e88759375e5c019a1e03d9ff"
 
 [[package]]
 name = "evm2-jit-builtins"
 version = "0.1.0"
-source = "git+https://github.com/Rimeeeeee/evm2?branch=bogota-plan#3c9d38fa5b9ebeeeb306858fd9b869ffece17d8e"
+source = "git+https://github.com/Rimeeeeee/evm2?branch=bogota-plan#21339c7f3f6cd5e3e88759375e5c019a1e03d9ff"
 dependencies = [
  "alloy-primitives",
  "evm2",
@@ -3746,7 +3748,7 @@ dependencies = [
 [[package]]
 name = "evm2-jit-codegen"
 version = "0.1.0"
-source = "git+https://github.com/Rimeeeeee/evm2?branch=bogota-plan#3c9d38fa5b9ebeeeb306858fd9b869ffece17d8e"
+source = "git+https://github.com/Rimeeeeee/evm2?branch=bogota-plan#21339c7f3f6cd5e3e88759375e5c019a1e03d9ff"
 dependencies = [
  "alloy-primitives",
  "bitflags 2.13.2",
@@ -3769,7 +3771,7 @@ dependencies = [
 [[package]]
 name = "evm2-jit-context"
 version = "0.1.0"
-source = "git+https://github.com/Rimeeeeee/evm2?branch=bogota-plan#3c9d38fa5b9ebeeeb306858fd9b869ffece17d8e"
+source = "git+https://github.com/Rimeeeeee/evm2?branch=bogota-plan#21339c7f3f6cd5e3e88759375e5c019a1e03d9ff"
 dependencies = [
  "alloy-primitives",
  "evm2",
@@ -3779,7 +3781,7 @@ dependencies = [
 [[package]]
 name = "evm2-jit-llvm"
 version = "0.1.0"
-source = "git+https://github.com/Rimeeeeee/evm2?branch=bogota-plan#3c9d38fa5b9ebeeeb306858fd9b869ffece17d8e"
+source = "git+https://github.com/Rimeeeeee/evm2?branch=bogota-plan#21339c7f3f6cd5e3e88759375e5c019a1e03d9ff"
 dependencies = [
  "alloy-primitives",
  "cc",
@@ -3792,7 +3794,7 @@ dependencies = [
 [[package]]
 name = "evm2-jit-runtime"
 version = "0.1.0"
-source = "git+https://github.com/Rimeeeeee/evm2?branch=bogota-plan#3c9d38fa5b9ebeeeb306858fd9b869ffece17d8e"
+source = "git+https://github.com/Rimeeeeee/evm2?branch=bogota-plan#21339c7f3f6cd5e3e88759375e5c019a1e03d9ff"
 dependencies = [
  "alloy-primitives",
  "crossbeam-channel",
@@ -3808,7 +3810,6 @@ dependencies = [
  "evm2-jit-llvm",
  "eyre",
  "libc",
- "libloading 0.9.0",
  "quanta 0.13.0",
  "rayon",
  "tempfile",
@@ -3820,7 +3821,7 @@ dependencies = [
 [[package]]
 name = "evm2-macros"
 version = "0.1.0"
-source = "git+https://github.com/Rimeeeeee/evm2?branch=bogota-plan#3c9d38fa5b9ebeeeb306858fd9b869ffece17d8e"
+source = "git+https://github.com/Rimeeeeee/evm2?branch=bogota-plan#21339c7f3f6cd5e3e88759375e5c019a1e03d9ff"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -6026,16 +6027,6 @@ name = "libloading"
 version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d7c4b02199fee7c5d21a5ae7d8cfa79a6ef5bb2fc834d6e9058e89c825efdc55"
-dependencies = [
- "cfg-if",
- "windows-link",
-]
-
-[[package]]
-name = "libloading"
-version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "754ca22de805bb5744484a5b151a9e1a8e837d5dc232c2d7d8c2e3492edc8b60"
 dependencies = [
  "cfg-if",
  "windows-link",

@@ -351,7 +351,7 @@ mod tests {
     use alloy_primitives::B256;
     use evm2::{
         bytecode::Bytecode,
-        env::{BlockEnvExt, TxEnv},
+        env::BlockEnvExt,
         ethereum::{ethereum_tx_registry, TxEnvelope},
         evm::{Database, Db, InMemoryDB},
         interpreter::MessageKind,
@@ -435,12 +435,11 @@ mod tests {
             0xff,
         ] {
             let mut inspector = FrameValidationInspector::new(Address::ZERO, policy());
-            let tx = TxEnv::<BaseEvmTypes>::default();
             let message = Message::<BaseEvmTypes> {
                 code: Bytecode::new_legacy(Bytes::from(vec![opcode])),
                 ..Default::default()
             };
-            let mut interp = Interpreter::<BaseEvmTypes>::new(&tx, &message);
+            let mut interp = Interpreter::<BaseEvmTypes>::new(&message);
             inspector.step(&mut interp);
             let reason = match opcode {
                 0x42 => "TIMESTAMP outside canonical expiry verifier",
@@ -452,12 +451,11 @@ mod tests {
         }
         for next in [0xf1, 0xf2, 0xf4, 0xfa, 0x00, 0x50] {
             let mut inspector = FrameValidationInspector::new(Address::ZERO, policy());
-            let tx = TxEnv::<BaseEvmTypes>::default();
             let message = Message::<BaseEvmTypes> {
                 code: Bytecode::new_legacy(Bytes::from(vec![0x5a, next])),
                 ..Default::default()
             };
-            let mut interp = Interpreter::<BaseEvmTypes>::new(&tx, &message);
+            let mut interp = Interpreter::<BaseEvmTypes>::new(&message);
             inspector.step(&mut interp);
             assert_eq!(
                 inspector.error(),
@@ -475,7 +473,6 @@ mod tests {
         policy.deploy_index = Some(0);
         let mut inspector = FrameValidationInspector::new(sender, policy);
         inspector.current_frame = Some(0);
-        let tx = TxEnv::<BaseEvmTypes>::default();
         let mut message = Message::<BaseEvmTypes> {
             kind: MessageKind::Create,
             caller: factory,
@@ -483,7 +480,7 @@ mod tests {
             ..Default::default()
         };
         let active_message = message.clone();
-        let mut interp = Interpreter::<BaseEvmTypes>::new(&tx, &active_message);
+        let mut interp = Interpreter::<BaseEvmTypes>::new(&active_message);
         assert!(inspector.create(&mut interp, &mut message).is_none());
         assert_eq!(inspector.error(), None);
         assert_eq!(inspector.dependencies().accounts, vec![factory, sender]);
@@ -495,13 +492,12 @@ mod tests {
         for address in [sender, Address::repeat_byte(2)] {
             for opcode in [0x5c, 0x5d] {
                 let mut inspector = FrameValidationInspector::new(sender, policy());
-                let tx = TxEnv::<BaseEvmTypes>::default();
                 let message = Message::<BaseEvmTypes> {
                     destination: address,
                     code: Bytecode::new_legacy(Bytes::from(vec![opcode])),
                     ..Default::default()
                 };
-                let mut interp = Interpreter::<BaseEvmTypes>::new(&tx, &message);
+                let mut interp = Interpreter::<BaseEvmTypes>::new(&message);
                 interp.stack_mut().push(U256::from(7)).unwrap();
                 inspector.step(&mut interp);
                 assert_eq!(inspector.error(), None);
@@ -524,13 +520,12 @@ mod tests {
             policy.deploy_index = deploy.then_some(0);
             let mut inspector = FrameValidationInspector::new(sender, policy);
             inspector.current_frame = Some(0);
-            let tx = TxEnv::<BaseEvmTypes>::default();
             let message = Message::<BaseEvmTypes> {
                 destination: address,
                 code: Bytecode::new_legacy(Bytes::from(vec![opcode])),
                 ..Default::default()
             };
-            let mut interp = Interpreter::<BaseEvmTypes>::new(&tx, &message);
+            let mut interp = Interpreter::<BaseEvmTypes>::new(&message);
             interp.stack_mut().push(U256::from(7)).unwrap();
             inspector.step(&mut interp);
             let expected = if allowed {

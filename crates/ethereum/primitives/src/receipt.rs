@@ -245,35 +245,47 @@ impl Encodable for Receipt {
     fn encode(&self, out: &mut dyn BufMut) {
         match &self.inner {
             ReceiptData::Standard(receipt) => receipt.encode(out),
-            // Frame receipts have no bloom; retain their typed network representation.
-            ReceiptData::Frame(_) => self.rlp_encode_with_bloom(&Bloom::ZERO, out),
+            ReceiptData::Frame(frame) => {
+                let payload = frame.payload();
+                frame_receipt_header(payload).encode(out);
+                self.tx_type().encode(out);
+                payload.cumulative_gas_used.encode(out);
+                payload.payer.encode(out);
+                payload.frame_receipts.encode(out);
+            }
         }
     }
 
     fn length(&self) -> usize {
         match &self.inner {
             ReceiptData::Standard(receipt) => receipt.length(),
-            ReceiptData::Frame(_) => self.rlp_encoded_length_with_bloom(&Bloom::ZERO),
+            ReceiptData::Frame(frame) => {
+                frame_receipt_header(frame.payload()).length_with_payload()
+            }
         }
     }
 }
 
 impl Decodable for Receipt {
     fn decode(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
-        let mut header_buf = *buf;
-        if Header::decode(&mut header_buf)?.list {
-            let receipt = StandardReceipt::decode(buf)?;
-            if receipt.tx_type == TxType::Eip8141 {
-                return Err(alloy_rlp::Error::Custom("frame receipt requires a frame payload"));
-            }
-            Ok(Self::from_inner(ReceiptData::Standard(receipt)))
-        } else {
-            let envelope = ReceiptEnvelope::decode(buf)?;
-            if !matches!(envelope, ReceiptEnvelope::Eip8141(_)) {
-                return Err(alloy_rlp::Error::UnexpectedString);
-            }
-            Self::from_decoded_envelope(envelope)
+        let mut remaining = *buf;
+        let mut payload = Header::decode_bytes(&mut remaining, true)?;
+        if TxType::decode(&mut payload)? != TxType::Eip8141 {
+            return StandardReceipt::decode(buf)
+                .map(|receipt| Self::from_inner(ReceiptData::Standard(receipt)));
         }
+
+        // Eth/69 and eth/70 flatten the type and frame payload into a single list.
+        let frame = FrameReceiptPayload {
+            cumulative_gas_used: Decodable::decode(&mut payload)?,
+            payer: Decodable::decode(&mut payload)?,
+            frame_receipts: Decodable::decode(&mut payload)?,
+        };
+        if !payload.is_empty() {
+            return Err(alloy_rlp::Error::UnexpectedLength);
+        }
+        *buf = remaining;
+        Ok(Self::from_inner(ReceiptData::Frame(frame.into())))
     }
 }
 
@@ -458,6 +470,17 @@ pub type RpcReceipt = ReceiptEnvelope<alloy_rpc_types_eth::Log>;
 /// NOTE: Prefer `proofs::calculate_receipt_root` if you have log blooms memoized.
 pub fn calculate_receipt_root_no_memo(receipts: &[Receipt]) -> B256 {
     ordered_trie_root_with_encoder(receipts, |receipt, buf| receipt.encode_2718(buf))
+}
+
+/// Returns the header for the flat, bloomless EIP-8141 network receipt list.
+fn frame_receipt_header(payload: &FrameReceiptPayload<Log>) -> Header {
+    Header {
+        list: true,
+        payload_length: TxType::Eip8141.length() +
+            payload.cumulative_gas_used.length() +
+            payload.payer.length() +
+            payload.frame_receipts.length(),
+    }
 }
 
 #[cfg(test)]
@@ -1047,5 +1070,126 @@ mod tests {
         let json_envelope = serde_json::to_value(&envelope).unwrap();
         let json_receipt = serde_json::to_value(receipt.into_with_bloom()).unwrap();
         assert_eq!(json_envelope, json_receipt);
+    }
+
+    #[test]
+    fn plain_frame_receipt_rlp_matches_flat_network_vector() {
+        // [6, 42000, payer, [[0, [1, 2], []], [1, [3, 4], []], [2, [5, 6], []]]].
+        let expected = hex!(
+            "ec0682a410940404040404040404040404040404040404040404d2c580c20102c0c501c20304c0c502c20506c0"
+        );
+        let receipt = Receipt::from(ReceiptEnvelope::Eip8141(
+            FrameReceiptPayload {
+                cumulative_gas_used: 42_000,
+                payer: Address::repeat_byte(4),
+                frame_receipts: [
+                    (FrameStatus::Failure, 1, 2),
+                    (FrameStatus::Success, 3, 4),
+                    (FrameStatus::SkippedAtomicBatch, 5, 6),
+                ]
+                .into_iter()
+                .map(|(status, execution, state)| FrameReceipt {
+                    status,
+                    gas_used: FrameGasUsed { execution, state },
+                    logs: vec![],
+                })
+                .collect(),
+            }
+            .into(),
+        ));
+        assert_eq!(alloy_rlp::encode(&receipt), expected);
+        assert_eq!(receipt.length(), expected.len());
+        assert_eq!(alloy_rlp::decode_exact::<Receipt>(&expected).unwrap(), receipt);
+
+        // Consensus and eth/68 retain the type byte outside the three-field payload list.
+        let consensus = hex!(
+            "06eb82a410940404040404040404040404040404040404040404d2c580c20102c0c501c20304c0c502c20506c0"
+        );
+        let eth68 = hex!(
+            "ad06eb82a410940404040404040404040404040404040404040404d2c580c20102c0c501c20304c0c502c20506c0"
+        );
+        assert_eq!(receipt.encoded_2718(), consensus);
+        assert_eq!(receipt.encode_2718_len(), consensus.len());
+        let with_bloom = receipt.clone().into_with_bloom();
+        assert_eq!(alloy_rlp::encode(&with_bloom), eth68);
+        assert_eq!(with_bloom.length(), eth68.len());
+        assert_eq!(
+            alloy_rlp::decode_exact::<ReceiptWithBloom<Receipt>>(&eth68).unwrap(),
+            with_bloom
+        );
+        assert_eq!(
+            Receipt::decode(&mut eth68.as_slice()).unwrap_err(),
+            alloy_rlp::Error::UnexpectedString
+        );
+    }
+
+    #[test]
+    fn plain_frame_receipt_rlp_length_prefix_boundary() {
+        // Five frames fit a short list; six require the long-list length prefix.
+        for (frame_count, expected) in [
+            (5, hex!(
+                "f60680940000000000000000000000000000000000000000dec501c28080c0c501c28080c0c501c28080c0c501c28080c0c501c28080c0"
+            ).to_vec()),
+            (6, hex!(
+                "f83c0680940000000000000000000000000000000000000000e4c501c28080c0c501c28080c0c501c28080c0c501c28080c0c501c28080c0c501c28080c0"
+            ).to_vec()),
+        ] {
+            let receipt = Receipt::from(ReceiptEnvelope::Eip8141(
+                FrameReceiptPayload {
+                    frame_receipts: vec![FrameReceipt {
+                        status: FrameStatus::Success,
+                        ..Default::default()
+                    }; frame_count],
+                    ..Default::default()
+                }
+                .into(),
+            ));
+            assert_eq!(alloy_rlp::encode(&receipt), expected);
+            assert_eq!(receipt.length(), expected.len());
+            assert_eq!(alloy_rlp::decode_exact::<Receipt>(&expected).unwrap(), receipt);
+        }
+    }
+
+    #[test]
+    fn plain_frame_receipt_rlp_enforces_list_boundaries() {
+        let encoded = hex!("d80601940000000000000000000000000000000000000000c0");
+        for end in 0..encoded.len() {
+            assert_eq!(
+                Receipt::decode(&mut &encoded[..end]).unwrap_err(),
+                alloy_rlp::Error::InputTooShort
+            );
+        }
+
+        // The frames list is outside the declared receipt and must not be consumed.
+        let mut short = encoded;
+        short[0] = 0xd7;
+        assert_eq!(
+            Receipt::decode(&mut short.as_slice()).unwrap_err(),
+            alloy_rlp::Error::InputTooShort
+        );
+        let mut long = encoded.to_vec();
+        long[0] = 0xd9;
+        assert_eq!(
+            Receipt::decode(&mut long.as_slice()).unwrap_err(),
+            alloy_rlp::Error::InputTooShort
+        );
+        long.push(0x80);
+        assert_eq!(
+            Receipt::decode(&mut long.as_slice()).unwrap_err(),
+            alloy_rlp::Error::UnexpectedLength
+        );
+        assert_eq!(
+            Receipt::decode(&mut hex!("c0").as_slice()).unwrap_err(),
+            alloy_rlp::Error::InputTooShort
+        );
+
+        let sibling = hex!("c4808080c0");
+        let joined = [encoded.as_slice(), sibling.as_slice()].concat();
+        let mut buf = joined.as_slice();
+        let receipt = Receipt::decode(&mut buf).unwrap();
+        assert_eq!(receipt.as_eip8141().unwrap().cumulative_gas_used, 1);
+        assert_eq!(buf, sibling);
+        assert_eq!(Receipt::decode(&mut buf).unwrap(), Receipt::default());
+        assert!(buf.is_empty());
     }
 }
