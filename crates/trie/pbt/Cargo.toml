@@ -15,15 +15,18 @@ workspace = true
 alloy-primitives = { workspace = true, features = ["std"] }
 alloy-trie = { workspace = true, features = ["std", "ethereum"], optional = true }
 blake3.workspace = true
+imbl.workspace = true
 thiserror = { workspace = true, features = ["std"] }
 reth-trie-common = { workspace = true, features = ["std"], optional = true }
 alloy-eip7928 = { workspace = true, optional = true }
 reth-fs-util = { workspace = true, optional = true }
+reth-storage-api = { workspace = true, features = ["std"], optional = true }
 
 [dev-dependencies]
 proptest.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
+reth-primitives-traits.workspace = true
 
 [features]
 default = []
@@ -31,3 +34,8 @@ migration = ["dep:alloy-trie"]
 execution = ["dep:reth-trie-common"]
 bal = ["dep:alloy-eip7928"]
 persistence = ["migration", "dep:reth-fs-util"]
+conversion = ["migration", "dep:reth-storage-api"]
+
+[[bench]]
+name = "snapshots"
+harness = false

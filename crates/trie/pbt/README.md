@@ -13,12 +13,18 @@ are drafts. BLAKE3 is the reference/devnet configuration, not a final hash decis
 - Ethereum account headers, full-width storage keys, inline slots 0–63, code
   groups, PUSH continuation bytes, delegation, zero deletion, and shared-code cleanup.
   Bytecode buffers are shared when snapshots or decoded accounts reuse them.
+  Account, storage, and code-reference indexes use persistent ordered maps, so a
+  child update copies paths instead of cloning the complete parent indexes.
 - The `execution` feature applies authoritative Reth `BundleState` output using
   plain address and slot keys. It handles storage wipes and rejects missing code.
 - The `migration` feature produces and verifies the **tagged-record** snapshot
   format and hash-ordered preimage file. Verification reconstructs both PBT and
   anchor MPT roots, checks code hashes and PUSH metadata, and rejects noncanonical
   or surplus records. It does not use the older RLP snapshot format.
+- The `conversion` feature reads a pinned Reth MPT range provider and bytecode
+  provider with sequential, hash-ordered preimages. It checks exact account/slot
+  coverage and the reconstructed MPT root before returning canonical artifacts.
+  Source reads are paged; the output state still uses this crate's in-memory backend.
 - The `bal` feature authenticates access lists against a caller-supplied header
   commitment and replays post-values. It rejects noncanonical read/write lists
   and nonzero storage writes without a surviving account. `ReplayChain` retains
@@ -89,10 +95,11 @@ The dev-node example explicitly refuses staged/backfill sync before the MPT
 pipeline can run; it must stay within live engine processing.
 External users must integrate or disable those paths before running a PBT network
 that enters backfill. The example supports durable restart, verified local anchor
-import, bounded local BAL catch-up, and explicit finalized-ancestor pruning.
-Automatic anchor discovery, remote snapshot distribution, missing BAL-range
-retrieval, automatic branch pruning, and a standardized public proof RPC remain
-unimplemented. The replay API expects hashes from an already validated header
+import, retained-MPT self-conversion, bounded BAL catch-up with authenticated peer
+retrieval, and explicit finalized-ancestor pruning.
+Automatic anchor discovery, remote snapshot distribution, background onboarding
+alongside a moving chain, automatic branch pruning, and a standardized public
+proof RPC remain unimplemented. The replay API expects hashes from an already validated header
 chain; it does not establish consensus finality or validate execution itself.
 
 No mainnet activation timestamp or gas schedule is selected by this crate.

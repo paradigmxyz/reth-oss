@@ -37,3 +37,7 @@ pub mod replay;
 /// Atomic, content-addressed devnet checkpoints.
 #[cfg(feature = "persistence")]
 pub mod persistence;
+
+/// Conversion of a pinned MPT provider using exact, hash-ordered preimages.
+#[cfg(feature = "conversion")]
+pub mod conversion;

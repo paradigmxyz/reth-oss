@@ -33,17 +33,21 @@ with a missing `chain-config` marker is rejected rather than assigned a new chai
 |---|---|
 | `PBT_DATADIR` | Persistent node directory; unset creates a temporary directory. |
 | `PBT_ACTIVATION_TIMESTAMP` | Unsigned fork timestamp; defaults to `0` for PBT from genesis. |
-| `PBT_MIGRATION_SNAPSHOT` and `PBT_MIGRATION_PREIMAGES` | Optional local artifact paths; supply both together. The node obtains the anchor hash and MPT root from its own persisted finalized header, which must precede activation, and performs dual verification before publishing the checkpoint. |
+| `PBT_MIGRATION_SNAPSHOT`, `PBT_MIGRATION_PREIMAGES`, and `PBT_MIGRATION_ANCHOR` | Supply all three together: local artifact paths and the anchor's full block hash. The node checks that the selected header is canonical, finalized, and before activation, then dual-verifies against that header's MPT root. The anchor may precede the current finalized head, including when finality has crossed activation. |
+| `PBT_SELF_CONVERT` | Set to `true` to produce the snapshot at `PBT_MIGRATION_SNAPSHOT` from the retained anchor MPT and supplied preimage file before importing it. Missing, surplus, or unordered preimages fail conversion. The source state must still be retained. Snapshot output and preimage input must name different files. |
 | `PBT_PRUNE_BLOCKS` | Optional comma-separated block hashes to prune at startup. Every candidate must be a strict ancestor of the locally finalized header. Finalized, sibling and unrelated blocks are rejected before deletion. |
 | `PBT_CATCHUP_MAX_BLOCKS` | Nonzero budget for local anchor-to-tip BAL catch-up; defaults to 1024 blocks. |
 | `PBT_CATCHUP_MAX_BAL_BYTES` | Nonzero aggregate raw BAL-byte budget for catch-up; defaults to 67108864 bytes (64 MiB). |
 
 After migration import, the node walks its trusted local headers from the
-finalized anchor to the persisted tip and replays locally stored BALs. Every
+selected finalized anchor to the persisted tip and replays BALs. Missing local
+BALs are fetched from connected `eth/71` peers, with up to three 10-second attempts
+per block and cancellation on shutdown. Only header-authenticated, byte-budgeted
+responses enter the local BAL store. Every
 parent link, BAL commitment and resulting MPT/PBT root is checked before the
-corresponding checkpoint is published. Missing BALs, invalid commitments, bad
-roots and exceeded budgets stop startup. The node does not download artifacts
-or retrieve missing BALs from peers. Explicit pruning preserves the
+corresponding checkpoint is published. Unavailable BAL ranges, invalid commitments,
+bad roots and exceeded budgets stop startup. The node does not download artifacts.
+Explicit pruning preserves the
 finalized checkpoint and state files shared with every retained block reference.
 It does not automatically enumerate or discard orphaned branches.
 

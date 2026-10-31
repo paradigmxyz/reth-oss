@@ -35,11 +35,13 @@ use reth_ethereum::{
     primitives::{AlloyBlockHeader, SealedHeader},
     provider::{
         providers::ProviderNodeTypes, BalProvider, BlockIdReader, BlockNumReader, HeaderProvider,
-        ProviderError, RawBal,
+        ProviderError, RawBal, StateProviderFactory, StateRangeProviderFactory,
     },
     tasks::Runtime,
     EthPrimitives,
 };
+use reth_network_api::BlockDownloaderProvider;
+use reth_network_p2p::{BalRequirement, BlockAccessListsClient};
 use reth_storage_overlay::OverlayManager;
 use reth_trie_pbt::{
     migration::{mpt_root, DecodeLimits},
@@ -88,6 +90,16 @@ where
     ) -> eyre::Result<Self::EngineValidator> {
         let strategy = self.strategy.clone();
         let provider = ctx.node.provider().clone();
+        if self.startup.migration.is_some() {
+            let client = tokio::select! {
+                result = tokio::time::timeout(Duration::from_secs(30), ctx.node.network().fetch_client()) => result??,
+                _ = ctx.node.task_executor().on_shutdown_signal().clone() => eyre::bail!("PBT onboarding interrupted by shutdown"),
+            };
+            tokio::select! {
+                result = self.startup.fetch_missing_bals(&provider, &client) => result?,
+                _ = ctx.node.task_executor().on_shutdown_signal().clone() => eyre::bail!("PBT onboarding interrupted by shutdown"),
+            }
+        }
         tokio::task::spawn_blocking(move || self.startup.initialize(&strategy, &provider))
             .await??;
         let validator = BasicEngineValidatorBuilder::<EthereumEngineValidatorBuilder>::default()
@@ -222,15 +234,25 @@ async fn main() -> eyre::Result<()> {
         Err(std::env::VarError::NotPresent) => 0,
         Err(error) => return Err(error.into()),
     };
-    let startup = Startup::new(
+    let mut startup = Startup::new(
         std::env::var_os("PBT_MIGRATION_SNAPSHOT"),
         std::env::var_os("PBT_MIGRATION_PREIMAGES"),
+        std::env::var_os("PBT_MIGRATION_ANCHOR"),
         std::env::var_os("PBT_PRUNE_BLOCKS"),
         CatchupLimits::new(
             std::env::var_os("PBT_CATCHUP_MAX_BLOCKS"),
             std::env::var_os("PBT_CATCHUP_MAX_BAL_BYTES"),
         )?,
     )?;
+    startup.self_convert = match std::env::var("PBT_SELF_CONVERT") {
+        Ok(value) => value.parse::<bool>()?,
+        Err(std::env::VarError::NotPresent) => false,
+        Err(error) => return Err(error.into()),
+    };
+    eyre::ensure!(
+        !startup.self_convert || startup.migration.is_some(),
+        "PBT_SELF_CONVERT requires migration anchor and artifact paths"
+    );
     // Keep the inode and its OS lock for the whole node lifetime, including shutdown.
     let _directory_lock = lock_directory(&directory)?;
     let store = Arc::new(SnapshotStore::open(directory.join("pbt"), DecodeLimits::default())?);
@@ -293,22 +315,28 @@ struct Startup {
     migration: Option<MigrationFiles>,
     obsolete_checkpoints: Vec<B256>,
     catchup: CatchupLimits,
+    self_convert: bool,
 }
 
 impl Startup {
     fn new(
         snapshot: Option<OsString>,
         preimages: Option<OsString>,
+        anchor: Option<OsString>,
         obsolete: Option<OsString>,
         catchup: CatchupLimits,
     ) -> eyre::Result<Self> {
-        let migration = match (snapshot, preimages) {
-            (Some(snapshot), Some(preimages)) => {
-                Some(MigrationFiles { snapshot: snapshot.into(), preimages: preimages.into() })
+        let migration = match (snapshot, preimages, anchor) {
+            (Some(snapshot), Some(preimages), Some(anchor)) => {
+                let anchor = anchor
+                    .into_string()
+                    .map_err(|_| eyre::eyre!("PBT_MIGRATION_ANCHOR must be a UTF-8 block hash"))?
+                    .parse()?;
+                Some(MigrationFiles { snapshot: snapshot.into(), preimages: preimages.into(), anchor })
             }
-            (None, None) => None,
+            (None, None, None) => None,
             _ => eyre::bail!(
-                "PBT_MIGRATION_SNAPSHOT and PBT_MIGRATION_PREIMAGES must be set together"
+                "PBT_MIGRATION_SNAPSHOT, PBT_MIGRATION_PREIMAGES and PBT_MIGRATION_ANCHOR must be set together"
             ),
         };
         let obsolete_checkpoints = obsolete
@@ -323,12 +351,17 @@ impl Startup {
             })
             .transpose()?
             .unwrap_or_default();
-        Ok(Self { migration, obsolete_checkpoints, catchup })
+        Ok(Self { migration, obsolete_checkpoints, catchup, self_convert: false })
     }
 
     fn initialize<P>(&self, strategy: &PbtStateRootStrategy, provider: &P) -> eyre::Result<()>
     where
-        P: BalProvider + BlockIdReader + BlockNumReader + HeaderProvider,
+        P: BalProvider
+            + BlockIdReader
+            + BlockNumReader
+            + HeaderProvider
+            + StateProviderFactory
+            + StateRangeProviderFactory,
     {
         let finalized = if self.migration.is_some() || !self.obsolete_checkpoints.is_empty() {
             let hash = provider.finalized_block_hash()?.ok_or_else(|| {
@@ -347,19 +380,52 @@ impl Startup {
             .sealed_header(number)?
             .ok_or_else(|| eyre::eyre!("missing persisted tip header"))?;
         if let Some(migration) = &self.migration {
-            let header =
+            let finalized =
                 finalized.as_ref().ok_or_else(|| eyre::eyre!("missing local finalized header"))?;
+            let header = provider
+                .sealed_header_by_hash(migration.anchor)?
+                .ok_or_else(|| eyre::eyre!("missing PBT migration anchor header"))?;
+            eyre::ensure!(
+                header.number() <= finalized.number() &&
+                    provider
+                        .sealed_header(header.number())?
+                        .is_some_and(|canonical| { canonical.hash() == migration.anchor }),
+                "PBT migration anchor must be canonical and finalized"
+            );
             eyre::ensure!(
                 header.timestamp() < strategy.activation_timestamp(),
                 "PBT migration anchor must precede activation"
             );
+            if self.self_convert {
+                eyre::ensure!(
+                    !migration.snapshot.try_exists()? ||
+                        migration.snapshot.canonicalize()? !=
+                            migration.preimages.canonicalize()?,
+                    "PBT snapshot output must differ from the preimage input"
+                );
+                let source = provider
+                    .state_range_provider(header.state_root())?
+                    .ok_or_else(|| eyre::eyre!("PBT conversion anchor state is not retained"))?;
+                let codes = provider.state_by_block_hash(header.hash())?;
+                let preimages = reth_fs_util::open(&migration.preimages)?;
+                let artifacts = reth_trie_pbt::conversion::convert::<reth_trie_pbt::Blake3Hasher>(
+                    &source,
+                    codes.as_ref(),
+                    preimages,
+                    header.state_root(),
+                    DecodeLimits::default(),
+                )?;
+                reth_fs_util::atomic_write_file(&migration.snapshot, |file| {
+                    std::io::Write::write_all(file, &artifacts.snapshot)
+                })?;
+            }
             strategy.store().import_anchor(
                 header.hash(),
                 header.state_root(),
                 &migration.snapshot,
                 &migration.preimages,
             )?;
-            self.catch_up(strategy, provider, header, &tip)?;
+            self.catch_up(strategy, provider, &header, &tip)?;
         }
         strategy
             .restore_parent(tip.hash(), tip.state_root(), tip.timestamp())
@@ -412,32 +478,11 @@ impl Startup {
     where
         P: BalProvider + HeaderProvider,
     {
-        let mut headers = Vec::new();
-        let mut ancestor = tip.clone();
-        while ancestor.hash() != anchor.hash() {
-            eyre::ensure!(
-                ancestor.number() > anchor.number(),
-                "PBT migration anchor is not an ancestor of the persisted tip"
-            );
-            eyre::ensure!(
-                headers.len() < self.catchup.max_blocks.get(),
-                "PBT catch-up block budget exceeded"
-            );
-            let parent = provider
-                .sealed_header_by_hash(ancestor.parent_hash())?
-                .ok_or_else(|| eyre::eyre!("PBT catch-up header is unavailable"))?;
-            eyre::ensure!(
-                parent.number().checked_add(1) == Some(ancestor.number()) &&
-                    parent.timestamp() < ancestor.timestamp(),
-                "inconsistent PBT catch-up header ancestry"
-            );
-            headers.push(ancestor);
-            ancestor = parent;
-        }
+        let headers = self.catchup_headers(provider, anchor, tip)?;
         let mut state =
             strategy.restore_parent(anchor.hash(), anchor.state_root(), anchor.timestamp())?;
         let mut remaining_bytes = self.catchup.max_bal_bytes.get();
-        for header in headers.into_iter().rev() {
+        for header in headers {
             let commitment = header
                 .block_access_list_hash()
                 .ok_or_else(|| eyre::eyre!("PBT catch-up header has no BAL commitment"))?;
@@ -463,6 +508,97 @@ impl Startup {
             );
             strategy.store().save_block(header.hash(), &next)?;
             state = next;
+        }
+        Ok(())
+    }
+
+    fn catchup_headers<P: HeaderProvider>(
+        &self,
+        provider: &P,
+        anchor: &SealedHeader<P::Header>,
+        tip: &SealedHeader<P::Header>,
+    ) -> eyre::Result<Vec<SealedHeader<P::Header>>> {
+        let mut headers = Vec::new();
+        let mut ancestor = tip.clone();
+        while ancestor.hash() != anchor.hash() {
+            eyre::ensure!(
+                ancestor.number() > anchor.number(),
+                "PBT migration anchor is not an ancestor of the persisted tip"
+            );
+            eyre::ensure!(
+                headers.len() < self.catchup.max_blocks.get(),
+                "PBT catch-up block budget exceeded"
+            );
+            let parent = provider
+                .sealed_header_by_hash(ancestor.parent_hash())?
+                .ok_or_else(|| eyre::eyre!("PBT catch-up header is unavailable"))?;
+            eyre::ensure!(
+                parent.number().checked_add(1) == Some(ancestor.number()) &&
+                    parent.timestamp() < ancestor.timestamp(),
+                "inconsistent PBT catch-up header ancestry"
+            );
+            headers.push(ancestor);
+            ancestor = parent;
+        }
+        headers.reverse();
+        Ok(headers)
+    }
+
+    async fn fetch_missing_bals<P, C>(&self, provider: &P, client: &C) -> eyre::Result<()>
+    where
+        P: BalProvider + BlockNumReader + HeaderProvider,
+        C: BlockAccessListsClient,
+    {
+        let Some(migration) = &self.migration else { return Ok(()) };
+        let anchor = provider
+            .sealed_header_by_hash(migration.anchor)?
+            .ok_or_else(|| eyre::eyre!("missing PBT migration anchor header"))?;
+        let tip = provider
+            .sealed_header(provider.last_block_number()?)?
+            .ok_or_else(|| eyre::eyre!("missing persisted tip header"))?;
+        let headers = self.catchup_headers(provider, &anchor, &tip)?;
+        let mut remaining_bytes = self.catchup.max_bal_bytes.get();
+        for header in headers {
+            let commitment = header
+                .block_access_list_hash()
+                .ok_or_else(|| eyre::eyre!("PBT catch-up header has no BAL commitment"))?;
+            if let Some(bytes) = provider.bal_store().get_by_hash(header.hash())? {
+                remaining_bytes = remaining_bytes
+                    .checked_sub(bytes.len())
+                    .ok_or_else(|| eyre::eyre!("PBT catch-up BAL byte budget exceeded"))?;
+                RawBal::new(bytes).ensure_hash(commitment)?;
+                continue;
+            }
+            let mut downloaded = None;
+            for _ in 0..3 {
+                let response = tokio::time::timeout(
+                    Duration::from_secs(10),
+                    client.get_block_access_lists_with_requirement(
+                        vec![header.hash()],
+                        BalRequirement::Mandatory,
+                    ),
+                )
+                .await;
+                if let Ok(Ok(response)) = response {
+                    let mut entries = response.into_data().0;
+                    if entries.len() == 1 &&
+                        let Some(bytes) = entries.pop().flatten()
+                    {
+                        let raw = RawBal::new(bytes);
+                        if raw.ensure_hash(commitment).is_ok() {
+                            downloaded = Some(raw);
+                            break;
+                        }
+                    }
+                }
+            }
+            let raw = downloaded.ok_or_else(|| {
+                eyre::eyre!("PBT catch-up BAL could not be fetched after 3 attempts")
+            })?;
+            remaining_bytes = remaining_bytes
+                .checked_sub(raw.as_raw().len())
+                .ok_or_else(|| eyre::eyre!("PBT catch-up BAL byte budget exceeded"))?;
+            provider.bal_store().insert(header.num_hash(), raw)?;
         }
         Ok(())
     }
@@ -507,6 +643,7 @@ const DEFAULT_CATCHUP_BAL_BYTES: NonZeroUsize =
 struct MigrationFiles {
     snapshot: PathBuf,
     preimages: PathBuf,
+    anchor: B256,
 }
 
 /// Refuses sync paths that still validate MPT roots outside the installed live strategy.
@@ -852,12 +989,23 @@ mod tests {
         assert!(catchup[0].block().timestamp < activation);
         assert!(catchup[2].block().timestamp >= activation);
         let persisted_tip = catchup[2].block().hash();
+        let finalized_hash = catchup[0].block().hash();
+        let response = node
+            .engine
+            .forkchoice_updated(ForkchoiceState {
+                head_block_hash: persisted_tip,
+                safe_block_hash: finalized_hash,
+                finalized_block_hash: finalized_hash,
+            })
+            .await?;
+        assert!(response.payload_status.is_valid());
         let stopped = node.stop().await?;
         let state = store.load_block(anchor_hash)?;
         let artifacts = Artifacts::from_state(&state)?;
         let files = MigrationFiles {
             snapshot: directory.path().join("snapshot"),
             preimages: directory.path().join("preimages"),
+            anchor: anchor_hash,
         };
         reth_fs_util::write(&files.snapshot, &artifacts.snapshot)?;
         reth_fs_util::write(&files.preimages, &artifacts.preimages)?;
@@ -885,7 +1033,7 @@ mod tests {
             reopened.load_block(canonical.block().hash())?.account(recipient).unwrap().balance,
             U256::from(9)
         );
-        let fork = node.advance_fork(anchor_hash, 2).await?;
+        let fork = node.advance_fork(finalized_hash, 2).await?;
         node.reorg_to(canonical.block().hash()).await?;
         node.reorg_to(fork[1].block().hash()).await?;
         let tip = fork[1].block().hash();
@@ -911,25 +1059,124 @@ mod tests {
             [(Some(OsString::from("snapshot")), None), (None, Some(OsString::from("preimages")))]
         {
             assert_eq!(
-                Startup::new(snapshot, preimages, None, CatchupLimits::default())
+                Startup::new(snapshot, preimages, None, None, CatchupLimits::default())
                     .unwrap_err()
                     .to_string(),
-                "PBT_MIGRATION_SNAPSHOT and PBT_MIGRATION_PREIMAGES must be set together"
+                "PBT_MIGRATION_SNAPSHOT, PBT_MIGRATION_PREIMAGES and PBT_MIGRATION_ANCHOR must be set together"
             );
         }
-        assert!(Startup::new(None, None, None, CatchupLimits::default())
+        assert!(Startup::new(None, None, None, None, CatchupLimits::default())
             .unwrap()
             .migration
             .is_none());
         assert!(Startup::new(
             Some("snapshot".into()),
             Some("preimages".into()),
+            Some(B256::ZERO.to_string().into()),
             None,
             CatchupLimits::default()
         )
         .unwrap()
         .migration
         .is_some());
+        for (snapshot, preimages, anchor) in [
+            (None, None, Some(B256::ZERO.to_string().into())),
+            (Some("snapshot".into()), Some("preimages".into()), None),
+        ] {
+            assert_eq!(Startup::new(snapshot, preimages, anchor, None, CatchupLimits::default()).unwrap_err().to_string(),
+                "PBT_MIGRATION_SNAPSHOT, PBT_MIGRATION_PREIMAGES and PBT_MIGRATION_ANCHOR must be set together");
+        }
+        assert!(Startup::new(
+            Some("snapshot".into()),
+            Some("preimages".into()),
+            Some("bad-hash".into()),
+            None,
+            CatchupLimits::default()
+        )
+        .is_err());
+    }
+
+    #[tokio::test]
+    async fn older_anchor_import_and_self_conversion_survive_post_fork_finality() -> eyre::Result<()>
+    {
+        let activation = 1_710_338_138;
+        let directory = tempfile::tempdir()?;
+        let checkpoints = directory.path().join("pbt");
+        let store = Arc::new(SnapshotStore::open(&checkpoints, DecodeLimits::default())?);
+        let chain = prepare_chain(
+            (*test_chain_spec(EthereumHardfork::Amsterdam)).clone(),
+            activation,
+            &store,
+        )?;
+        let (mut node, _) = E2ETestSetupBuilder::<RestartNode>::new(1, chain)
+            .with_node(move |_| RestartNode {
+                checkpoints: checkpoints.clone(),
+                activation,
+                startup: Startup::default(),
+            })
+            .with_backfill(|_| PbtBackfill::default())
+            .with_tree_config_modifier(|config| {
+                config.with_persistence_threshold(0).with_memory_block_buffer_target(0)
+            })
+            .build_single()
+            .await?;
+        let anchor = node.advance_block().await?;
+        let anchor_hash = anchor.block().hash();
+        assert!(anchor.block().timestamp < activation);
+        let artifacts = Artifacts::from_state(&store.load_block(anchor_hash)?)?;
+        let files = MigrationFiles {
+            snapshot: directory.path().join("migration.snapshot"),
+            preimages: directory.path().join("migration.preimages"),
+            anchor: anchor_hash,
+        };
+        reth_fs_util::write(&files.snapshot, &artifacts.snapshot)?;
+        reth_fs_util::write(&files.preimages, &artifacts.preimages)?;
+        let blocks = node.advance_blocks(3).await?;
+        let tip = &blocks[2];
+        assert!(tip.block().timestamp >= activation);
+        node.wait_for_persisted_block(tip.block().number).await?;
+        let strategy = PbtStateRootStrategy::new(store.clone(), activation);
+        let startup = Startup { migration: Some(files.clone()), ..Default::default() };
+        startup.initialize(&strategy, &node.inner.provider)?;
+        let convert = Startup { self_convert: true, ..startup.clone() };
+        reth_fs_util::remove_file(&files.snapshot)?;
+        convert.initialize(&strategy, &node.inner.provider)?;
+        assert_eq!(reth_fs_util::read(&files.snapshot)?, artifacts.snapshot);
+        assert_eq!(store.load_block(tip.block().hash())?.root(), tip.block().state_root);
+        let alias_directory = directory.path().join("alias");
+        reth_fs_util::create_dir_all(&alias_directory)?;
+        for snapshot in
+            [files.preimages.clone(), alias_directory.join("..").join("migration.preimages")]
+        {
+            let alias = Startup {
+                migration: Some(MigrationFiles { snapshot, ..files.clone() }),
+                ..convert.clone()
+            };
+            assert_eq!(
+                alias.initialize(&strategy, &node.inner.provider).unwrap_err().to_string(),
+                "PBT snapshot output must differ from the preimage input"
+            );
+            assert_eq!(reth_fs_util::read(&files.preimages)?, artifacts.preimages);
+        }
+        let missing = Startup {
+            migration: Some(MigrationFiles { anchor: B256::repeat_byte(0xff), ..files.clone() }),
+            ..Default::default()
+        };
+        assert_eq!(
+            missing.initialize(&strategy, &node.inner.provider).unwrap_err().to_string(),
+            "missing PBT migration anchor header"
+        );
+        node.set_finality(Finality::Keep);
+        let unfinalized = node.advance_block().await?;
+        let future = Startup {
+            migration: Some(MigrationFiles { anchor: unfinalized.block().hash(), ..files }),
+            ..Default::default()
+        };
+        assert_eq!(
+            future.initialize(&strategy, &node.inner.provider).unwrap_err().to_string(),
+            "PBT migration anchor must be canonical and finalized"
+        );
+        Ok(())
     }
 
     #[test]
@@ -985,6 +1232,7 @@ mod tests {
             migration: Some(MigrationFiles {
                 snapshot: "snapshot".into(),
                 preimages: "preimages".into(),
+                anchor: finalized_hash,
             }),
             ..Default::default()
         };
@@ -1039,6 +1287,7 @@ mod tests {
                 migration: Some(MigrationFiles {
                     snapshot: "snapshot".into(),
                     preimages: "preimages".into(),
+                    anchor: B256::ZERO,
                 }),
                 ..Default::default()
             },
@@ -1149,6 +1398,56 @@ mod tests {
             provider.bal_store().insert(tip.num_hash(), RawBal::new(bytes))?;
         }
         Ok(provider)
+    }
+
+    #[tokio::test]
+    async fn migration_download_authenticates_and_budgets_missing_bals() -> eyre::Result<()> {
+        let (mut source, _store, _directory) = setup_for(0, EthereumHardfork::Amsterdam).await?;
+        let anchor = source.inner.provider.sealed_header(0)?.unwrap();
+        let mut sender = Wallet::new(1).account(0);
+        let first = source
+            .mine([sender.transfer(Address::repeat_byte(0x77), U256::ONE).await])
+            .await?
+            .ensure_success()?;
+        let tip = source.inner.provider.sealed_header_by_hash(first.block().hash())?.unwrap();
+        let bytes = first.payload.block_access_list().unwrap().clone();
+        let provider = catchup_provider(&anchor, &tip, None)?;
+        let client = reth_network_p2p::test_utils::TestFullBlockClient::default();
+        let startup = Startup {
+            migration: Some(MigrationFiles {
+                snapshot: "unused".into(),
+                preimages: "unused".into(),
+                anchor: anchor.hash(),
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            startup.fetch_missing_bals(&provider, &client).await.unwrap_err().to_string(),
+            "PBT catch-up BAL could not be fetched after 3 attempts"
+        );
+        client.insert_access_list(tip.hash(), Bytes::from_static(&[0xc0, 0xc0]));
+        assert_eq!(
+            startup.fetch_missing_bals(&provider, &client).await.unwrap_err().to_string(),
+            "PBT catch-up BAL could not be fetched after 3 attempts"
+        );
+        assert!(provider.bal_store().get_by_hash(tip.hash())?.is_none());
+        client.insert_access_list(tip.hash(), bytes.clone());
+        let limited = Startup {
+            catchup: CatchupLimits {
+                max_bal_bytes: NonZeroUsize::new(bytes.len() - 1).unwrap(),
+                ..Default::default()
+            },
+            ..startup.clone()
+        };
+        assert_eq!(
+            limited.fetch_missing_bals(&provider, &client).await.unwrap_err().to_string(),
+            "PBT catch-up BAL byte budget exceeded"
+        );
+        assert!(provider.bal_store().get_by_hash(tip.hash())?.is_none());
+        startup.fetch_missing_bals(&provider, &client).await?;
+        assert_eq!(provider.bal_store().get_by_hash(tip.hash())?, Some(bytes));
+        startup.fetch_missing_bals(&provider, &client).await?;
+        Ok(())
     }
 
     #[tokio::test]

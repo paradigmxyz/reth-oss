@@ -3,7 +3,7 @@ use crate::{
     BinaryTree, Blake3Hasher, TreeError, TreeHasher,
 };
 use alloy_primitives::{keccak256, Address, Bytes, B256, U256};
-use std::{collections::BTreeMap, sync::Arc};
+use imbl::OrdMap;
 
 /// Ethereum state encoded into a single partitioned binary tree.
 ///
@@ -13,18 +13,18 @@ use std::{collections::BTreeMap, sync::Arc};
 #[derive(Clone, Debug)]
 pub struct StateTree<H = Blake3Hasher> {
     tree: BinaryTree<H>,
-    accounts: Arc<BTreeMap<Address, AccountData>>,
-    code_references: Arc<BTreeMap<B256, usize>>,
-    storages: Arc<BTreeMap<Address, BTreeMap<U256, B256>>>,
+    accounts: OrdMap<Address, AccountData>,
+    code_references: OrdMap<B256, usize>,
+    storages: OrdMap<Address, OrdMap<U256, B256>>,
 }
 
 impl<H: TreeHasher> Default for StateTree<H> {
     fn default() -> Self {
         Self {
             tree: BinaryTree::new(),
-            accounts: Arc::default(),
-            code_references: Arc::default(),
-            storages: Arc::default(),
+            accounts: OrdMap::new(),
+            code_references: OrdMap::new(),
+            storages: OrdMap::new(),
         }
     }
 }
@@ -82,7 +82,7 @@ impl<H: TreeHasher> StateTree<H> {
                 self.release_code(hash, &previous.as_ref().unwrap().code);
             }
             if let Some(hash) = next_hash {
-                let count = Arc::make_mut(&mut self.code_references).entry(hash).or_default();
+                let count = self.code_references.entry(hash).or_default();
                 *count += 1;
                 if *count == 1 {
                     for (index, chunk) in key::chunkify_code(&account.code).into_iter().enumerate()
@@ -108,7 +108,7 @@ impl<H: TreeHasher> StateTree<H> {
                 keccak256(&account.code),
             );
         }
-        Arc::make_mut(&mut self.accounts).insert(address, account);
+        self.accounts.insert(address, account);
         Ok(())
     }
 
@@ -129,7 +129,7 @@ impl<H: TreeHasher> StateTree<H> {
 
     /// Deletes an account's header, all its storage, and code no remaining account uses.
     pub fn remove_account(&mut self, address: Address) -> Option<AccountData> {
-        let account = Arc::make_mut(&mut self.accounts).remove(&address)?;
+        let account = self.accounts.remove(&address)?;
         if let Some(hash) = account.contract_hash() {
             self.release_code(hash, &account.code);
         }
@@ -156,7 +156,7 @@ impl<H: TreeHasher> StateTree<H> {
             return Err(StateError::MissingAccount(address));
         }
         self.write(key::storage_key::<H>(address, slot), value);
-        let storages = Arc::make_mut(&mut self.storages);
+        let storages = &mut self.storages;
         if value.is_zero() {
             if let Some(slots) = storages.get_mut(&address) {
                 slots.remove(&slot);
@@ -172,7 +172,7 @@ impl<H: TreeHasher> StateTree<H> {
 
     /// Clears storage while retaining the account header and code.
     pub fn clear_storage(&mut self, address: Address) {
-        if let Some(slots) = Arc::make_mut(&mut self.storages).remove(&address) {
+        if let Some(slots) = self.storages.remove(&address) {
             for (slot, _) in slots {
                 self.tree.remove(&key::storage_key::<H>(address, slot));
             }
@@ -180,7 +180,7 @@ impl<H: TreeHasher> StateTree<H> {
     }
 
     fn release_code(&mut self, hash: B256, code: &[u8]) {
-        let references = Arc::make_mut(&mut self.code_references);
+        let references = &mut self.code_references;
         let count = references.get_mut(&hash).expect("contract reference is tracked");
         *count -= 1;
         if *count == 0 {
