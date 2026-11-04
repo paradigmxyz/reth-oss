@@ -55,6 +55,10 @@
 
 mod sparse_trie;
 
+/// Experimental fork-aware PBT commitment and shadow computation.
+#[cfg(feature = "pbt")]
+pub mod pbt;
+
 use self::sparse_trie::{SparseTrieCacheTask, SparseTrieTaskMetrics};
 use crate::tree::{metrics::BlockValidationMetrics, EngineApiTreeState, ExecutionEnv, TreeConfig};
 use alloy_primitives::B256;

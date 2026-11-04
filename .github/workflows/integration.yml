@@ -76,9 +76,9 @@ jobs:
         run: |
           cargo nextest run \
             --no-fail-fast \
-            --locked --features "asm-keccak" \
+            --locked --features "asm-keccak,reth-trie-pbt/execution,reth-trie-pbt/persistence,reth-trie-pbt/bal" \
             --workspace --exclude ef-tests \
-            -E "kind(test) and not binary(e2e_testsuite)"
+            -E "(kind(test) and not binary(e2e_testsuite)) or package(example-pbt-node)"
 
   integration-success:
     name: integration success
