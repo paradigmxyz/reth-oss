@@ -756,7 +756,7 @@ mod tests {
             block_hash: Some(B256::ZERO),
             block_number: Some(0),
             gas_used: 2,
-            effective_gas_price: u128::MAX,
+            effective_gas_price: U256::from(1) << 160,
             blob_gas_used: None,
             blob_gas_price: None,
             from: Address::ZERO,
@@ -765,7 +765,7 @@ mod tests {
         };
         let details =
             api.block_details(Default::default(), vec![receipt.clone(), receipt]).await.unwrap();
-        assert_eq!(details.total_fees, U256::from(u128::MAX) * U256::from(4));
+        assert_eq!(details.total_fees, U256::from(4) << 160);
     }
 
     #[test]

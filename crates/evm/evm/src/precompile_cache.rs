@@ -7,6 +7,8 @@ use alloy_primitives::{
 use evm2::{
     evm::precompile::{PrecompileOutput, PrecompileProvider},
     interpreter::{GasTracker, Message},
+    precompiles::PrecompileId,
+    version::EvmFeatures,
     Evm, EvmTypesHost, PrecompileError,
 };
 use moka::policy::EvictionPolicy;
@@ -214,7 +216,13 @@ where
         gas: &mut GasTracker,
     ) -> Option<Result<PrecompileOutput, PrecompileError>> {
         let address = message.call_target;
-        if !self.policy.allows(&address) {
+        if !self.policy.allows(&address) ||
+            (evm.version().feature(EvmFeatures::EIP8151) &&
+                self.inner
+                    .as_map()
+                    .get_data(&address)
+                    .is_some_and(|data| data.id() == &PrecompileId::EcRec))
+        {
             return self.inner.execute(evm, message, gas);
         }
         let cache =
@@ -309,13 +317,14 @@ where
 /// Precompiles whose output and gas usage depend only on input and specification.
 ///
 /// Eligible precompiles must not read execution context or state, mutate state, or emit logs.
+/// Stateful protocol precompiles always bypass the cache.
 /// Custom factories are uncached unless they explicitly select a policy.
 #[derive(Debug, Clone, Default)]
 pub enum PrecompileCachePolicy {
     /// No precompiles are eligible for caching.
     #[default]
     Disabled,
-    /// Every installed precompile is pure and eligible for caching.
+    /// Every installed precompile is eligible, except state-dependent protocol precompiles.
     All,
     /// Only these precompile implementations are eligible for caching.
     Addresses(Arc<AddressSet>),
@@ -594,6 +603,50 @@ mod tests {
                     .is_some(),
                 len == 2048
             );
+        }
+    }
+
+    #[test]
+    fn state_dependent_ecrecover_ignores_cached_output_after_relocation() {
+        let spec = SpecId::BOGOTA;
+        let original = Address::with_last_byte(1);
+        for destination in [original, Address::with_last_byte(0x40)] {
+            let mut provider = CachedPrecompileProvider::new(
+                evm2::Precompiles::base(spec),
+                PrecompileCacheMap::default(),
+                spec,
+                PrecompileCachePolicy::All,
+                false,
+            );
+            provider.move_precompiles(&[(original, destination)]).unwrap();
+            provider.cache_map.cache_for_address(destination).insert(
+                Bytes::new(),
+                CacheEntry {
+                    output: PrecompileOutput::new(Bytes::from_static(b"stale recovery")),
+                    regular_gas_used: 0,
+                    spec,
+                },
+            );
+            let mut evm = Evm::<BaseEvmTypes>::new(
+                spec,
+                BlockEnv::<BaseEvmTypes>::default(),
+                TxRegistry::new(),
+                InMemoryDB::default(),
+                NoPrecompiles::default(),
+            );
+            let message = Message::<BaseEvmTypes> {
+                kind: MessageKind::Call,
+                gas_limit: 30_000,
+                destination,
+                code_address: destination,
+                call_target: destination,
+                ..Default::default()
+            };
+            let mut gas = GasTracker::new(30_000);
+            let output = provider.execute(&mut evm, &message, &mut gas).unwrap().unwrap();
+            assert!(output.bytes().is_empty());
+            assert_eq!(gas.spent(), 3_000);
+            assert!(provider.caches.is_empty());
         }
     }
 

@@ -539,9 +539,12 @@ async fn test_flashbots_validate_v4() -> eyre::Result<()> {
     Ok(())
 }
 
-// Keep blob JSON decoding off the test thread's deeper debug stack.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_flashbots_validate_v5() -> eyre::Result<()> {
+#[test]
+fn test_flashbots_validate_v5() -> eyre::Result<()> {
+    flashbots_test_runtime()?.block_on(test_flashbots_validate_v5_inner())
+}
+
+async fn test_flashbots_validate_v5_inner() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
     let (mut node, wallet) = EthereumNode::test_setup_for(EthereumHardfork::Osaka)
@@ -603,9 +606,12 @@ async fn test_flashbots_validate_v5() -> eyre::Result<()> {
     Ok(())
 }
 
-// Keep blob JSON decoding off the test thread's deeper debug stack.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_flashbots_validate_v6() -> eyre::Result<()> {
+#[test]
+fn test_flashbots_validate_v6() -> eyre::Result<()> {
+    flashbots_test_runtime()?.block_on(test_flashbots_validate_v6_inner())
+}
+
+async fn test_flashbots_validate_v6_inner() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
     let (mut node, wallet) = EthereumNode::test_setup_for(EthereumHardfork::Amsterdam)
@@ -709,6 +715,15 @@ async fn test_flashbots_validate_v6() -> eyre::Result<()> {
         .is_err());
 
     Ok(())
+}
+
+// Blob JSON decoding needs more stack than Tokio's default worker stack.
+fn flashbots_test_runtime() -> eyre::Result<tokio::runtime::Runtime> {
+    Ok(tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .thread_stack_size(8 * 1024 * 1024)
+        .enable_all()
+        .build()?)
 }
 
 #[tokio::test]

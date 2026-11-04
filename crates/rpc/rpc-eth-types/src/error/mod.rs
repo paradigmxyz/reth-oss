@@ -17,8 +17,9 @@ use reth_rpc_server_types::result::{
     internal_rpc_err, invalid_params_rpc_err, rpc_err, rpc_error_with_code,
 };
 use reth_transaction_pool::error::{
-    Eip4844PoolTransactionError, Eip7702PoolTransactionError, InvalidPoolTransactionError,
-    PoolError, PoolErrorKind, PoolTransactionError, RawPoolTransactionError,
+    Eip4844PoolTransactionError, Eip7702PoolTransactionError, Eip8141PoolTransactionError,
+    InvalidPoolTransactionError, PoolError, PoolErrorKind, PoolTransactionError,
+    RawPoolTransactionError,
 };
 use std::convert::Infallible;
 use tokio::sync::oneshot::error::RecvError;
@@ -185,9 +186,9 @@ pub enum EthApiError {
     /// Error encountered when converting a transaction type
     #[error(transparent)]
     TransactionConversionError(#[from] TransactionConversionError),
-    /// Error thrown when tracing with a muxTracer fails
-    #[error(transparent)]
-    MuxTracerError(#[from] MuxError),
+    /// Error message from a failed `muxTracer`, without thread-local `JavaScript` state.
+    #[error("{0}")]
+    MuxTracerError(String),
     /// Error thrown when waiting for transaction confirmation times out
     #[error(
         "Transaction {hash} was added to the mempool but wasn't confirmed within {duration:?}."
@@ -217,6 +218,15 @@ pub enum EthApiError {
     /// Error thrown when trying to access block access list for blocks before Amsterdam
     #[error("Block access list not available for pre-Amsterdam blocks")]
     BlockAccessListNotAvailablePreAmsterdam,
+    /// Error thrown when a frame transaction method targets a block before Bogota.
+    #[error("frame transactions are not active at the requested block")]
+    FrameTransactionsNotActive,
+    /// A keyed nonce query targets a block before EIP-8250 activation.
+    #[error("keyed nonces are not active at the requested block")]
+    KeyedNoncesNotActive,
+    /// The selected nonce domains have different sequences.
+    #[error("nonce keys do not share one sequence")]
+    NonceKeysNotSynchronized,
     /// Any other error
     #[error("{0}")]
     Other(Box<dyn ToRpcError>),
@@ -333,6 +343,9 @@ impl From<EthApiError> for jsonrpsee_types::error::ErrorObject<'static> {
             EthApiError::TransactionConversionError(_) |
             EthApiError::InvalidRewardPercentiles |
             EthApiError::InvalidBytecode(_) => invalid_params_rpc_err(error.to_string()),
+            EthApiError::KeyedNoncesNotActive | EthApiError::NonceKeysNotSynchronized => {
+                rpc_error_with_code(EthRpcErrorCode::InvalidInput.code(), error.to_string())
+            }
             EthApiError::InvalidTransaction(err) => err.into(),
             EthApiError::PoolError(err) => err.into(),
             EthApiError::Internal(RethError::Provider(
@@ -345,7 +358,8 @@ impl From<EthApiError> for jsonrpsee_types::error::ErrorObject<'static> {
             EthApiError::EvmCustom(_) => internal_rpc_err(error.to_string()),
             EthApiError::UnknownBlockOrTxIndex |
             EthApiError::TransactionNotFound |
-            EthApiError::BlockAccessListNotAvailablePreAmsterdam => {
+            EthApiError::BlockAccessListNotAvailablePreAmsterdam |
+            EthApiError::FrameTransactionsNotActive => {
                 rpc_error_with_code(EthRpcErrorCode::ResourceNotFound.code(), error.to_string())
             }
             EthApiError::TracingTransactionNotFound | EthApiError::GenesisNotTraceable => {
@@ -393,7 +407,7 @@ impl From<EthApiError> for jsonrpsee_types::error::ErrorObject<'static> {
                 rpc_error_with_code(EthRpcErrorCode::PrunedHistory.code(), error.to_string())
             }
             EthApiError::Other(err) => err.to_rpc_error(),
-            EthApiError::MuxTracerError(msg) => internal_rpc_err(msg.to_string()),
+            EthApiError::MuxTracerError(msg) => internal_rpc_err(msg),
             EthApiError::BatchTxRecvError(err) => internal_rpc_err(err.to_string()),
             EthApiError::BatchTxSendError => {
                 internal_rpc_err("Batch transaction sender channel closed".to_string())
@@ -467,6 +481,8 @@ impl From<EthTxEnvError> for EthApiError {
                 Self::InvalidTransaction(RpcInvalidTransactionError::TipVeryHigh)
             }
             EthTxEnvError::Input(err) => Self::TransactionInputError(err),
+            err @ (EthTxEnvError::Eip8141InvalidOuterFields |
+            EthTxEnvError::Eip8141InvalidFields(_)) => Self::InvalidParams(err.to_string()),
             EthTxEnvError::BlobTransactionIsCreate => {
                 Self::InvalidTransaction(RpcInvalidTransactionError::BlobTransactionIsCreate)
             }
@@ -489,10 +505,17 @@ impl From<evm2_inspectors::tracing::js::JsInspectorError> for EthApiError {
     }
 }
 
+impl From<MuxError> for EthApiError {
+    fn from(error: MuxError) -> Self {
+        // Nested JavaScript errors can contain thread-local runtime state.
+        Self::MuxTracerError(error.to_string())
+    }
+}
+
 impl From<DebugInspectorError> for EthApiError {
     fn from(error: DebugInspectorError) -> Self {
         match error {
-            DebugInspectorError::InvalidTracerConfig => Self::InvalidTracerConfig,
+            DebugInspectorError::InvalidTracerConfig(_) => Self::InvalidTracerConfig,
             DebugInspectorError::UnsupportedTracer => Self::Unsupported("unsupported tracer"),
             DebugInspectorError::JsTracerNotEnabled => {
                 Self::Unsupported("JS Tracer is not enabled")
@@ -634,6 +657,9 @@ impl From<Infallible> for EthApiError {
 ///   `tip` for `max_priority_fee_per_gas`
 #[derive(thiserror::Error, Debug)]
 pub enum RpcInvalidTransactionError {
+    /// Native frame transaction validation failed before execution could complete.
+    #[error(transparent)]
+    FrameTransaction(HandlerError),
     /// returned if the nonce of a transaction is lower than the one present in the local chain.
     #[error("nonce too low: next nonce {state}, tx nonce {tx}")]
     NonceTooLow {
@@ -871,6 +897,8 @@ impl From<InvalidTransactionError> for RpcInvalidTransactionError {
 impl From<HandlerError> for RpcInvalidTransactionError {
     fn from(err: HandlerError) -> Self {
         match err {
+            err @ (HandlerError::InvalidFrameTransaction(_) |
+            HandlerError::FrameFeeBudgetTooLow { .. }) => Self::FrameTransaction(err),
             HandlerError::InvalidNonce { expected, got } if got < expected => {
                 Self::NonceTooLow { tx: got, state: expected }
             }
@@ -878,7 +906,9 @@ impl From<HandlerError> for RpcInvalidTransactionError {
             HandlerError::InvalidChainId { .. } | HandlerError::MissingChainId => {
                 Self::InvalidChainId
             }
-            HandlerError::IntrinsicGasTooLow { .. } => Self::GasTooLow,
+            HandlerError::IntrinsicGasTooLow { .. } | HandlerError::GasLimitBelowFloor { .. } => {
+                Self::GasTooLow
+            }
             HandlerError::InsufficientFunds { fee, balance } => {
                 Self::InsufficientFunds { cost: fee, balance }
             }
@@ -1006,6 +1036,9 @@ pub enum RpcPoolError {
     /// EIP-7702 related error
     #[error(transparent)]
     Eip7702(#[from] Eip7702PoolTransactionError),
+    /// EIP-8141 related error
+    #[error(transparent)]
+    Eip8141(#[from] Eip8141PoolTransactionError),
     /// Thrown if a conflicting transaction type is already in the pool
     ///
     /// In other words, thrown if a transaction with the same sender that violates the exclusivity
@@ -1037,6 +1070,7 @@ impl From<RpcPoolError> for jsonrpsee_types::error::ErrorObject<'static> {
             RpcPoolError::PoolTransactionError(_) |
             RpcPoolError::Eip4844(_) |
             RpcPoolError::Eip7702(_) |
+            RpcPoolError::Eip8141(_) |
             RpcPoolError::AddressAlreadyReserved => {
                 rpc_error_with_code(EthRpcErrorCode::InvalidInput.code(), error.to_string())
             }
@@ -1086,6 +1120,7 @@ impl From<InvalidPoolTransactionError> for RpcPoolError {
             InvalidPoolTransactionError::Other(err) => Self::PoolTransactionError(err),
             InvalidPoolTransactionError::Eip4844(err) => Self::Eip4844(err),
             InvalidPoolTransactionError::Eip7702(err) => Self::Eip7702(err),
+            InvalidPoolTransactionError::Eip8141(err) => Self::Eip8141(err),
             InvalidPoolTransactionError::Overdraft { cost, balance } => {
                 Self::Invalid(RpcInvalidTransactionError::InsufficientFunds { cost, balance })
             }
@@ -1130,10 +1165,24 @@ mod tests {
     use alloy_primitives::b256;
     use alloy_sol_types::{Revert, SolError};
 
+    #[cfg(feature = "js-tracer")]
+    use evm2_inspectors::tracing::js::JsInspectorError;
+
     #[test]
     fn timed_out_error() {
         let err = EthApiError::ExecutionTimedOut(Duration::from_secs(10));
         assert_eq!(err.to_string(), "execution aborted (timeout = 10s)");
+    }
+
+    #[test]
+    fn frame_outer_fields_error_is_invalid_params() {
+        let err = EthApiError::from(EthTxEnvError::Eip8141InvalidOuterFields);
+        let err: jsonrpsee_types::error::ErrorObject<'static> = err.into();
+        assert_eq!(err.code(), -32602);
+        assert_eq!(
+            err.message(),
+            "EIP-8141 transaction request contains non-canonical outer fields"
+        );
     }
 
     #[test]
@@ -1281,11 +1330,61 @@ mod tests {
     }
 
     #[test]
+    fn eth_api_error_is_send_and_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<EthApiError>();
+    }
+
+    #[test]
+    fn mux_tracer_error_preserves_rpc_message() {
+        let source = serde_json::from_value::<u64>(true.into()).unwrap_err();
+        let error = MuxError::Child(Box::new(DebugInspectorError::InvalidTracerConfig(source)));
+        let error = EthApiError::from(error).into_rpc_err();
+        assert_eq!(error.code(), jsonrpsee_types::error::INTERNAL_ERROR_CODE);
+        assert_eq!(
+            error.message(),
+            "invalid tracer config: invalid type: boolean `true`, expected u64"
+        );
+    }
+
+    #[cfg(feature = "js-tracer")]
+    #[test]
+    fn mux_js_tracer_error_preserves_rpc_message() {
+        let error = DebugInspectorError::MuxInspector(MuxError::Child(Box::new(
+            DebugInspectorError::JsInspector(JsInspectorError::ExpectedJsObject),
+        )));
+        let error = EthApiError::from(error).into_rpc_err();
+        assert_eq!(error.code(), jsonrpsee_types::error::INTERNAL_ERROR_CODE);
+        assert_eq!(error.message(), "the evaluated code is not a JS object");
+    }
+
+    #[test]
     fn empty_revert_err_has_empty_data() {
         let err: jsonrpsee_types::error::ErrorObject<'static> =
             RpcInvalidTransactionError::Revert(RevertError::new(Bytes::new())).into();
         assert_eq!(err.code(), 3);
         assert_eq!(err.message(), "execution reverted");
         assert_eq!(err.data().unwrap().get(), "\"0x\"");
+    }
+
+    #[test]
+    fn intrinsic_gas_errors_preserve_rpc_classification() {
+        for error in [
+            HandlerError::IntrinsicGasTooLow { required: 21_001, got: 21_000 },
+            HandlerError::GasLimitBelowFloor { required: 21_001, got: 21_000 },
+        ] {
+            let error = RpcInvalidTransactionError::from(error);
+            assert!(matches!(error, RpcInvalidTransactionError::GasTooLow));
+            let error = error.into_rpc_err();
+            assert_eq!(error.code(), EthRpcErrorCode::InvalidInput.code());
+            assert_eq!(error.message(), "intrinsic gas too low");
+        }
+        let error = RpcInvalidTransactionError::from(HandlerError::IntrinsicGasGreaterThanCap {
+            required: 21_001,
+            cap: 21_000,
+        })
+        .into_rpc_err();
+        assert_eq!(error.code(), EthRpcErrorCode::TransactionRejected.code());
+        assert_eq!(error.message(), "intrinsic gas exceeds cap: required 21001, cap 21000");
     }
 }
