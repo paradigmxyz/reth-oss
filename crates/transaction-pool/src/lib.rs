@@ -860,6 +860,10 @@ where
         self.pool.on_canonical_state_change(update);
     }
 
+    async fn revalidate_frame_transactions(&self) {
+        self.pool.revalidate_frame_transactions().await;
+    }
+
     fn update_accounts(&self, accounts: Vec<ChangedAccount>) {
         self.pool.update_accounts(accounts);
     }
