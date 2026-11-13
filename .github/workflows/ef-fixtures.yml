@@ -1,0 +1,144 @@
+name: EF mainnet fixtures
+
+on:
+  pull_request:
+  merge_group:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build fixture runner
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      release: ${{ steps.fixtures.outputs.release }}
+      url: ${{ steps.fixtures.outputs.url }}
+      sha256: ${{ steps.fixtures.outputs.sha256 }}
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_PROFILE_RELEASE_LTO: "false"
+    steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@d5402286a7abdfb7232173b3228d56473feb8a66 # 2026-09-29T02-04-45Z-d5402286
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Resolve latest mainnet fixture release
+        id: fixtures
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p runner-artifact
+          gh api repos/ethereum/execution-specs/releases/latest > runner-artifact/release.json
+          jq -e '(.prerelease == false) and (.tag_name | startswith("tests@"))' runner-artifact/release.json
+          {
+            echo "release=$(jq -er '.tag_name' runner-artifact/release.json)"
+            echo "url=$(jq -er '.assets[] | select(.name == "fixtures.tar.gz") | .browser_download_url' runner-artifact/release.json)"
+            echo "sha256=$(jq -er '.assets[] | select(.name == "fixtures.tar.gz") | .digest | sub("^sha256:"; "")' runner-artifact/release.json)"
+          } >> "$GITHUB_OUTPUT"
+      - uses: rui314/setup-mold@339e96b4ff1f3bd865856ba4cbbe8818a7acb038 # v1
+      - run: .github/scripts/install_llvm.sh ubuntu
+      - uses: tempoxyz/gh-actions/vendor/dtolnay/rust-toolchain@d5402286a7abdfb7232173b3228d56473feb8a66 # 2026-09-29T02-04-45Z-d5402286
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          prefix-key: v1-ef-fixture-runner
+          cache-bin: false
+          cache-on-failure: true
+      - name: Build runner
+        run: cargo build --locked --release -p ef-test-runner
+      - name: Stage runner
+        run: cp target/release/ef-test-runner runner-artifact/
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ef-test-runner
+          path: runner-artifact/
+          if-no-files-found: error
+
+  fixtures:
+    name: Fixtures / ${{ matrix.mode }}
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - mode: blocktest
+            command: blocktest
+            format: blockchain_tests
+            sequential: "false"
+          - mode: enginetest-parallel
+            command: enginetest
+            format: blockchain_tests_engine
+            sequential: "false"
+          - mode: enginetest-sequential
+            command: enginetest
+            format: blockchain_tests_engine
+            sequential: "true"
+    env:
+      FIXTURE_RELEASE: ${{ needs.build.outputs.release }}
+      FIXTURE_URL: ${{ needs.build.outputs.url }}
+      FIXTURE_SHA256: ${{ needs.build.outputs.sha256 }}
+      FIXTURE_FORMAT: ${{ matrix.format }}
+      RUNNER_COMMAND: ${{ matrix.command }}
+      SEQUENTIAL: ${{ matrix.sequential }}
+      MODE: ${{ matrix.mode }}
+    steps:
+      - name: Secure runner
+        uses: tempoxyz/gh-actions/actions/secure-runner@d5402286a7abdfb7232173b3228d56473feb8a66 # 2026-09-29T02-04-45Z-d5402286
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ef-test-runner
+          path: runner-artifact
+      - name: Download latest mainnet fixtures
+        run: |
+          curl --fail --location --retry 3 "$FIXTURE_URL" --output "$RUNNER_TEMP/fixtures.tar.gz"
+          echo "$FIXTURE_SHA256  $RUNNER_TEMP/fixtures.tar.gz" | sha256sum --check
+          mkdir -p "$RUNNER_TEMP/eest" results
+          cp runner-artifact/release.json results/
+          tar -xzf "$RUNNER_TEMP/fixtures.tar.gz" --strip-components=1 \
+            --directory "$RUNNER_TEMP/eest" --wildcards "fixtures/$FIXTURE_FORMAT/*"
+          chmod +x runner-artifact/ef-test-runner
+      - name: Run fixtures
+        run: |
+          args=("$RUNNER_COMMAND" --workers 2 --bal-report "$RUNNER_TEMP/eest/$FIXTURE_FORMAT")
+          if [[ "$SEQUENTIAL" == true ]]; then
+            args+=(--bal-sequential)
+          fi
+          set +e
+          timeout 100m runner-artifact/ef-test-runner "${args[@]}" \
+            > >(tee results/results.json) 2> >(tee results/stderr.log >&2)
+          status=$?
+          wait
+          set -e
+          echo "$status" > results/exit-code.txt
+          python3 .github/scripts/summarize-ef-fixtures.py \
+            "$RUNNER_TEMP/eest/$FIXTURE_FORMAT" results/results.json \
+            "$status" "$FIXTURE_RELEASE" "$MODE"
+          exit "$status"
+      - name: Upload fixture results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ef-fixtures-${{ matrix.mode }}
+          path: results/
+          if-no-files-found: warn
