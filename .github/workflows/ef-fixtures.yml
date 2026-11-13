@@ -125,8 +125,10 @@ jobs:
             args+=(--bal-sequential)
           fi
           set +e
-          timeout 100m runner-artifact/ef-test-runner "${args[@]}" > results/results.json 2> results/stderr.log
+          timeout 100m runner-artifact/ef-test-runner "${args[@]}" \
+            > >(tee results/results.json) 2> >(tee results/stderr.log >&2)
           status=$?
+          wait
           set -e
           echo "$status" > results/exit-code.txt
           python3 .github/scripts/summarize-ef-fixtures.py \
