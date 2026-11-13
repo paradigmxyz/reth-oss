@@ -503,7 +503,7 @@ async fn call(rpc: &RpcModule<()>, method: &str, params: Value) -> Result<Value,
         .await
         .map_err(|err| RpcError::new(0, format!("invalid request: {err}")))?;
     let mut response: Value =
-        serde_json::from_str(response.get()).map_err(|err| RpcError::new(0, err.to_string()))?;
+        serde_json::from_str(&response).map_err(|err| RpcError::new(0, err.to_string()))?;
     if let Some(error) = response.get_mut("error") {
         return Err(RpcError {
             code: error["code"].as_i64().unwrap_or_default(),
