@@ -8,6 +8,8 @@ use std::{
     process::Command,
 };
 
+mod common;
+
 /// The switch that selects the sequential executor.
 const SEQUENTIAL: &str = "--bal-sequential";
 
@@ -94,7 +96,8 @@ fn enginetest_runs_parallel_unless_disabled() {
 /// A payload whose access list does not match its execution is INVALID on either executor.
 #[test]
 fn enginetest_rejects_a_bad_access_list_on_either_executor() {
-    let fixture = fixture("enginetest_amsterdam_bad_access_list.json");
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = common::write_fixture(dir.path(), "enginetest_amsterdam_bad_access_list.json");
     let enginetest = ["enginetest", fixture.to_str().unwrap(), "--workers", "1"];
 
     for args in [&enginetest[..], &[&enginetest[..], &[SEQUENTIAL]].concat()] {
@@ -155,4 +158,37 @@ fn blocktest_withholds_the_access_list() {
         decisions(&["blocktest", paris.to_str().unwrap(), "--bal-report", "--bal-withhold"]),
         decision("sequential", "no-access-list")
     );
+}
+
+/// A header-committed malformed list must reach the client instead of being discarded.
+#[test]
+fn blocktest_delivers_a_matching_malformed_access_list() {
+    let mut data: Value = serde_json::from_str(
+        &fs::read_to_string(fixture("blocktest_amsterdam_empty_block.json")).unwrap(),
+    )
+    .unwrap();
+    let test = data.as_object_mut().unwrap().values_mut().next().unwrap();
+    let block = &mut test["blocks"][0];
+    block["blockAccessList"][0]["codeChanges"] = serde_json::json!([
+        {"blockAccessIndex": "0x01", "newCode": "0xef01de"}
+    ]);
+    let access_list: alloy_eips::eip7928::BlockAccessList =
+        serde_json::from_value(block["blockAccessList"].clone()).unwrap();
+    let encoded: alloy_primitives::Bytes = serde_json::from_value(block["rlp"].clone()).unwrap();
+    let mut decoded: alloy_consensus::Block<alloy_consensus::TxEnvelope> =
+        alloy_rlp::decode_exact(&encoded).unwrap();
+    decoded.header.block_access_list_hash =
+        Some(alloy_eips::eip7928::compute_block_access_list_hash(&access_list));
+    block["rlp"] = alloy_primitives::Bytes::from(alloy_rlp::encode(&decoded)).to_string().into();
+    block["expectException"] = "BlockException.INVALID_BLOCK_ACCESS_LIST".into();
+    test["lastblockhash"] = test["genesisBlockHeader"]["hash"].clone();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("malformed_committed_bal.json");
+    fs::write(&path, data.to_string()).unwrap();
+    let path = path.to_str().unwrap();
+    let (delivered, _) = run(&["blocktest", path]);
+    let (withheld, _) = run(&["blocktest", path, "--bal-withhold"]);
+    assert_eq!(delivered["pass"], true, "{}", delivered["error"]);
+    assert_eq!(withheld["pass"], true, "{}", withheld["error"]);
+    assert_ne!(delivered["rejections"][0]["error"], withheld["rejections"][0]["error"]);
 }

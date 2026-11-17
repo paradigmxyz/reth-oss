@@ -1,24 +1,22 @@
 //! Checks that a fixture fails when the client's head is not the fixture's `lastblockhash`,
 //! including a fixture whose block the client rejects as expected.
 
+use common::{load_fixture, write_fixture};
 use std::{
     fs,
     path::{Path, PathBuf},
     process::Command,
 };
 
+mod common;
+
 /// A hash that is no block of any fixture.
 const WRONG_HASH: &str = "0x0202020202020202020202020202020202020202020202020202020202020202";
-
-fn fixture(name: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(name)
-}
 
 /// Writes the fixture `name` into `dir` with its `lastblockhash` replaced by [`WRONG_HASH`], and
 /// returns the new file and the replaced hash.
 fn with_wrong_last_block_hash(dir: &Path, name: &str) -> (PathBuf, String) {
-    let mut json: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(fixture(name)).unwrap()).unwrap();
+    let mut json = load_fixture(name);
     let test = json.as_object_mut().unwrap().values_mut().next().unwrap();
     let head = test["lastblockhash"].as_str().unwrap().to_string();
     test["lastblockhash"] = WRONG_HASH.into();
@@ -43,11 +41,12 @@ fn check(args: &[&str], name: &str, expected_error: fn(&str) -> String) {
         (output.status.code(), results.remove(0))
     };
 
-    let (code, result) = run(&fixture(name));
+    let dir = tempfile::tempdir().unwrap();
+    let original = write_fixture(dir.path(), name);
+    let (code, result) = run(&original);
     assert_eq!(result["pass"], true, "{}", result["error"]);
     assert_eq!(code, Some(0));
 
-    let dir = tempfile::tempdir().unwrap();
     let (wrong, head) = with_wrong_last_block_hash(dir.path(), name);
     let (code, result) = run(&wrong);
     assert_eq!(result["pass"], false);

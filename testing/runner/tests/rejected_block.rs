@@ -2,6 +2,7 @@
 //! rejection, never on the reason it names, and the exit status agrees with it. The result reports
 //! the rejection with reth's own error.
 
+use common::{load_fixture, write_fixture};
 use serde_json::json;
 use std::{
     fs,
@@ -9,8 +10,9 @@ use std::{
     process::Command,
 };
 
-/// A Paris fixture with one empty block on genesis whose state root is wrong, in the given
-/// format, expecting `BlockException.INVALID_STATE_ROOT`.
+mod common;
+
+/// Returns a checked-in valid fixture.
 fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(name)
 }
@@ -43,8 +45,7 @@ fn edited(
     name: &str,
     edit: impl FnOnce(&mut serde_json::Map<String, serde_json::Value>),
 ) -> PathBuf {
-    let mut json: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(fixture(name)).unwrap()).unwrap();
+    let mut json = load_fixture(name);
     let test = json.as_object_mut().unwrap().values_mut().next().unwrap();
     let key = if test.get("blocks").is_some() { "blocks" } else { "engineNewPayloads" };
     let block = &mut test[key][0];
@@ -62,11 +63,12 @@ const STATE_ROOT_ERROR: &str = "mismatched block state root: got \
 /// Runs the fixture as is, with its expected exception swapped for another, both of which pass,
 /// and without an expected exception, which fails. Each reports the block's `rejection`.
 fn check(args: &[&str], name: &str, exception_key: &str, rejection: serde_json::Value) {
-    let result = run(args, &fixture(name));
+    let dir = tempfile::tempdir().unwrap();
+    let original = write_fixture(dir.path(), name);
+    let result = run(args, &original);
     assert_eq!(result["pass"], true, "{}", result["error"]);
     assert_eq!(result["rejections"], json!([rejection]));
 
-    let dir = tempfile::tempdir().unwrap();
     let other_reason = edited(dir.path(), name, |block| {
         block.insert(
             exception_key.to_string(),
@@ -152,6 +154,40 @@ fn clean_fixtures_report_no_rejections() {
     assert_eq!(result["rejections"], json!([]));
 
     let result = run(&["enginetest", "--workers", "1"], &fixture("enginetest_empty_block.json"));
+    assert_eq!(result["pass"], true, "{}", result["error"]);
+    assert_eq!(result["rejections"], json!([]));
+}
+
+#[test]
+fn blocktest_imports_after_expected_rejection() {
+    let valid: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(fixture("blocktest_empty_block.json")).unwrap())
+            .unwrap();
+    let invalid = load_fixture("blocktest_bad_state_root.json");
+    for block in [
+        json!({"rlp": "0xf90200c0", "expectException": "BlockException.RLP_STRUCTURES_ENCODING"}),
+        invalid["bad_state_root"]["blocks"][0].clone(),
+    ] {
+        let mut data = valid.clone();
+        let test = data.as_object_mut().unwrap().values_mut().next().unwrap();
+        test["blocks"].as_array_mut().unwrap().insert(0, block);
+        let expected_head = test["lastblockhash"].clone();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rejected_then_valid.json");
+        fs::write(&path, data.to_string()).unwrap();
+        let result = run(&["blocktest"], &path);
+        assert_eq!(result["pass"], true, "{}", result["error"]);
+        assert_eq!(result["lastBlockHash"], expected_head);
+        assert_eq!(result["rejections"].as_array().unwrap().len(), 1);
+        assert_eq!(result["rejections"][0]["index"], 0);
+    }
+}
+
+/// EEST tests/frontier/opcodes/test_blockhash.py, tests@v21.0.2, Berlin/no_blocks.
+/// Its first block checks BLOCKHASH(0) against the fixture's genesis hash.
+#[test]
+fn blocktest_reads_genesis_blockhash_during_the_first_block() {
+    let result = run(&["blocktest"], &fixture("blocktest_genesis_blockhash.json"));
     assert_eq!(result["pass"], true, "{}", result["error"]);
     assert_eq!(result["rejections"], json!([]));
 }

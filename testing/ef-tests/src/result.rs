@@ -47,6 +47,18 @@ pub enum Error {
         #[source]
         error: serde_json::Error,
     },
+    /// A fixture directory could not be traversed.
+    #[error(transparent)]
+    WalkDir(#[from] walkdir::Error),
+    /// An engine operation failed.
+    #[error("{context}: {error}")]
+    Engine {
+        /// The operation that failed.
+        context: String,
+        /// The original error.
+        #[source]
+        error: Box<dyn std::error::Error + Send + Sync>,
+    },
     /// A database error occurred.
     #[error(transparent)]
     Database(#[from] DatabaseError),
@@ -65,6 +77,14 @@ pub enum Error {
 }
 
 impl Error {
+    /// Preserves the source of an engine setup, request, or shutdown failure.
+    pub(crate) fn engine(
+        context: impl Into<String>,
+        error: impl Into<Box<dyn std::error::Error + Send + Sync>>,
+    ) -> Self {
+        Self::Engine { context: context.into(), error: error.into() }
+    }
+
     /// Create a new [`Error::BlockProcessingFailed`] error.
     pub fn block_failed(
         block_number: u64,

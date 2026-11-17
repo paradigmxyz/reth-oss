@@ -6,6 +6,11 @@ use std::{
     process::Command,
 };
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
+mod common;
+
 /// A Paris fixture with one block on genesis, in the given format.
 fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(name)
@@ -15,7 +20,7 @@ fn fixture(name: &str) -> PathBuf {
 /// both fixtures' results come back in one array.
 fn check(command: &str, extra_args: &[&str], file: &str, file_in_dir: &str) {
     let dir = tempfile::tempdir().unwrap();
-    fs::copy(fixture(file_in_dir), dir.path().join(file_in_dir)).unwrap();
+    common::write_fixture(dir.path(), file_in_dir);
 
     let output = Command::new(env!("CARGO_BIN_EXE_ef-test-runner"))
         .arg(command)
@@ -68,8 +73,6 @@ fn a_missing_path_is_an_error() {
 /// runs.
 #[cfg(unix)]
 fn check_unreadable_file_in_dir(command: &str, extra_args: &[&str], file: &str) {
-    use std::os::unix::fs::PermissionsExt;
-
     let dir = tempfile::tempdir().unwrap();
     fs::copy(fixture(file), dir.path().join(file)).unwrap();
     let unreadable = dir.path().join("unreadable.json");
@@ -167,4 +170,49 @@ fn blocktest_runs_many_paths_within_the_open_file_limit() {
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     let results: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(results.len(), PATHS);
+}
+
+/// Traversal failures must be detected before even a readable sibling fixture runs.
+#[cfg(unix)]
+#[test]
+fn unreadable_nested_directories_stop_both_runners() {
+    for (command, fixture_name) in
+        [("blocktest", "blocktest_empty_block.json"), ("enginetest", "enginetest_empty_block.json")]
+    {
+        let dir = tempfile::tempdir().unwrap();
+        fs::copy(fixture(fixture_name), dir.path().join("readable.json")).unwrap();
+        let private = dir.path().join("private");
+        fs::create_dir(&private).unwrap();
+        fs::copy(fixture(fixture_name), private.join("hidden.json")).unwrap();
+        fs::set_permissions(&private, fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::read_dir(&private).is_ok() {
+            fs::set_permissions(&private, fs::Permissions::from_mode(0o700)).unwrap();
+            continue
+        }
+        let output = Command::new(env!("CARGO_BIN_EXE_ef-test-runner"))
+            .args([command, "--workers", "1"])
+            .arg(dir.path())
+            .output()
+            .unwrap();
+        fs::set_permissions(&private, fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(output.status.code(), Some(2));
+        assert_eq!(output.stdout, b"");
+    }
+}
+
+#[test]
+fn modern_blocktest_does_not_apply_legacy_filename_skips() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("loopMul.json");
+    fs::copy(fixture("blocktest_empty_block.json"), &path).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_ef-test-runner"))
+        .args(["blocktest", "--workers", "1", "--progress"])
+        .arg(path)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    let results: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0]["pass"], true);
+    assert_eq!(String::from_utf8(output.stderr).unwrap(), "PASS empty_block\n");
 }

@@ -1,21 +1,23 @@
 //! Command-line interface for running tests.
 use std::{
-    fs, io,
+    fs,
     path::{Path, PathBuf},
     sync::Mutex,
 };
 
 use clap::{Args, Parser, Subcommand};
 use ef_tests::{
-    cases::blockchain_test::{remove_shared_rocksdb, BlockTestOptions, BlockchainTests},
+    cases::{
+        blockchain_test::{remove_shared_rocksdb, BlockTestOptions, BlockchainTests},
+        engine_test,
+    },
     result::FixtureResult,
     suite::find_all_files_with_extension,
-    Suite,
+    Error, Suite,
 };
 use reth_node_core::{args::StorageArgs, version::version_metadata};
 use reth_provider::StorageSettings;
 
-mod engine_test;
 mod report;
 
 /// Command-line arguments for the test runner.
@@ -62,6 +64,9 @@ struct RunArgs {
     /// ran it and, for the sequential one, why.
     #[arg(long)]
     bal_report: bool,
+    /// Print each fixture's verdict and full error to stderr as soon as it finishes.
+    #[arg(long)]
+    progress: bool,
     /// How many fixture files run at once.
     #[arg(long, default_value_t = default_workers())]
     workers: usize,
@@ -110,40 +115,52 @@ fn main() {
         Command::BlockTest(BlockTestArgs { run, .. }) |
         Command::EngineTest(EngineTestArgs { run, .. }) => run,
     };
-    exit_unless_readable(&args.paths);
     if args.bal_report {
         report::init();
     }
+    let progress = args.progress;
     let results = Mutex::new(Vec::new());
-    let on_result = |result: FixtureResult| results.lock().unwrap().push(result);
-    match command {
+    let on_result = |result: FixtureResult| {
+        if result.load_failed {
+            eprintln!("error: {}", result.error);
+        } else if progress {
+            eprintln!(
+                "{} {}{}",
+                if result.pass { "PASS" } else { "FAIL" },
+                result.name,
+                if result.error.is_empty() { String::new() } else { format!(": {}", result.error) }
+            );
+        }
+        results.lock().unwrap().push(result);
+    };
+    let run_result = match command {
         Command::BlockTest(BlockTestArgs { run: args, bal_withhold }) => {
             let options = BlockTestOptions { bal_sequential: args.bal_sequential, bal_withhold };
-            let files = fixture_files(&args.paths, "blockchain_tests");
-            exit_unless_readable(&files);
+            let files = checked_fixture_files(&args.paths, "blockchain_tests");
             BlockchainTests::run_fixtures(files, options, args.workers, &on_result);
             // Every fixture ran, so nothing uses the shared RocksDB instance anymore.
             remove_shared_rocksdb();
+            Ok(())
         }
         Command::EngineTest(EngineTestArgs { run: args, storage }) => {
-            let files = fixture_files(&args.paths, "blockchain_tests_engine");
-            exit_unless_readable(&files);
+            let files = checked_fixture_files(&args.paths, "blockchain_tests_engine");
             engine_test::run_fixtures(
                 files,
                 args.bal_sequential,
                 storage_settings(storage),
                 args.workers,
                 &on_result,
-            );
+            )
         }
-    }
+    };
     // A file that could not be loaded has no fixture results: it goes to stderr only, and means
     // the run did not cover all of its input.
     let (unloaded, results): (Vec<_>, Vec<_>) =
         results.into_inner().unwrap().into_iter().partition(|result| result.load_failed);
     println!("{}", serde_json::to_string(&results).expect("results serialize"));
-    for result in &unloaded {
-        eprintln!("error: {}", result.error);
+    if let Err(err) = run_result {
+        eprintln!("error: {err}");
+        std::process::exit(2);
     }
     if !unloaded.is_empty() {
         std::process::exit(2);
@@ -153,35 +170,28 @@ fn main() {
     }
 }
 
-/// Exits 2, before any fixture runs, if one of `paths` does not exist or cannot be read.
-fn exit_unless_readable(paths: &[PathBuf]) {
+/// Resolves and opens every fixture path before execution, exiting 2 on any discovery error.
+fn checked_fixture_files(paths: &[PathBuf], format: &str) -> Vec<PathBuf> {
+    fixture_files(paths, format).unwrap_or_else(|err| {
+        eprintln!("error: cannot read fixtures: {err}");
+        std::process::exit(2)
+    })
+}
+
+/// Collects every fixture without discarding directory traversal errors.
+fn fixture_files(paths: &[PathBuf], format: &str) -> Result<Vec<PathBuf>, Error> {
+    let mut files = Vec::new();
     for path in paths {
-        if let Err(err) = check_readable(path) {
-            eprintln!("error: cannot read {}: {err}", path.display());
-            std::process::exit(2);
+        if path.is_dir() {
+            let mut found = find_all_files_with_extension(&fixtures_path(path, format), ".json")?;
+            found.sort();
+            files.extend(found);
+        } else {
+            fs::File::open(path).map_err(|error| Error::Io { path: path.clone(), error })?;
+            files.push(path.clone());
         }
     }
-}
-
-/// Returns an error if `path` does not exist or cannot be read.
-fn check_readable(path: &Path) -> io::Result<()> {
-    if path.is_dir() {
-        fs::read_dir(path).map(drop)
-    } else {
-        fs::File::open(path).map(drop)
-    }
-}
-
-/// Returns every fixture file under `paths`, in order.
-fn fixture_files(paths: &[PathBuf], format: &str) -> Vec<PathBuf> {
-    paths
-        .iter()
-        .flat_map(|path| {
-            let mut files = find_all_files_with_extension(&fixtures_path(path, format), ".json");
-            files.sort();
-            files
-        })
-        .collect()
+    Ok(files)
 }
 
 /// Returns the `format` directory of a fixtures release if `path` is one, otherwise `path`.
@@ -241,7 +251,7 @@ mod tests {
     #[test]
     fn enginetest_workers_run_files_at_the_same_time() {
         check_files_run_at_once("enginetest_empty_block.json", |files, on_result| {
-            engine_test::run_fixtures(files, false, StorageSettings::base(), 2, on_result)
+            engine_test::run_fixtures(files, false, StorageSettings::base(), 2, on_result).unwrap()
         });
     }
 

@@ -120,7 +120,7 @@ jobs:
           chmod +x runner-artifact/ef-test-runner
       - name: Run fixtures
         run: |
-          args=("$RUNNER_COMMAND" --workers 2 --bal-report "$RUNNER_TEMP/eest/$FIXTURE_FORMAT")
+          args=("$RUNNER_COMMAND" --workers 2 --bal-report --progress "$RUNNER_TEMP/eest/$FIXTURE_FORMAT")
           if [[ "$SEQUENTIAL" == true ]]; then
             args+=(--bal-sequential)
           fi
