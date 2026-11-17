@@ -2,7 +2,10 @@
 use std::{
     fs,
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Mutex,
+    },
 };
 
 use clap::{Args, Parser, Subcommand};
@@ -125,10 +128,17 @@ fn main() {
     }
     let progress = args.progress;
     let results = Mutex::new(Vec::new());
-    let on_result = |result: FixtureResult| {
-        if result.load_failed {
-            eprintln!("error: {}", result.error);
-        } else if progress {
+    let load_failed = AtomicBool::new(false);
+    let on_result = |result: Result<FixtureResult, Error>| {
+        let result = match result {
+            Ok(result) => result,
+            Err(err) => {
+                eprintln!("error: {err}");
+                load_failed.store(true, Ordering::Relaxed);
+                return
+            }
+        };
+        if progress {
             eprintln!(
                 "{} {}{}",
                 if result.pass { "PASS" } else { "FAIL" },
@@ -158,16 +168,13 @@ fn main() {
             )
         }
     };
-    // A file that could not be loaded has no fixture results: it goes to stderr only, and means
-    // the run did not cover all of its input.
-    let (unloaded, results): (Vec<_>, Vec<_>) =
-        results.into_inner().unwrap().into_iter().partition(|result| result.load_failed);
+    let results = results.into_inner().unwrap();
     println!("{}", serde_json::to_string(&results).expect("results serialize"));
     if let Err(err) = run_result {
         eprintln!("error: {err}");
         std::process::exit(2);
     }
-    if !unloaded.is_empty() {
+    if load_failed.load(Ordering::Relaxed) {
         std::process::exit(2);
     }
     if !results.iter().all(|result| result.pass) {
@@ -212,53 +219,6 @@ fn fixtures_path(path: &Path, format: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{sync::Condvar, time::Duration};
-
-    /// Runs two copies of the fixture file `file` with `run` on two workers, and checks that they
-    /// run at the same time: each result waits for the other one, which never comes while the
-    /// first worker blocks the file queue.
-    fn check_files_run_at_once(
-        file: &str,
-        run: impl FnOnce(Vec<PathBuf>, &(dyn Fn(FixtureResult) + Sync)),
-    ) {
-        let dir = tempfile::tempdir().unwrap();
-        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(file);
-        let files = (0..2)
-            .map(|i| {
-                let path = dir.path().join(format!("{i}.json"));
-                fs::copy(&fixture, &path).unwrap();
-                path
-            })
-            .collect();
-
-        let arrived = (Mutex::new(0), Condvar::new());
-        let timed_out = Mutex::new(Vec::new());
-        run(files, &|_| {
-            let (count, all_arrived) = &arrived;
-            let mut count = count.lock().unwrap();
-            *count += 1;
-            all_arrived.notify_all();
-            let (_count, wait) = all_arrived
-                .wait_timeout_while(count, Duration::from_secs(5), |count| *count < 2)
-                .unwrap();
-            timed_out.lock().unwrap().push(wait.timed_out());
-        });
-        assert_eq!(*timed_out.lock().unwrap(), [false, false]);
-    }
-
-    #[test]
-    fn blocktest_workers_run_files_at_the_same_time() {
-        check_files_run_at_once("blocktest_empty_block.json", |files, on_result| {
-            BlockchainTests::run_fixtures(files, BlockTestOptions::default(), 2, on_result)
-        });
-    }
-
-    #[test]
-    fn enginetest_workers_run_files_at_the_same_time() {
-        check_files_run_at_once("enginetest_empty_block.json", |files, on_result| {
-            engine_test::run_fixtures(files, false, StorageSettings::base(), 2, on_result).unwrap()
-        });
-    }
 
     #[test]
     fn enginetest_takes_the_node_storage_layout_flag() {

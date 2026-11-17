@@ -23,17 +23,6 @@ static POOL: LazyLock<ThreadPool> = LazyLock::new(|| {
         .expect("failed to build the test case thread pool")
 });
 
-/// Spawns a scoped worker thread with the stack size of the test case pool's threads.
-fn spawn_worker<'scope, F>(scope: &'scope std::thread::Scope<'scope, '_>, f: F)
-where
-    F: FnOnce() + Send + 'scope,
-{
-    std::thread::Builder::new()
-        .stack_size(WORKER_STACK_SIZE)
-        .spawn_scoped(scope, f)
-        .expect("failed to spawn a worker thread");
-}
-
 /// A single test case, capable of loading a JSON description of itself and running it.
 ///
 /// See <https://ethereum-tests.readthedocs.io/> for test specs.
@@ -89,10 +78,13 @@ pub(crate) fn run_workers(
     let files = Mutex::new(files.into_iter());
     std::thread::scope(|scope| {
         for _ in 0..workers {
-            spawn_worker(scope, || {
-                let mut files = std::iter::from_fn(|| files.lock().unwrap().next());
-                worker(&mut files);
-            });
+            std::thread::Builder::new()
+                .stack_size(WORKER_STACK_SIZE)
+                .spawn_scoped(scope, || {
+                    let mut files = std::iter::from_fn(|| files.lock().unwrap().next());
+                    worker(&mut files);
+                })
+                .expect("failed to spawn a fixture worker");
         }
     });
 }

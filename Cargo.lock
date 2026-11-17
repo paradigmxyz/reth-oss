@@ -3440,10 +3440,6 @@ dependencies = [
 name = "ef-test-runner"
 version = "2.11.0"
 dependencies = [
- "alloy-consensus",
- "alloy-eips",
- "alloy-primitives",
- "alloy-rlp",
  "clap",
  "ef-tests",
  "reth-engine-tree",
@@ -3452,7 +3448,6 @@ dependencies = [
  "reth-provider",
  "serde",
  "serde_json",
- "tempfile",
  "tracing",
  "tracing-subscriber",
 ]

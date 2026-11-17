@@ -82,16 +82,16 @@ const MAX_PENDING_ENGINES: usize = 8;
 const ENGINE_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Runs every fixture in the JSON `files` on `workers` threads and passes one result per
-/// fixture to `on_result` as it completes. A file that fails to load is reported as a failed
-/// result. Each fixture's datadir is created in the system temporary directory (`TMPDIR`), where
-/// a tmpfs avoids disk syncs, and its genesis is written with `storage_settings`.
+/// fixture to `on_result` as it completes. A file that fails to load is reported as an error,
+/// without creating a fixture result. Each datadir is created in the temporary directory
+/// (`TMPDIR`), where a tmpfs avoids disk syncs, and its genesis is written with `storage_settings`.
 /// Returns an error if the fixture engines cannot be cleaned up completely.
 pub fn run_fixtures(
     files: Vec<PathBuf>,
     bal_sequential: bool,
     storage_settings: StorageSettings,
     workers: usize,
-    on_result: &(dyn Fn(FixtureResult) + Sync),
+    on_result: &(dyn Fn(Result<FixtureResult, Error>) + Sync),
 ) -> Result<(), Error> {
     let tree_config = tree_config(bal_sequential);
     let datadir_root = std::env::temp_dir();
@@ -110,14 +110,14 @@ pub fn run_fixtures(
             let tests = match load_json::<BTreeMap<String, EngineTest>>(&path) {
                 Ok(tests) => tests,
                 Err(err) => {
-                    on_result(FixtureResult::load_failed(&path, err));
+                    on_result(Err(err));
                     continue
                 }
             };
             for (name, test) in tests {
                 let (result, remains) =
                     run_fixture(name, &test, &tree_config, storage_settings, &datadir_root);
-                on_result(result);
+                on_result(Ok(result));
                 if let Err(err) = cleanup.push(remains) {
                     record_error(err);
                     return

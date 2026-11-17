@@ -61,8 +61,7 @@ impl BlockchainTests {
     /// Runs every fixture in the JSON `files`, one file at a time on each of `workers` threads,
     /// and passes one result per fixture to `on_result` as it completes.
     ///
-    /// Unlike [`Suite::run`], this reports a file that fails to load as a failed result instead
-    /// of panicking.
+    /// Reports a file that fails to load as an error, without creating a fixture result.
     ///
     /// The files are not run on the rayon pool: a rayon thread waiting on block execution's own
     /// parallel work would start other files meanwhile, with no bound on how many are open.
@@ -70,7 +69,7 @@ impl BlockchainTests {
         files: Vec<PathBuf>,
         options: BlockTestOptions,
         workers: usize,
-        on_result: &(dyn Fn(FixtureResult) + Sync),
+        on_result: &(dyn Fn(Result<FixtureResult, Error>) + Sync),
     ) {
         run_workers(files, workers, |files| {
             for path in files {
@@ -81,22 +80,32 @@ impl BlockchainTests {
 
     /// Runs every fixture in the JSON file at `path` and passes one result per fixture to
     /// `on_result`.
-    fn run_file(path: &Path, options: BlockTestOptions, on_result: &dyn Fn(FixtureResult)) {
+    fn run_file(
+        path: &Path,
+        options: BlockTestOptions,
+        on_result: &dyn Fn(Result<FixtureResult, Error>),
+    ) {
         let tests = match load_json::<BTreeMap<String, BlockchainTest>>(path) {
             Ok(tests) => tests,
-            Err(err) => return on_result(FixtureResult::load_failed(path, err)),
+            Err(err) => return on_result(Err(err)),
         };
         for (name, test) in tests {
             let fork = format!("{:?}", test.network);
             let mut last_block_hash = test.genesis_block_header.hash;
             let mut rejections = Vec::new();
             let result = run_case(&name, &test, options, &mut last_block_hash, &mut rejections)
-                .and_then(|()| check_last_block_hash(&test, last_block_hash));
-            on_result(
-                FixtureResult::new(name, fork, result)
-                    .with_last_block_hash(last_block_hash)
-                    .with_rejections(rejections),
-            );
+                .and_then(|()| {
+                    if last_block_hash != test.lastblockhash {
+                        return Err(Error::Assertion(format!(
+                            "last block hash mismatch: got {last_block_hash}, expected {}",
+                            test.lastblockhash
+                        )))
+                    }
+                    Ok(())
+                });
+            on_result(Ok(FixtureResult::new(name, fork, result)
+                .with_last_block_hash(last_block_hash)
+                .with_rejections(rejections)));
         }
     }
 }
@@ -285,7 +294,10 @@ fn run_case(
         let block_number = (block_index + 1) as u64;
         let result = (|| -> Result<(), Error> {
             // Decode only the block being imported; rejected blocks do not change the chain.
-            let block = &decode_block(fixture_block, block_number)?;
+            let block = &SealedBlock::<Block>::decode(&mut fixture_block.rlp.as_ref())
+                .map_err(|err| Error::block_failed(block_number, err))?
+                .try_recover()
+                .map_err(|err| Error::block_failed(block_number, err))?;
 
             // Consensus checks before block execution
             pre_execution_checks(chain_spec.clone(), &parent, block)
@@ -312,8 +324,11 @@ fn run_case(
                 executor.enable_block_access_list_builder();
             }
             if let Some(access_list) = access_list {
-                let access_list = <BlockExecutorFor<'_, EthEvmConfig> as BlockExecutor>::convert_block_access_list(&access_list.into())
-                .map_err(|err| Error::block_failed(block_number, err))?;
+                let access_list =
+                    <BlockExecutorFor<'_, EthEvmConfig> as BlockExecutor>::convert_block_access_list(
+                        &access_list.into(),
+                    )
+                    .map_err(|err| Error::block_failed(block_number, err))?;
                 executor.set_block_access_list(Arc::new(access_list));
             }
             report_execution_path(block, delivered.is_some(), attached, options);
@@ -440,18 +455,6 @@ fn run_case(
     Ok(())
 }
 
-/// Checks that the chain ends on the fixture's `lastblockhash`, whether or not a block was
-/// rejected.
-fn check_last_block_hash(case: &BlockchainTest, last_block_hash: B256) -> Result<(), Error> {
-    if last_block_hash == case.lastblockhash {
-        return Ok(())
-    }
-    Err(Error::Assertion(format!(
-        "last block hash mismatch: got {last_block_hash}, expected {}",
-        case.lastblockhash
-    )))
-}
-
 /// The rejection of the fixture block with the given number, counted from 1, with its hash if
 /// it decodes.
 fn rejection(case: &BlockchainTest, block_number: u64, error: String) -> Rejection {
@@ -462,17 +465,6 @@ fn rejection(case: &BlockchainTest, block_number: u64, error: String) -> Rejecti
         .and_then(|block| SealedBlock::<Block>::decode(&mut block.rlp.as_ref()).ok())
         .map(|block| block.hash());
     Rejection { index, hash, error }
-}
-
-/// Decodes the fixture block with the given number, counted from 1, and recovers its senders.
-fn decode_block(
-    block: &crate::models::Block,
-    block_number: u64,
-) -> Result<RecoveredBlock<Block>, Error> {
-    SealedBlock::<Block>::decode(&mut block.rlp.as_ref())
-        .map_err(|err| Error::block_failed(block_number, err))?
-        .try_recover()
-        .map_err(|err| Error::block_failed(block_number, err))
 }
 
 /// Checks the access list delivered beside a block the way reth's sync checks one downloaded with
@@ -630,7 +622,7 @@ fn path_contains(path_str: &str, rhs: &[&str]) -> bool {
 static SHARED_ROCKSDB: Mutex<Option<(PathBuf, RocksDBProvider)>> = Mutex::new(None);
 
 /// Returns the process's shared v1 auxiliary database, opening it on first use.
-pub fn shared_rocksdb() -> RocksDBProvider {
+fn shared_rocksdb() -> RocksDBProvider {
     let mut shared = SHARED_ROCKSDB.lock().unwrap();
     let (_, rocksdb) = shared.get_or_insert_with(|| {
         let path = reth_db::test_utils::tempdir_path();
