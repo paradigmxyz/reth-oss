@@ -59,6 +59,7 @@ use serde_json::{json, Value};
 use std::{
     collections::BTreeMap,
     fs,
+    num::NonZeroUsize,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::Duration,
@@ -67,6 +68,9 @@ use tokio_stream::wrappers::UnboundedReceiverStream;
 
 /// The cross-block cache size of each fixture's engine, in MB (`--engine.cross-block-cache-size`).
 const CROSS_BLOCK_CACHE_SIZE_MB: usize = 1;
+
+/// BAL prewarm workers per fixture engine; production nodes use their normal pool size.
+const BAL_PREWARM_THREADS: NonZeroUsize = NonZeroUsize::new(2).unwrap();
 
 /// The engine tree's persistence threshold (`--engine.persistence-threshold`): more blocks than a
 /// fixture has, so the tree persists them only when it terminates.
@@ -142,7 +146,8 @@ fn tree_config(bal_sequential: bool) -> TreeConfig {
         ..Default::default()
     };
     engine_args.validate().expect("the runner's engine arguments are valid");
-    engine_args.tree_config()
+    // Fixtures have their own engine; avoid creating the production pool's 128 threads per case.
+    engine_args.tree_config().with_bal_prewarm_threads(BAL_PREWARM_THREADS)
 }
 
 /// What the engine ended with, reported beside the verdict.
@@ -906,5 +911,13 @@ mod tests {
         }
         cleanup.finish().unwrap();
         assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn fixture_engines_bound_bal_prewarm_workers_without_disabling_parallel_execution() {
+        let config = tree_config(false);
+        assert_eq!(config.bal_prewarm_threads(), Some(BAL_PREWARM_THREADS));
+        assert!(!config.disable_bal_parallel_execution());
+        assert_eq!(TreeConfig::default().bal_prewarm_threads(), None);
     }
 }

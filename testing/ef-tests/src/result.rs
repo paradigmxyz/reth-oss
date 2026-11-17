@@ -2,6 +2,7 @@
 
 use alloy_primitives::B256;
 use reth_db::DatabaseError;
+use reth_evm::{BlockExecutionError, InternalBlockExecutionError};
 use reth_provider::ProviderError;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
@@ -62,6 +63,9 @@ pub enum Error {
     /// A database error occurred.
     #[error(transparent)]
     Database(#[from] DatabaseError),
+    /// An internal execution failure, which must never count as an invalid block.
+    #[error(transparent)]
+    Execution(#[from] InternalBlockExecutionError),
     /// A test assertion failed.
     #[error("test failed: {0}")]
     Assertion(String),
@@ -83,6 +87,14 @@ impl Error {
         error: impl Into<Box<dyn std::error::Error + Send + Sync>>,
     ) -> Self {
         Self::Engine { context: context.into(), error: error.into() }
+    }
+
+    /// Separates a consensus-invalid execution from a failure of the executor or its provider.
+    pub(crate) fn block_execution_failed(block_number: u64, error: BlockExecutionError) -> Self {
+        match error {
+            BlockExecutionError::Validation(error) => Self::block_failed(block_number, error),
+            BlockExecutionError::Internal(error) => Self::Execution(error),
+        }
     }
 
     /// Create a new [`Error::BlockProcessingFailed`] error.
@@ -229,5 +241,28 @@ pub(crate) fn print_results(
     for case in failed {
         let error = case.result.as_ref().unwrap_err();
         println!("[!] Case {} failed (description: {}): {}", case.path.display(), case.desc, error);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use reth_evm::BlockValidationError;
+
+    #[test]
+    fn only_validation_errors_can_count_as_expected_invalid_blocks() {
+        let invalid =
+            Error::block_execution_failed(1, BlockValidationError::msg("invalid block").into());
+        assert!(matches!(invalid, Error::BlockProcessingFailed { block_number: 1, .. }));
+        assert_eq!(invalid.to_string(), "block 1 failed to process: invalid block");
+
+        let source = ProviderError::UnsupportedProvider;
+        let expected = source.to_string();
+        let failure = Error::block_execution_failed(1, BlockExecutionError::other(source));
+        assert!(matches!(failure, Error::Execution(_)));
+        assert_eq!(failure.to_string(), expected);
+        let provider_error = Error::from(ProviderError::UnsupportedProvider);
+        assert!(matches!(provider_error, Error::Provider(_)));
+        assert_eq!(provider_error.to_string(), format!("test failed: {expected}"));
     }
 }

@@ -17,15 +17,12 @@ use alloy_primitives::B256;
 use evm2::{
     block::{
         ethereum::{self as evm2_eth, EthBlockRules, EthPostExecutionOutput},
-        BlockExecutor as _, BlockValidationError,
+        BlockExecutor as _,
     },
     ethereum::TxEnvelope,
-    evm::{
-        Bal, BUILDER_DEPOSIT_REQUEST_ADDRESS, BUILDER_EXIT_REQUEST_ADDRESS,
-        CONSOLIDATION_REQUEST_ADDRESS, WITHDRAWAL_REQUEST_ADDRESS,
-    },
+    evm::Bal,
     interpreter::Host,
-    BaseEvmTypes, Evm, EvmTypes, SpecId,
+    BaseEvmTypes, Evm, EvmTypes,
 };
 use reth_chainspec::EthChainSpec;
 use reth_ethereum_forks::EthereumHardforks;
@@ -124,35 +121,6 @@ where
     /// Sets the Ethereum fork used for block system calls and deposit request processing.
     pub const fn set_spec_id(&mut self, spec_id: evm2::SpecId) {
         self.inner.set_spec_id(spec_id);
-    }
-
-    /// Request-producing system calls require code at their destination after transactions run.
-    fn validate_request_contracts(&mut self) -> Result<(), BlockExecutionError> {
-        let spec = self.inner.evm.spec_id();
-        if !spec.enables(SpecId::PRAGUE) {
-            return Ok(())
-        }
-        let contracts: &[_] = if spec.enables(SpecId::AMSTERDAM) {
-            &[
-                WITHDRAWAL_REQUEST_ADDRESS,
-                CONSOLIDATION_REQUEST_ADDRESS,
-                BUILDER_DEPOSIT_REQUEST_ADDRESS,
-                BUILDER_EXIT_REQUEST_ADDRESS,
-            ]
-        } else {
-            &[WITHDRAWAL_REQUEST_ADDRESS, CONSOLIDATION_REQUEST_ADDRESS]
-        };
-        for address in contracts {
-            let account =
-                self.inner.evm.read_account_info(address).map_err(BlockExecutionError::other)?;
-            if account.is_none_or(|account| account.is_empty_code_hash()) {
-                return Err(BlockValidationError::msg(format_args!(
-                    "system contract {address} has no code"
-                ))
-                .into())
-            }
-        }
-        Ok(())
     }
 }
 
@@ -254,9 +222,8 @@ where
     }
 
     fn finish_with_prepared_block_access_list(
-        mut self,
+        self,
     ) -> Result<(BlockExecutionOutput<Self::Receipt>, Option<Bal>), BlockExecutionError> {
-        self.validate_request_contracts()?;
         let (output, bal) = self.inner.finish_with_block_access_list()?;
         Ok((output.into(), bal))
     }
@@ -493,7 +460,6 @@ where
     }
 
     fn finish_segment(&mut self) -> Result<FinishedBigBlockSegment, BlockExecutionError> {
-        self.inner.validate_request_contracts()?;
         let EthPostExecutionOutput { requests, gas_used, blob_gas_used } =
             self.inner.inner.apply_post_execution_changes(self.segment_receipt_start)?;
         Ok(FinishedBigBlockSegment { requests, gas_used, blob_gas_used })
@@ -704,9 +670,13 @@ mod tests {
         block::ethereum::final_block_gas_used,
         bytecode::Bytecode,
         env::BlockEnv,
-        evm::{AccountInfo, Database, Db},
+        evm::{
+            AccountInfo, Database, Db, BUILDER_DEPOSIT_REQUEST_ADDRESS,
+            BUILDER_EXIT_REQUEST_ADDRESS, CONSOLIDATION_REQUEST_ADDRESS,
+            WITHDRAWAL_REQUEST_ADDRESS,
+        },
         interpreter::Word,
-        BaseEvmTypes,
+        BaseEvmTypes, SpecId,
     };
     use reth_chainspec::{Chain, ChainSpecBuilder, EthereumHardfork, ForkCondition};
     use reth_ethereum_primitives::TransactionSigned;

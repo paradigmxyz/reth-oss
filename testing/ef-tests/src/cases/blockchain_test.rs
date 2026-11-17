@@ -31,9 +31,9 @@ use reth_provider::{
     providers::{RocksDBBuilder, RocksDBProvider, StaticFileProviderBuilder},
     test_utils::MockNodeTypesWithDB,
     BlockWriter, DatabaseProviderFactory, ExecutionOutcome, HashedPostStateProvider, HistoryWriter,
-    OriginalValuesKnown, ProviderFactory, StateProvider, StateWriteConfig, StateWriter,
-    StaticFileProviderFactory, StaticFileSegment, StaticFileWriter, StorageSettingsCache,
-    TrieWriter,
+    OriginalValuesKnown, ProviderError, ProviderFactory, StateProvider, StateWriteConfig,
+    StateWriter, StaticFileProviderFactory, StaticFileSegment, StaticFileWriter,
+    StorageSettingsCache, TrieWriter,
 };
 use reth_tasks::Runtime;
 use reth_trie::StateRoot;
@@ -256,33 +256,29 @@ fn run_case(
     .try_recover()
     .map_err(|err| Error::block_failed(0, err))?;
 
-    provider.insert_block(&genesis_block).map_err(|err| Error::block_failed(0, err))?;
+    provider.insert_block(&genesis_block)?;
     *last_block_hash = genesis_block.hash();
 
     // Increment block number for receipts static file
     provider
         .static_file_provider()
         .latest_writer(StaticFileSegment::Receipts)
-        .and_then(|mut writer| writer.increment_block(0))
-        .map_err(|err| Error::block_failed(0, err))?;
+        .and_then(|mut writer| writer.increment_block(0))?;
 
     let genesis_state = case.pre.clone().into_genesis_state();
-    insert_genesis_state(&provider, genesis_state.iter())
-        .map_err(|err| Error::block_failed(0, err))?;
-    insert_genesis_hashes(&provider, genesis_state.iter())
-        .map_err(|err| Error::block_failed(0, err))?;
-    insert_genesis_history(&provider, genesis_state.iter())
-        .map_err(|err| Error::block_failed(0, err))?;
+    insert_genesis_state(&provider, genesis_state.iter())?;
+    insert_genesis_hashes(&provider, genesis_state.iter())?;
+    insert_genesis_history(&provider, genesis_state.iter())?;
 
     // Build the genesis trie, as `init_genesis` does, so block 1 reads stored nodes.
     let (_, trie_updates) = reth_trie_db::with_adapter!(provider, |A| {
         StateRoot::<reth_trie_db::DatabaseTrieCursorFactory<_, A>, _>::from_tx(provider.tx_ref())
             .root_with_updates()
     })
-    .map_err(|err| Error::block_failed(0, err))?;
-    provider.write_trie_updates(trie_updates).map_err(|err| Error::block_failed(0, err))?;
+    .map_err(ProviderError::other)?;
+    provider.write_trie_updates(trie_updates)?;
     // BLOCKHASH reads static files, including genesis during execution of block 1.
-    provider.static_file_provider().commit().map_err(|err| Error::block_failed(0, err))?;
+    provider.static_file_provider().commit()?;
 
     let executor_provider = EthEvmConfig::ethereum(chain_spec.clone());
     let mut parent = genesis_block;
@@ -334,15 +330,15 @@ fn run_case(
             report_execution_path(block, delivered.is_some(), attached, options);
             executor
                 .apply_pre_execution_changes()
-                .map_err(|err| Error::block_failed(block_number, err))?;
+                .map_err(|err| Error::block_execution_failed(block_number, err))?;
             for transaction in block.transactions_recovered() {
                 executor
                     .execute_transaction(transaction)
-                    .map_err(|err| Error::block_failed(block_number, err))?;
+                    .map_err(|err| Error::block_execution_failed(block_number, err))?;
             }
             let (output, built_bal) = executor
                 .finish_with_block_access_list()
-                .map_err(|err| Error::block_failed(block_number, err))?;
+                .map_err(|err| Error::block_execution_failed(block_number, err))?;
             let block_access_list_hash = built_bal
                 .map(|bal| {
                     let bal = Bal::from(bal);
@@ -363,9 +359,7 @@ fn run_case(
             .map_err(|err| Error::block_failed(block_number, err))?;
 
             // Compute and check the post state root
-            let hashed_state = state_provider
-                .hashed_post_state(&output.state)
-                .map_err(|err| Error::block_failed(block_number, err))?;
+            let hashed_state = state_provider.hashed_post_state(&output.state)?;
             let sorted = hashed_state.clone_into_sorted();
             let (computed_state_root, trie_updates) = reth_trie_db::with_adapter!(provider, |A| {
                 StateRoot::<reth_trie_db::DatabaseTrieCursorFactory<_, A>, _>::overlay_root_with_updates(
@@ -373,7 +367,7 @@ fn run_case(
                     &sorted,
                 )
             })
-            .map_err(|err| Error::block_failed(block_number, err))?;
+            .map_err(ProviderError::other)?;
             if computed_state_root != block.state_root {
                 return Err(Error::block_failed(
                     block_number,
@@ -385,31 +379,20 @@ fn run_case(
 
             // Publish a block only after all validation succeeds, so a rejected block leaves no
             // writes.
-            provider.insert_block(block).map_err(|err| Error::block_failed(block_number, err))?;
-            provider
-                .static_file_provider()
-                .commit()
-                .map_err(|err| Error::block_failed(block_number, err))?;
+            provider.insert_block(block)?;
+            provider.static_file_provider().commit()?;
 
             // Commit the post state/state diff to the database
-            provider
-                .write_state(
-                    &ExecutionOutcome::single(block.number, output),
-                    OriginalValuesKnown::Yes,
-                    StateWriteConfig::default(),
-                )
-                .map_err(|err| Error::block_failed(block_number, err))?;
+            provider.write_state(
+                &ExecutionOutcome::single(block.number, output),
+                OriginalValuesKnown::Yes,
+                StateWriteConfig::default(),
+            )?;
 
-            provider
-                .write_hashed_state(&hashed_state.into_sorted())
-                .map_err(|err| Error::block_failed(block_number, err))?;
+            provider.write_hashed_state(&hashed_state.into_sorted())?;
             // Persist the trie so later blocks read stored nodes.
-            provider
-                .write_trie_updates(trie_updates)
-                .map_err(|err| Error::block_failed(block_number, err))?;
-            provider
-                .update_history_indices(block.number..=block.number)
-                .map_err(|err| Error::block_failed(block_number, err))?;
+            provider.write_trie_updates(trie_updates)?;
+            provider.update_history_indices(block.number..=block.number)?;
 
             // Since there were no errors, update the parent block
             *last_block_hash = block.hash();
