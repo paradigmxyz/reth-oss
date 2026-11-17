@@ -38,7 +38,7 @@ use reth_provider::{
 };
 use reth_stages_api::ControlFlow;
 use reth_storage_overlay::OverlayManager;
-use reth_tasks::{spawn_os_thread, utils::increase_thread_priority};
+use reth_tasks::{spawn_os_thread_with_builder, utils::increase_thread_priority};
 use reth_trie::{HashedPostState, KeccakKeyHasher, SortedTrieData};
 use state::TreeState;
 use std::{
@@ -91,6 +91,9 @@ pub use txpool_prewarm::{
 pub use types::{ExecutionEnv, ValidationOutcome, ValidationOutput};
 
 pub mod state;
+
+/// Native stack needed by evm2's recursive call frames at the EVM call-depth limit.
+const ENGINE_STACK_SIZE: usize = 8 * 1024 * 1024;
 
 /// The minimum number of blocks to retain in the changeset cache after eviction.
 ///
@@ -469,10 +472,14 @@ where
             runtime,
         );
         let incoming = task.incoming_tx.clone();
-        spawn_os_thread("engine", || {
-            increase_thread_priority();
-            task.run()
-        });
+        // evm2 uses native recursion for EVM calls, including valid 1024-deep call chains.
+        spawn_os_thread_with_builder(
+            std::thread::Builder::new().name("engine".to_string()).stack_size(ENGINE_STACK_SIZE),
+            || {
+                increase_thread_priority();
+                task.run()
+            },
+        );
         (incoming, outgoing)
     }
 
