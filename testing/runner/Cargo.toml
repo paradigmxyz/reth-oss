@@ -9,8 +9,19 @@ repository.workspace = true
 exclude.workspace = true
 
 [dependencies]
+reth-engine-tree.workspace = true
+reth-node-core.workspace = true
+reth-provider.workspace = true
+
 clap = { workspace = true, features = ["derive"] }
 ef-tests.path = "../ef-tests"
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+tracing-subscriber = { workspace = true, features = ["registry", "std"] }
+tracing.workspace = true
+
+[build-dependencies]
+reth-node-version-build.workspace = true
 
 [lints]
 workspace = true
