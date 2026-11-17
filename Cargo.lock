@@ -3448,6 +3448,7 @@ dependencies = [
  "ef-tests",
  "reth-engine-tree",
  "reth-node-core",
+ "reth-node-version-build",
  "reth-provider",
  "serde",
  "serde_json",

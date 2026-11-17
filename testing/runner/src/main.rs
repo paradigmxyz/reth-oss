@@ -15,7 +15,10 @@ use ef_tests::{
     suite::find_all_files_with_extension,
     Error, Suite,
 };
-use reth_node_core::{args::StorageArgs, version::version_metadata};
+use reth_node_core::{
+    args::StorageArgs,
+    version::{try_init_version_metadata, version_metadata},
+};
 use reth_provider::StorageSettings;
 
 mod report;
@@ -104,6 +107,8 @@ fn default_workers() -> usize {
 }
 
 fn main() {
+    try_init_version_metadata(reth_node_core::reth_version_metadata!())
+        .expect("runner version metadata is initialized once before parsing arguments");
     let cmd = TestRunnerCommand::parse();
     let Some(command) = cmd.command else {
         let suite_path = cmd.suite_path.expect("a suite path or a command is required");

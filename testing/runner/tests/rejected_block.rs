@@ -183,8 +183,8 @@ fn blocktest_imports_after_expected_rejection() {
     }
 }
 
-/// EEST tests/frontier/opcodes/test_blockhash.py, tests@v21.0.2, Berlin/no_blocks.
-/// Its first block checks BLOCKHASH(0) against the fixture's genesis hash.
+/// EEST `tests/frontier/opcodes/test_blockhash.py`, `tests@v21.0.2`, `Berlin/no_blocks`.
+/// Its first block checks `BLOCKHASH(0)` against the fixture's genesis hash.
 #[test]
 fn blocktest_reads_genesis_blockhash_during_the_first_block() {
     let result = run(&["blocktest"], &fixture("blocktest_genesis_blockhash.json"));

@@ -353,12 +353,12 @@ fn run_case(
                 .map_err(|err| Error::block_failed(block_number, err))?;
             let sorted = hashed_state.clone_into_sorted();
             let (computed_state_root, trie_updates) = reth_trie_db::with_adapter!(provider, |A| {
-            StateRoot::<reth_trie_db::DatabaseTrieCursorFactory<_, A>, _>::overlay_root_with_updates(
-                provider.tx_ref(),
-                &sorted,
-            )
-        })
-        .map_err(|err| Error::block_failed(block_number, err))?;
+                StateRoot::<reth_trie_db::DatabaseTrieCursorFactory<_, A>, _>::overlay_root_with_updates(
+                    provider.tx_ref(),
+                    &sorted,
+                )
+            })
+            .map_err(|err| Error::block_failed(block_number, err))?;
             if computed_state_root != block.state_root {
                 return Err(Error::block_failed(
                     block_number,
