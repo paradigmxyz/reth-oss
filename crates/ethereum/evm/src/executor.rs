@@ -17,12 +17,15 @@ use alloy_primitives::B256;
 use evm2::{
     block::{
         ethereum::{self as evm2_eth, EthBlockRules, EthPostExecutionOutput},
-        BlockExecutor as _,
+        BlockExecutor as _, BlockValidationError,
     },
     ethereum::TxEnvelope,
-    evm::Bal,
+    evm::{
+        Bal, BUILDER_DEPOSIT_REQUEST_ADDRESS, BUILDER_EXIT_REQUEST_ADDRESS,
+        CONSOLIDATION_REQUEST_ADDRESS, WITHDRAWAL_REQUEST_ADDRESS,
+    },
     interpreter::Host,
-    BaseEvmTypes, Evm, EvmTypes,
+    BaseEvmTypes, Evm, EvmTypes, SpecId,
 };
 use reth_chainspec::EthChainSpec;
 use reth_ethereum_forks::EthereumHardforks;
@@ -121,6 +124,35 @@ where
     /// Sets the Ethereum fork used for block system calls and deposit request processing.
     pub const fn set_spec_id(&mut self, spec_id: evm2::SpecId) {
         self.inner.set_spec_id(spec_id);
+    }
+
+    /// Request-producing system calls require code at their destination after transactions run.
+    fn validate_request_contracts(&mut self) -> Result<(), BlockExecutionError> {
+        let spec = self.inner.evm.spec_id();
+        if !spec.enables(SpecId::PRAGUE) {
+            return Ok(())
+        }
+        let contracts: &[_] = if spec.enables(SpecId::AMSTERDAM) {
+            &[
+                WITHDRAWAL_REQUEST_ADDRESS,
+                CONSOLIDATION_REQUEST_ADDRESS,
+                BUILDER_DEPOSIT_REQUEST_ADDRESS,
+                BUILDER_EXIT_REQUEST_ADDRESS,
+            ]
+        } else {
+            &[WITHDRAWAL_REQUEST_ADDRESS, CONSOLIDATION_REQUEST_ADDRESS]
+        };
+        for address in contracts {
+            let account =
+                self.inner.evm.read_account_info(address).map_err(BlockExecutionError::other)?;
+            if account.is_none_or(|account| account.is_empty_code_hash()) {
+                return Err(BlockValidationError::msg(format_args!(
+                    "system contract {address} has no code"
+                ))
+                .into())
+            }
+        }
+        Ok(())
     }
 }
 
@@ -222,8 +254,9 @@ where
     }
 
     fn finish_with_prepared_block_access_list(
-        self,
+        mut self,
     ) -> Result<(BlockExecutionOutput<Self::Receipt>, Option<Bal>), BlockExecutionError> {
+        self.validate_request_contracts()?;
         let (output, bal) = self.inner.finish_with_block_access_list()?;
         Ok((output.into(), bal))
     }
@@ -460,6 +493,7 @@ where
     }
 
     fn finish_segment(&mut self) -> Result<FinishedBigBlockSegment, BlockExecutionError> {
+        self.inner.validate_request_contracts()?;
         let EthPostExecutionOutput { requests, gas_used, blob_gas_used } =
             self.inner.inner.apply_post_execution_changes(self.segment_receipt_start)?;
         Ok(FinishedBigBlockSegment { requests, gas_used, blob_gas_used })
@@ -670,13 +704,9 @@ mod tests {
         block::ethereum::final_block_gas_used,
         bytecode::Bytecode,
         env::BlockEnv,
-        evm::{
-            AccountInfo, Database, Db, BUILDER_DEPOSIT_REQUEST_ADDRESS,
-            BUILDER_EXIT_REQUEST_ADDRESS, CONSOLIDATION_REQUEST_ADDRESS,
-            WITHDRAWAL_REQUEST_ADDRESS,
-        },
+        evm::{AccountInfo, Database, Db},
         interpreter::Word,
-        BaseEvmTypes, SpecId,
+        BaseEvmTypes,
     };
     use reth_chainspec::{Chain, ChainSpecBuilder, EthereumHardfork, ForkCondition};
     use reth_ethereum_primitives::TransactionSigned;
@@ -1176,5 +1206,62 @@ mod tests {
         executor.execute_transaction(blob_tx(0)).expect("seven blobs fit the first segment cap");
         let err = executor.execute_transaction(blob_tx(1)).unwrap_err();
         assert!(err.to_string().contains("too many blobs: have 7, max 6"), "{err}");
+    }
+
+    #[test]
+    fn request_contracts_require_code_after_prague() {
+        for spec in [SpecId::CANCUN, SpecId::PRAGUE, SpecId::AMSTERDAM] {
+            let contracts: &[_] = if spec == SpecId::AMSTERDAM {
+                &[
+                    WITHDRAWAL_REQUEST_ADDRESS,
+                    CONSOLIDATION_REQUEST_ADDRESS,
+                    BUILDER_DEPOSIT_REQUEST_ADDRESS,
+                    BUILDER_EXIT_REQUEST_ADDRESS,
+                ]
+            } else {
+                &[WITHDRAWAL_REQUEST_ADDRESS, CONSOLIDATION_REQUEST_ADDRESS]
+            };
+            for address in contracts {
+                for absent in [true, false] {
+                    let mut database = TestDatabase::default();
+                    insert_request_contracts(&mut database);
+                    if absent {
+                        database.accounts.remove(address);
+                    } else {
+                        database
+                            .accounts
+                            .insert(*address, AccountInfo::default().with_balance(U256::from(1)));
+                    }
+                    let factory = super::super::factory::EthBlockExecutorFactory::new(Arc::new(
+                        ChainSpecBuilder::mainnet().amsterdam_activated().build(),
+                    ));
+                    let env = EthEvmEnv::new(
+                        spec,
+                        BlockEnv::<BaseEvmTypes> {
+                            number: U256::from(1),
+                            gas_limit: U256::from(30_000_000),
+                            ..Default::default()
+                        },
+                        1,
+                    );
+                    let evm = factory.evm_with_env(Db::new(database), env);
+                    let mut ctx = segment(0, 1, B256::ZERO).ctx;
+                    ctx.parent_beacon_block_root = Some(B256::ZERO);
+                    let mut executor = factory.create_executor(evm, ctx);
+                    executor.apply_pre_execution_changes().unwrap();
+                    let result = executor.finish_with_block_access_list();
+                    if spec == SpecId::CANCUN {
+                        assert!(result.is_ok());
+                    } else {
+                        let error = result.unwrap_err();
+                        assert!(error.as_validation().is_some());
+                        assert_eq!(
+                            error.to_string(),
+                            format!("system contract {address} has no code")
+                        );
+                    }
+                }
+            }
+        }
     }
 }
