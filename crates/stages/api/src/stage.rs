@@ -2,6 +2,7 @@ use crate::{error::StageError, StageCheckpoint, StageId};
 use alloy_primitives::{BlockNumber, TxNumber};
 use reth_provider::{BlockReader, ProviderError, StaticFileProviderFactory, StaticFileSegment};
 use std::{
+    any::Any,
     cmp::{max, min},
     future::{poll_fn, Future},
     ops::{Range, RangeInclusive},
@@ -239,6 +240,12 @@ pub struct UnwindOutput {
 /// Stages receive [`DBProvider`](reth_provider::DBProvider).
 #[auto_impl::auto_impl(Box)]
 pub trait Stage<Provider>: Send {
+    /// Exposes concrete stage configuration for wrappers that preserve an existing stage.
+    /// The default returns `None`; stages supporting typed configuration access return `self`.
+    fn as_any(&self) -> Option<&dyn Any> {
+        None
+    }
+
     /// Get the ID of the stage.
     ///
     /// Stage IDs must be unique.
@@ -346,6 +353,7 @@ mod tests {
         StaticFileProviderBuilder, StaticFileProviderFactory, StaticFileSegment,
     };
     use reth_stages_types::StageCheckpoint;
+    use reth_storage_overlay::OverlayManager;
     use reth_testing_utils::generators::{self, random_signed_tx};
 
     use crate::ExecInput;
@@ -361,6 +369,7 @@ mod tests {
                 .build()
                 .unwrap(),
             RocksDBProvider::builder(create_test_rocksdb_dir().0.keep()).build().unwrap(),
+            OverlayManager::default(),
             reth_tasks::Runtime::test(),
         )
         .unwrap();

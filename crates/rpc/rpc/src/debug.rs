@@ -58,6 +58,8 @@ use alloy_rpc_types_trace::geth::{
 };
 #[cfg(feature = "js-tracer")]
 use evm2_inspectors::tracing::js::JsInspectorInterrupt;
+#[cfg(feature = "js-tracer")]
+use jiff::fmt::friendly::SpanParser;
 
 /// `debug` API implementation.
 ///
@@ -1610,9 +1612,13 @@ impl JsTraceInterrupt {
             runs_js_tracer(tracer, &opts.tracer_config)
         {
             let timeout = match &opts.timeout {
-                Some(timeout) => humantime::parse_duration(timeout).map_err(|err| {
-                    EthApiError::InvalidParams(format!("invalid tracer timeout {timeout:?}: {err}"))
-                })?,
+                Some(timeout) => {
+                    SpanParser::new().parse_unsigned_duration(timeout).map_err(|err| {
+                        EthApiError::InvalidParams(format!(
+                            "invalid tracer timeout {timeout:?}: {err}"
+                        ))
+                    })?
+                }
                 None => DEFAULT_JS_TRACER_TIMEOUT,
             };
             return Ok(Self { js: Some((JsInspectorInterrupt::new(), timeout)) })
@@ -1625,7 +1631,9 @@ impl JsTraceInterrupt {
         not(feature = "js-tracer"),
         expect(clippy::missing_const_for_fn, reason = "only JS tracers can be interrupted")
     )]
-    fn attach(&self, mut inspector: DebugInspector) -> DebugInspector {
+    fn attach(&self, inspector: DebugInspector) -> DebugInspector {
+        #[cfg(feature = "js-tracer")]
+        let mut inspector = inspector;
         #[cfg(feature = "js-tracer")]
         if let Some((interrupt, _)) = &self.js {
             inspector.set_js_interrupt(interrupt);
