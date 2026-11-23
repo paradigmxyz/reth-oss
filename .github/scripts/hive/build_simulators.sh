@@ -1,12 +1,8 @@
 #!/usr/bin/env bash
 set -eo pipefail
 
-# EELS release fixtures cover Osaka, BPO and Amsterdam.
-eels_tag="v21.0.3"
-# Pin all consume simulators to the tests@v21.0.3 release images.
-enginex_tag="${eels_tag}@sha256:e78b6d347db7080ae69c2512d829ebad59dfd8cfd993339a1df384a01f1607c4"
-wirex_tag="${eels_tag}@sha256:98fb625ac3385629364ab2bc3c187ccdf4c38c1027ddc4cb34101c4230ba11ac"
-reorg_tag="${eels_tag}@sha256:3bad340f1f8d24809beb93b8ba06a89ca854b604d7af136ed3fec9939a0af010"
+# Follow the latest mainnet EELS fixtures and framework.
+eels_tag="latest"
 
 # Create the hive_assets directory
 mkdir hive_assets/
@@ -19,16 +15,16 @@ go build .
 # Run each hive command in the background for each simulator and wait
 echo "Building images"
 ./hive -client reth --sim "ethereum/eels/consume-enginex" \
-    --sim.buildarg tag="${enginex_tag}" \
+    --docker.pull --sim.buildarg tag="${eels_tag}" \
     --sim.timelimit 1s || true &
 ./hive -client reth --sim "ethereum/eels/consume-wirex" \
-    --sim.buildarg tag="${wirex_tag}" \
+    --docker.pull --sim.buildarg tag="${eels_tag}" \
     --sim.timelimit 1s || true &
 ./hive -client reth --sim "ethereum/eels/consume-reorg" \
-    --sim.buildarg tag="${reorg_tag}" \
+    --docker.pull --sim.buildarg tag="${eels_tag}" \
     --sim.timelimit 1s || true &
 ./hive -client reth --sim "ethereum/eels/execute-blobs" \
-    --sim.buildarg tag="${eels_tag}" \
+    --docker.pull --sim.buildarg tag="${eels_tag}" \
     --sim.buildarg fork=Amsterdam \
     --sim.timelimit 1s || true &
 ./hive -client reth --sim "ethereum/engine" -sim.timelimit 1s || true &
