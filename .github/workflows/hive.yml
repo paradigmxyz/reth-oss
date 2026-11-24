@@ -3,6 +3,7 @@
 name: hive
 
 on:
+  pull_request:
   workflow_dispatch:
   schedule:
     - cron: "0 0 * * *"
@@ -29,9 +30,9 @@ jobs:
       DEPOT_TOKEN: ${{ secrets.DEPOT_TOKEN }}
 
   prepare-hive:
-    if: github.repository == 'paradigmxyz/reth'
+    if: (github.repository == 'paradigmxyz/reth' || github.repository == 'paradigmxyz/reth-oss')
     timeout-minutes: 45
-    runs-on: ${{ github.repository == 'paradigmxyz/reth' && 'depot-ubuntu-latest-16' || 'ubuntu-latest' }}
+    runs-on: ${{ (github.repository == 'paradigmxyz/reth' || github.repository == 'paradigmxyz/reth-oss') && 'depot-ubuntu-latest-16' || 'ubuntu-latest' }}
     permissions:
       id-token: write
       contents: read
@@ -59,12 +60,23 @@ jobs:
           go-version: "1.26.10"
       - run: go version
 
+      - name: Get EELS image digests
+        id: eels-images
+        run: |
+          for simulator in consume-enginex consume-wirex consume-reorg execute-blobs; do
+            docker buildx imagetools inspect \
+              --format '{{.Manifest.Digest}}' \
+              "ghcr.io/ethereum/execution-specs/hive/$simulator:latest"
+          done > "$RUNNER_TEMP/eels-image-digests"
+          cat "$RUNNER_TEMP/eels-image-digests"
+          echo "hash=$(sha256sum "$RUNNER_TEMP/eels-image-digests" | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+
       - name: Restore hive assets cache
         id: cache-hive
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ./hive_assets
-          key: hive-assets-amsterdam-${{ steps.hive-commit.outputs.hash }}-${{ hashFiles('.github/scripts/hive/build_simulators.sh', '.github/scripts/hive/no_sim_build.diff') }}
+          key: hive-assets-amsterdam-${{ steps.hive-commit.outputs.hash }}-${{ steps.eels-images.outputs.hash }}-${{ hashFiles('.github/scripts/hive/build_simulators.sh', '.github/scripts/hive/no_sim_build.diff') }}
 
       - name: Build hive assets
         if: steps.cache-hive.outputs.cache-hit != 'true'
@@ -225,6 +237,10 @@ jobs:
           - sim: ethereum/eels/consume-wirex
             limit: .*tests/tangerine_whistle.*
 
+          # consume-reorg
+          - sim: ethereum/eels/consume-reorg
+            limit: .*tests/reorg.*
+
           # execute-blobs
           - sim: ethereum/eels/execute-blobs
             limit: .*tests/amsterdam.*
@@ -235,7 +251,7 @@ jobs:
       - prepare-hive
     name: Hive-Amsterdam / ${{ matrix.scenario.sim }}${{ matrix.scenario.limit && format(' - {0}', matrix.scenario.limit) }}
     # Use larger runners for eels tests to avoid OOM runner crashes
-    runs-on: ${{ github.repository == 'paradigmxyz/reth' && (contains(matrix.scenario.sim, 'eels') && 'depot-ubuntu-latest-8' || 'depot-ubuntu-latest-4') || 'ubuntu-latest' }}
+    runs-on: ${{ (github.repository == 'paradigmxyz/reth' || github.repository == 'paradigmxyz/reth-oss') && (contains(matrix.scenario.sim, 'eels') && 'depot-ubuntu-latest-8' || 'depot-ubuntu-latest-4') || 'ubuntu-latest' }}
     permissions:
       id-token: write
       contents: read
