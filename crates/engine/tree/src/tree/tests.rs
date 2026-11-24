@@ -2104,7 +2104,7 @@ async fn test_fcu_rewinds_and_updates_markers_with_or_without_payload_attributes
         assert_eq!(canonical.get_safe_num_hash(), Some(ancestor.num_hash()));
         assert_eq!(canonical.get_finalized_num_hash(), Some(finalized.num_hash()));
         let notification = notifications.try_recv().unwrap();
-        assert_eq!(notification.tip().hash(), ancestor.hash());
+        assert!(notification.tip_checked().is_none());
         assert!(notification.committed().is_empty());
         let reverted = notification.reverted().unwrap();
         assert_eq!(reverted.len(), 1);

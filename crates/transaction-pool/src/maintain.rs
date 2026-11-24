@@ -26,7 +26,9 @@ use reth_fs_util::FsPathError;
 use reth_primitives_traits::{
     transaction::signed::SignedTransaction, NodePrimitives, SealedHeader,
 };
-use reth_storage_api::{errors::provider::ProviderError, BlockReaderIdExt, StateProviderFactory};
+use reth_storage_api::{
+    errors::provider::ProviderError, BlockReaderIdExt, StateProviderFactory, TransactionVariant,
+};
 use reth_tasks::Runtime;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -105,7 +107,7 @@ pub fn maintain_transaction_pool_future<N, Client, P, St>(
 where
     N: NodePrimitives,
     Client: StateProviderFactory
-        + BlockReaderIdExt<Header = N::BlockHeader>
+        + BlockReaderIdExt<Block = N::Block, Header = N::BlockHeader>
         + ChainSpecProvider<ChainSpec: EthChainSpec<Header = N::BlockHeader> + EthereumHardforks>
         + Clone
         + 'static,
@@ -131,7 +133,7 @@ pub async fn maintain_transaction_pool<N, Client, P, St>(
 ) where
     N: NodePrimitives,
     Client: StateProviderFactory
-        + BlockReaderIdExt<Header = N::BlockHeader>
+        + BlockReaderIdExt<Block = N::Block, Header = N::BlockHeader>
         + ChainSpecProvider<ChainSpec: EthChainSpec<Header = N::BlockHeader> + EthereumHardforks>
         + Clone
         + 'static,
@@ -326,17 +328,29 @@ pub async fn maintain_transaction_pool<N, Client, P, St>(
         // handle the new block or reorg
         let Some(event) = event else { continue };
         match &event {
-            CanonStateNotification::Reorg { old, .. } |
-            CanonStateNotification::Revert { old, .. } => {
-                let Some(new_tip) = event.tip_checked() else {
-                    debug!(target: "txpool", "canonical reorg notification has no tip");
-                    maintained_state = MaintainedPoolState::Drifted;
-                    continue
-                };
-                let new = event.committed();
+            CanonStateNotification::Reorg { old, new } => {
                 let (old_blocks, old_state) = old.inner();
                 let (new_blocks, new_state) = new.inner();
                 let fork_hash = old_blocks.first().parent_hash();
+                let rewind_tip;
+                let new_tip = if let Some(tip) = event.tip_checked() {
+                    tip
+                } else {
+                    // The parent of the removed suffix is the retained tip, even if the
+                    // provider's latest head has advanced again before this event is consumed.
+                    rewind_tip = match client
+                        .recovered_block(fork_hash.into(), TransactionVariant::WithHash)
+                        .and_then(|tip| tip.ok_or(ProviderError::BlockHashNotFound(fork_hash)))
+                    {
+                        Ok(tip) => tip,
+                        Err(err) => {
+                            error!(target: "txpool", ?fork_hash, %err, "Failed to load rewind tip block");
+                            maintained_state = MaintainedPoolState::Drifted;
+                            continue
+                        }
+                    };
+                    &rewind_tip
+                };
                 let new_parent_hash =
                     if new.is_empty() { fork_hash } else { new_blocks.first().parent_hash() };
 
@@ -1017,64 +1031,65 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rewind_reinserts_transactions_with_tip_from_notification() {
-        let provider = MockEthProvider::default().with_genesis_block();
-        let pool = Pool::new(
-            OkValidator::<EthPooledTransaction>::default(),
-            CoinbaseTipOrdering::default(),
-            InMemoryBlobStore::default(),
-            Default::default(),
-        );
-
-        let tip = RecoveredBlock::<Block>::new_sealed(
-            SealedBlock::from_sealed_parts(
-                SealedHeader::new(
-                    Header {
-                        number: 1,
-                        gas_limit: ETHEREUM_BLOCK_GAS_LIMIT_30M,
-                        ..Default::default()
-                    },
-                    B256::random(),
-                ),
+    async fn rewind_reinserts_transactions_at_retained_tip() {
+        for tip_available in [true, false] {
+            let provider = MockEthProvider::default().with_genesis_block();
+            let pool = Pool::new(
+                OkValidator::<EthPooledTransaction>::default(),
+                CoinbaseTipOrdering::default(),
+                InMemoryBlobStore::default(),
                 Default::default(),
-            ),
-            Vec::new(),
-        );
-        let tx = TransactionBuilder::default()
-            .gas_limit(21_000)
-            .max_fee_per_gas(1_000_000_000)
-            .to(Address::ZERO)
-            .into_eip1559();
-        let hash = *tx.tx_hash();
-        let (tx, signer) = tx.try_into_recovered().unwrap().into_parts();
-        let reverted = RecoveredBlock::<Block>::new_sealed(
-            SealedBlock::from_sealed_parts(
-                SealedHeader::new(
-                    Header { number: 2, parent_hash: tip.hash(), ..Default::default() },
-                    B256::random(),
-                ),
-                BlockBody { transactions: vec![tx], ..Default::default() },
-            ),
-            vec![signer],
-        );
+            );
 
-        // The provider only has genesis. The notification is the source of the rewind tip.
-        let tip_hash = tip.hash();
-        let notification: CanonStateNotification = CanonStateNotification::Revert {
-            tip: Arc::new(tip),
-            old: Arc::new(Chain::new(vec![reverted], Default::default(), Default::default())),
-        };
-        let maintain = maintain_transaction_pool(
-            provider,
-            pool.clone(),
-            futures::stream::iter([notification]),
-            Runtime::test(),
-            MaintainPoolConfig::default(),
-        );
-        time::timeout(Duration::from_secs(10), maintain).await.unwrap();
+            let tip = SealedBlock::seal_slow(Block {
+                header: Header {
+                    number: 1,
+                    gas_limit: ETHEREUM_BLOCK_GAS_LIMIT_30M,
+                    ..Default::default()
+                },
+                body: Default::default(),
+            })
+            .try_recover()
+            .unwrap();
+            let tx = TransactionBuilder::default()
+                .gas_limit(21_000)
+                .max_fee_per_gas(1_000_000_000)
+                .to(Address::ZERO)
+                .into_eip1559();
+            let hash = *tx.tx_hash();
+            let reverted = SealedBlock::seal_slow(Block {
+                header: Header { number: 2, parent_hash: tip.hash(), ..Default::default() },
+                body: BlockBody { transactions: vec![tx], ..Default::default() },
+            })
+            .try_recover()
+            .unwrap();
 
-        assert_eq!(pool.block_info().last_seen_block_hash, tip_hash);
-        assert!(pool.contains(&hash));
+            // Resolve the removed suffix's parent rather than the provider's latest block.
+            let tip_hash = tip.hash();
+            if tip_available {
+                provider.add_block(tip_hash, tip.clone_block());
+            }
+            let reverted_hash = reverted.hash();
+            provider.add_block(reverted_hash, reverted.clone_block());
+            let notification: CanonStateNotification = CanonStateNotification::Reorg {
+                new: Arc::new(Chain::default()),
+                old: Arc::new(Chain::new(vec![reverted], Default::default(), Default::default())),
+            };
+            let maintain = maintain_transaction_pool(
+                provider,
+                pool.clone(),
+                futures::stream::iter([notification]),
+                Runtime::test(),
+                MaintainPoolConfig::default(),
+            );
+            time::timeout(Duration::from_secs(10), maintain).await.unwrap();
+
+            assert_eq!(
+                pool.block_info().last_seen_block_hash,
+                if tip_available { tip_hash } else { reverted_hash }
+            );
+            assert_eq!(pool.contains(&hash), tip_available);
+        }
     }
 
     #[test]

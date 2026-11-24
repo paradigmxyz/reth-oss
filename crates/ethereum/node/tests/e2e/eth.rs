@@ -10,8 +10,7 @@ use alloy_rpc_types_engine::{
         ForkchoiceUpdateCancun, ForkchoiceUpdateResponse as SszForkchoiceUpdateResponse, Optional,
         PayloadAttributesCancun, PayloadStatus as SszPayloadStatus, PayloadStatusKind,
     },
-    ClientVersionV1, ForkchoiceState, ForkchoiceUpdated, PayloadAttributes, PayloadStatus,
-    PayloadStatusEnum,
+    ClientVersionV1, ForkchoiceState, ForkchoiceUpdated, PayloadAttributes, PayloadStatusEnum,
 };
 use reth_chainspec::{ChainSpec, EthChainSpec, EthereumHardfork};
 use reth_e2e_test_utils::{
@@ -195,24 +194,16 @@ async fn rewinds_to_canonical_ancestor_above_finality() -> eyre::Result<()> {
         (checkpoint, Some(eth_payload_attributes(&chain_spec, 9))),
     ];
     for (index, (finalized, attrs)) in cases.into_iter().enumerate() {
-        let advanced = engine
-            .request::<_, ForkchoiceUpdated>(
-                "engine_forkchoiceUpdatedV3",
-                (
-                    ForkchoiceState {
-                        head_block_hash: tip,
-                        safe_block_hash: checkpoint,
-                        finalized_block_hash: finalized,
-                    },
-                    None::<PayloadAttributes>,
-                ),
-            )
+        let advanced = node
+            .engine
+            .forkchoice_updated(ForkchoiceState {
+                head_block_hash: tip,
+                safe_block_hash: checkpoint,
+                finalized_block_hash: finalized,
+            })
             .await?;
         assert_eq!(advanced.payload_status.status, PayloadStatusEnum::Valid);
-        assert_eq!(
-            rpc.get_block_by_number(BlockNumberOrTag::Latest).await?.unwrap().header.hash,
-            tip
-        );
+        assert_eq!(canonical.get_canonical_head().hash(), tip);
 
         let build_requested = attrs.is_some();
         let rewound = engine
@@ -247,17 +238,15 @@ async fn rewinds_to_canonical_ancestor_above_finality() -> eyre::Result<()> {
 
         // The payload service processes the revert notification before handling this build.
         let timestamp = 10 + index as u64;
-        let build = engine
-            .request::<_, ForkchoiceUpdated>(
-                "engine_forkchoiceUpdatedV3",
-                (
-                    ForkchoiceState {
-                        head_block_hash: ancestor,
-                        safe_block_hash: ancestor,
-                        finalized_block_hash: B256::ZERO,
-                    },
-                    Some(eth_payload_attributes(&chain_spec, timestamp)),
-                ),
+        let build = node
+            .engine
+            .forkchoice_updated_with_attributes(
+                ForkchoiceState {
+                    head_block_hash: ancestor,
+                    safe_block_hash: ancestor,
+                    finalized_block_hash: B256::ZERO,
+                },
+                eth_payload_attributes(&chain_spec, timestamp),
             )
             .await?;
         assert_eq!(build.payload_status.status, PayloadStatusEnum::Valid);
@@ -291,29 +280,17 @@ async fn submit_cancun_block(
     parent: B256,
     attributes: PayloadAttributes,
 ) -> eyre::Result<B256> {
-    let TestingBuildBlockResponseV1::V5(envelope) = node
-        .testing_build_block_v1(TestingBuildBlockRequestV1 {
-            parent_block_hash: parent,
-            payload_attributes: attributes,
-            transactions: vec![],
-            extra_data: None,
-        })
-        .await?
-    else {
-        panic!("expected a V5 envelope")
-    };
-    let payload = envelope.execution_payload;
-    let hash = payload.payload_inner.payload_inner.block_hash;
-    let status = node
-        .auth_server_handle()
-        .http_client()
-        .request::<_, PayloadStatus>(
-            "engine_newPayloadV3",
-            (payload, Vec::<B256>::new(), B256::ZERO),
+    let build = node
+        .engine
+        .forkchoice_updated_with_attributes(
+            ForkchoiceState { head_block_hash: parent, ..Default::default() },
+            attributes,
         )
         .await?;
-    assert_eq!(status.status, PayloadStatusEnum::Valid);
-    Ok(hash)
+    assert_eq!(build.payload_status.status, PayloadStatusEnum::Valid);
+    let payload =
+        node.payload.resolve_payload(build.payload_id.expect("payload build started")).await?;
+    node.submit_payload(payload).await
 }
 
 #[tokio::test]

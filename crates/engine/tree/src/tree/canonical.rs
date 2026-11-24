@@ -293,20 +293,16 @@ where
         }
         old.reverse();
 
-        let tip =
-            if let Some(state) = self.canonical_in_memory_state().state_by_hash(ancestor.hash()) {
-                Arc::clone(&state.block_ref().recovered_block)
-            } else {
-                let Some(block) = self
-                    .provider
-                    .recovered_block(ancestor.hash().into(), TransactionVariant::WithHash)?
-                else {
-                    return Ok(None)
-                };
-                Arc::new(block)
-            };
+        // Pool maintenance resolves the retained tip by hash when it receives the rewind.
+        if self.canonical_in_memory_state().state_by_hash(ancestor.hash()).is_none() &&
+            self.provider
+                .recovered_block(ancestor.hash().into(), TransactionVariant::WithHash)?
+                .is_none()
+        {
+            return Ok(None)
+        }
 
-        Ok(Some(NewCanonicalChain::Revert { tip, old }))
+        Ok(Some(NewCanonicalChain::Reorg { new: Vec::new(), old }))
     }
 
     /// Handles chain advance or same height scenarios.
@@ -462,19 +458,25 @@ where
     ///
     /// This is invoked on a valid forkchoice update, or if we can make the target block canonical.
     pub(super) fn on_canonical_chain_update(&mut self, chain_update: NewCanonicalChain<N>) {
+        let tip = chain_update.tip().clone_sealed_header();
+        self.on_canonical_chain_update_with_tip(chain_update, tip);
+    }
+
+    /// Applies a canonical update whose retained tip is supplied separately for a pure rewind.
+    pub(super) fn on_canonical_chain_update_with_tip(
+        &mut self,
+        chain_update: NewCanonicalChain<N>,
+        tip: SealedHeader<N::BlockHeader>,
+    ) {
         trace!(target: "engine::tree", new_blocks = %chain_update.new_block_count(), reorged_blocks =  %chain_update.reorged_block_count(), "applying new chain update");
         let start = Instant::now();
 
         // update the tracked canonical head
-        self.state.tree_state.set_canonical_head(chain_update.tip().num_hash());
+        self.state.tree_state.set_canonical_head(tip.num_hash());
 
-        let tip = chain_update.tip().clone_sealed_header();
         let notification = chain_update.to_chain_notification();
 
-        if let NewCanonicalChain::Reorg { old, .. } | NewCanonicalChain::Revert { old, .. } =
-            &chain_update
-        {
-            let new = chain_update.new_blocks();
+        if let NewCanonicalChain::Reorg { new, old } = &chain_update {
             let new_first = new.first().map(|first| first.recovered_block().num_hash());
             let old_first = old.first().map(|first| first.recovered_block().num_hash());
             trace!(target: "engine::tree", ?new_first, ?old_first, "Reorg detected, new and old first blocks");
@@ -483,11 +485,12 @@ where
             self.update_reorg_metrics(old.len(), old_first);
         }
 
-        let first_reverted = match &chain_update {
-            NewCanonicalChain::Revert { old, .. } => {
-                old.first().map(|block| block.recovered_block().num_hash())
-            }
-            NewCanonicalChain::Commit { .. } | NewCanonicalChain::Reorg { .. } => None,
+        let first_reverted = if let NewCanonicalChain::Reorg { new, old } = &chain_update &&
+            new.is_empty()
+        {
+            old.first().map(|block| block.recovered_block().num_hash())
+        } else {
+            None
         };
 
         // Updating the chain also tracks any reverted blocks that were missing from memory.

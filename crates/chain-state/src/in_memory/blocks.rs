@@ -140,21 +140,19 @@ impl<N: NodePrimitives> InMemoryBlocks<N> {
         match new_chain {
             NewCanonicalChain::Commit { new } => self.set_canonical_chain(new),
             NewCanonicalChain::Reorg { new, old } => {
-                self.set_canonical_chain(new);
-                // The tracked ones were moved to the non-canonical section above.
-                for block in old {
-                    self.insert_executed(block);
-                }
-            }
-            NewCanonicalChain::Revert { old, .. } => {
-                for block in &old {
-                    let hash = block.recovered_block().hash();
-                    if self.canonical.blocks.contains_key(&hash) {
-                        self.demote_canonical_block(&hash);
+                if new.is_empty() {
+                    // A pure rewind retains the canonical prefix below the removed suffix.
+                    for block in &old {
+                        let hash = block.recovered_block().hash();
+                        if self.canonical.blocks.contains_key(&hash) {
+                            self.demote_canonical_block(&hash);
+                        }
                     }
+                    self.pending_hash = None;
+                    self.relink();
+                } else {
+                    self.set_canonical_chain(new);
                 }
-                self.pending_hash = None;
-                self.relink();
                 for block in old {
                     self.insert_executed(block);
                 }
@@ -863,5 +861,26 @@ mod tests {
         assert!(blocks.pending_state().is_none(), "the removed block is still pending");
         assert_eq!(counts(&blocks), (4, 1), "canonical blocks are removed separately");
         blocks.assert_invariants();
+    }
+
+    #[test]
+    fn pure_rewind_retains_prefix_and_reverted_blocks() {
+        let mut builder = TestBlockBuilder::eth();
+        let chain = builder.get_executed_blocks(0..4).collect::<Vec<_>>();
+        let mut blocks = InMemoryBlocks::<EthPrimitives>::default();
+        blocks.set_canonical_chain(chain[..3].to_vec());
+        blocks.insert_pending(chain[3].clone());
+
+        blocks.update_chain(NewCanonicalChain::Reorg {
+            new: Vec::new(),
+            old: vec![chain[2].clone()],
+        });
+
+        assert_eq!(blocks.canonical().head().unwrap().hash(), hash(&chain[1]));
+        assert_eq!(blocks.canonical().by_number(0).unwrap().hash(), hash(&chain[0]));
+        assert!(blocks.canonical().by_number(2).is_none());
+        assert!(blocks.non_canonical.blocks.contains_key(&hash(&chain[2])));
+        assert!(blocks.non_canonical.blocks.contains_key(&hash(&chain[3])));
+        assert!(blocks.pending_hash.is_none());
     }
 }

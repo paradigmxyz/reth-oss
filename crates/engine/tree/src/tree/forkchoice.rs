@@ -250,7 +250,7 @@ where
                 {
                     return Ok(Some(TreeOutcome::new(OnForkChoiceUpdated::invalid_state())))
                 }
-                self.on_canonical_chain_update(rewind);
+                self.on_canonical_chain_update_with_tip(rewind, canonical_header.clone());
                 if let Err(outcome) = self.ensure_consistent_forkchoice_state(state) {
                     return Ok(Some(TreeOutcome::new(outcome)))
                 }
