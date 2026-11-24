@@ -263,6 +263,52 @@ where
         Ok(())
     }
 
+    /// Prepares an ancestor rewind, including persisted blocks with available execution history.
+    ///
+    /// Returns `None` if the blocks or state needed to unwind are no longer available.
+    pub(super) fn canonical_ancestor_rewind(
+        &self,
+        ancestor: &SealedHeader<N::BlockHeader>,
+    ) -> ProviderResult<Option<NewCanonicalChain<N>>> {
+        let mut cursor = self.state.tree_state.current_canonical_head;
+        let mut old = Vec::new();
+        while cursor.number > ancestor.number() {
+            let block = match self.canonical_block_by_hash(cursor.hash) {
+                Ok(block) => block,
+                Err(
+                    ProviderError::HeaderNotFound(_) |
+                    ProviderError::BlockExpired { .. } |
+                    ProviderError::InsufficientChangesets { .. } |
+                    ProviderError::StateAtBlockPruned(_) |
+                    ProviderError::StateForHashNotFound(_) |
+                    ProviderError::StateForNumberNotFound(_),
+                ) => return Ok(None),
+                Err(err) => return Err(err),
+            };
+            cursor = block.recovered_block().parent_num_hash();
+            old.push(block);
+        }
+        if cursor != ancestor.num_hash() {
+            return Ok(None)
+        }
+        old.reverse();
+
+        let tip =
+            if let Some(state) = self.canonical_in_memory_state().state_by_hash(ancestor.hash()) {
+                Arc::clone(&state.block_ref().recovered_block)
+            } else {
+                let Some(block) = self
+                    .provider
+                    .recovered_block(ancestor.hash().into(), TransactionVariant::WithHash)?
+                else {
+                    return Ok(None)
+                };
+                Arc::new(block)
+            };
+
+        Ok(Some(NewCanonicalChain::Revert { tip, old }))
+    }
+
     /// Handles chain advance or same height scenarios.
     fn handle_chain_advance_or_same_height(
         &mut self,
@@ -425,7 +471,10 @@ where
         let tip = chain_update.tip().clone_sealed_header();
         let notification = chain_update.to_chain_notification();
 
-        if let NewCanonicalChain::Reorg { new, old } = &chain_update {
+        if let NewCanonicalChain::Reorg { old, .. } | NewCanonicalChain::Revert { old, .. } =
+            &chain_update
+        {
+            let new = chain_update.new_blocks();
             let new_first = new.first().map(|first| first.recovered_block().num_hash());
             let old_first = old.first().map(|first| first.recovered_block().num_hash());
             trace!(target: "engine::tree", ?new_first, ?old_first, "Reorg detected, new and old first blocks");
@@ -434,11 +483,22 @@ where
             self.update_reorg_metrics(old.len(), old_first);
         }
 
-        // update the tracked in-memory state with the new chain, which also tracks the blocks of a
-        // reorg that are missing from it.
+        let first_reverted = match &chain_update {
+            NewCanonicalChain::Revert { old, .. } => {
+                old.first().map(|block| block.recovered_block().num_hash())
+            }
+            NewCanonicalChain::Commit { .. } | NewCanonicalChain::Reorg { .. } => None,
+        };
+
+        // Updating the chain also tracks any reverted blocks that were missing from memory.
         self.canonical_in_memory_state_writer.update_chain(chain_update);
         self.metrics.engine.executed_blocks.set(self.state.tree_state.block_count() as f64);
-        self.canonical_in_memory_state_writer.set_canonical_head(tip.clone());
+        if let Some(first_reverted) = first_reverted {
+            self.canonical_in_memory_state_writer
+                .set_canonical_head_after_rewind(tip.clone(), first_reverted);
+        } else {
+            self.canonical_in_memory_state_writer.set_canonical_head(tip.clone());
+        }
         self.payload_validator.on_canonical_head_changed(tip.hash(), &self.state);
 
         // Update metrics based on new tip
