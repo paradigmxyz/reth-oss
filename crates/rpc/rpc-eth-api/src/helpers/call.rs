@@ -787,7 +787,12 @@ pub trait Call:
             .map_err(Self::Error::from_eth_err)?;
         let changes = self
             .evm_config()
-            .pre_block_state_changes(&mut *db, evm_env.clone(), context)
+            .pre_block_state_changes_with_parent_timestamp(
+                &mut *db,
+                evm_env.clone(),
+                context,
+                parent.timestamp(),
+            )
             .map_err(RethError::other)
             .map_err(Self::Error::from_eth_err)?;
         db.commit_source(&BundleSource(&changes));
@@ -1062,7 +1067,12 @@ pub trait Call:
                     .map_err(Self::Error::from_eth_err)?;
                 let changes = this
                     .evm_config()
-                    .pre_block_state_changes(&mut db, evm_env.clone(), ctx)
+                    .pre_block_state_changes_with_parent_timestamp(
+                        &mut db,
+                        evm_env.clone(),
+                        ctx,
+                        parent.timestamp(),
+                    )
                     .map_err(Self::Error::from_eth_err)?;
                 db.commit_source(&reth_execution_types::BundleSource(&changes));
 

@@ -83,14 +83,19 @@ pub trait Evm {
 
     /// Executes with a borrowed inspector, discarding writes without materializing detached state.
     ///
-    /// The caller retains inspector observations on success and error.
+    /// The caller retains inspector observations on success and error. The default returns an
+    /// unsupported error without executing the transaction or touching the inspector;
+    /// implementations opt in by overriding this method.
     fn transact_result_with_inspector<I>(
         &mut self,
-        transaction: &Recovered<Self::Transaction>,
-        inspector: &mut I,
+        _transaction: &Recovered<Self::Transaction>,
+        _inspector: &mut I,
     ) -> Result<evm2::TxResult<Self::EvmTypes>, BlockExecutionError>
     where
-        I: evm2::Inspector<Self::EvmTypes>;
+        I: evm2::Inspector<Self::EvmTypes>,
+    {
+        Err(BlockExecutionError::msg("EVM does not support execution with a borrowed inspector"))
+    }
 
     /// Sets the inspector used by subsequent transactions.
     fn set_inspector<I>(&mut self, inspector: I)
@@ -432,6 +437,11 @@ impl<T: evm2::EvmTypesHost, I: evm2::Inspector<T>> evm2::Inspector<T> for Traced
 
 /// A configured block executor.
 pub trait BlockExecutor: Sized {
+    /// Supplies the actual parent timestamp before pre-execution changes.
+    ///
+    /// Executors that do not use timestamp-based fork transitions may ignore it.
+    fn set_parent_timestamp(&mut self, _parent_timestamp: u64) {}
+
     /// Consensus transaction type executed by this executor.
     type Transaction;
     /// Receipt type produced by this executor.
@@ -870,7 +880,11 @@ where
         ctx: F::ExecutionCtx<'a>,
     ) -> Self {
         Self {
-            executor: executor_factory.create_executor(evm, ctx.clone()),
+            executor: {
+                let mut executor = executor_factory.create_executor(evm, ctx.clone());
+                executor.set_parent_timestamp(parent.timestamp());
+                executor
+            },
             evm_env,
             transactions: Vec::new(),
             ctx,
@@ -1224,6 +1238,9 @@ where
         }
         .map_err(BlockExecutionError::other)?;
         let mut executor = evm_config.block_executor_factory().create_executor(evm, ctx);
+        if let Some(timestamp) = parent_timestamp {
+            executor.set_parent_timestamp(timestamp);
+        }
         if block.header().block_access_list_hash().is_some() {
             executor.enable_block_access_list_builder();
         }

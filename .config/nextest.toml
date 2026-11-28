@@ -300,6 +300,7 @@ not (
     test(=eth::helpers::state::tests::pending_transaction_count_skips_local_pending_block) or
     test(=eth::helpers::state::tests::test_get_account_missing) or
     test(=eth::helpers::state::tests::test_storage) or
+    test(=eth::helpers::transaction::tests::bogota_rpc_preserves_legacy_nonce_calls) or
     test(=eth::helpers::transaction::tests::estimate_frame_transaction_returns_derived_outer_limit) or
     test(=eth::helpers::transaction::tests::fill_frame_limits_preserves_independent_block_budgets) or
     test(=eth::helpers::transaction::tests::fill_frame_transaction_does_not_replace_explicit_zero_execution) or

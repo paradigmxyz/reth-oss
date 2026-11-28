@@ -48,6 +48,7 @@ where
     /// evm2 executor that runs the block.
     pub inner: evm2_eth::EthBlockExecutor<'a, T, R>,
     ctx: EthBlockExecutionCtx<'a>,
+    parent_timestamp: Option<u64>,
     eip8253_accounts: &'a [Address],
     bogota_activation_timestamp: Option<u64>,
 }
@@ -91,6 +92,7 @@ where
         Self {
             inner,
             ctx,
+            parent_timestamp: None,
             eip8253_accounts: chain_spec.eip8253_accounts(),
             bogota_activation_timestamp: chain_spec
                 .ethereum_fork_activation(EthereumHardfork::Bogota)
@@ -143,6 +145,10 @@ where
         &mut self.inner.evm
     }
 
+    fn set_parent_timestamp(&mut self, parent_timestamp: u64) {
+        self.parent_timestamp = Some(parent_timestamp);
+    }
+
     fn set_state_hook(&mut self, hook: impl FnMut(StateUpdate) + Send + 'static) -> bool {
         self.inner.set_state_hook(hook)
     }
@@ -176,7 +182,6 @@ where
             self.inner.evm.block_env().timestamp >= U256::from(activation)
         {
             let parent_timestamp = self
-                .ctx
                 .parent_timestamp
                 .ok_or_else(|| BlockExecutionError::other(MissingEip8253ParentTimestamp))?;
             if parent_timestamp < activation {
@@ -451,6 +456,11 @@ where
             block_number,
             self.inner.inner.rules().deposit_contract_address,
         );
+        if segment_idx > 0 {
+            self.inner.set_parent_timestamp(
+                self.plan.segments[segment_idx - 1].evm_env.block.timestamp.to::<u64>(),
+            );
+        }
         self.inner.ctx = segment.ctx.clone();
         self.inner.inner.start_block(evm2_ctx(&segment.ctx), rules, segment_idx as u64 * 2);
     }
@@ -558,6 +568,10 @@ where
 
     fn evm_mut(&mut self) -> &mut Self::Evm {
         self.inner.evm_mut()
+    }
+
+    fn set_parent_timestamp(&mut self, parent_timestamp: u64) {
+        self.inner.set_parent_timestamp(parent_timestamp);
     }
 
     fn set_state_hook(&mut self, hook: impl FnMut(StateUpdate) + Send + 'static) -> bool {
@@ -744,7 +758,6 @@ mod tests {
             ctx: EthBlockExecutionCtx {
                 tx_count_hint: Some(1),
                 parent_hash,
-                parent_timestamp: None,
                 parent_beacon_block_root: None,
                 ommers: &[],
                 withdrawals: None,
@@ -984,7 +997,6 @@ mod tests {
             EthBlockExecutionCtx {
                 tx_count_hint: Some(0),
                 parent_hash: B256::ZERO,
-                parent_timestamp: None,
                 parent_beacon_block_root: None,
                 ommers: &[],
                 withdrawals: None,
@@ -1341,10 +1353,12 @@ mod tests {
                 1,
             );
             let mut ctx = segment(0, number, B256::ZERO).ctx;
-            ctx.parent_timestamp = parent;
             ctx.parent_beacon_block_root = Some(B256::ZERO);
             let evm = factory.evm_with_env(db, env);
             let mut executor = factory.create_executor(evm, ctx);
+            if let Some(timestamp) = parent {
+                executor.set_parent_timestamp(timestamp);
+            }
             executor.enable_block_access_list_builder();
             executor.apply_pre_execution_changes().unwrap();
             let mut expected = original.clone();
@@ -1434,10 +1448,10 @@ mod tests {
                 1,
             );
             let mut ctx = segment(0, 2, B256::ZERO).ctx;
-            ctx.parent_timestamp = Some(9);
             ctx.parent_beacon_block_root = Some(B256::ZERO);
             let evm = factory.evm_with_env(db, env);
             let mut executor = factory.create_executor(evm, ctx);
+            executor.set_parent_timestamp(9);
             executor.apply_pre_execution_changes().unwrap();
             let tx = TransactionSigned::Legacy(
                 TxLegacy {
@@ -1501,10 +1515,12 @@ mod tests {
                 1,
             );
             let mut ctx = segment(0, 2, B256::ZERO).ctx;
-            ctx.parent_timestamp = (!empty_override).then_some(9);
             ctx.parent_beacon_block_root = Some(B256::ZERO);
             let evm = factory.evm_with_env(db, env);
             let mut executor = factory.create_executor(evm, ctx);
+            if !empty_override {
+                executor.set_parent_timestamp(9);
+            }
             let updates = Arc::new(Mutex::new(Vec::new()));
             let hook_updates = updates.clone();
             executor.set_state_hook(move |update| hook_updates.lock().unwrap().push(update));

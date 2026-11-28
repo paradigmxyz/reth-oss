@@ -55,9 +55,20 @@ pub trait EthState: LoadState + SpawnBlocking {
         Ok(())
     }
 
-    /// Returns the account nonce or a shared keyed nonce sequence at the selected block.
-    /// Omitted keys and `[]` retain the legacy pending-pool nonce behavior.
+    /// Returns the account nonce, including the pending pool when requested.
     fn transaction_count(
+        &self,
+        address: Address,
+        block_id: Option<BlockId>,
+    ) -> impl Future<Output = Result<U256, Self::Error>> + Send {
+        LoadState::transaction_count(self, address, block_id)
+    }
+
+    /// Returns a shared keyed nonce sequence at the selected block.
+    ///
+    /// Omitted keys and `[]` delegate to [`Self::transaction_count`], preserving chain-specific
+    /// overrides and the legacy pending-pool nonce behavior.
+    fn transaction_count_with_nonce_keys(
         &self,
         address: Address,
         block_id: Option<BlockId>,
@@ -65,12 +76,12 @@ pub trait EthState: LoadState + SpawnBlocking {
     ) -> impl Future<Output = Result<U256, Self::Error>> + Send {
         async move {
             let Some(keys) = nonce_keys else {
-                return LoadState::transaction_count(self, address, block_id).await;
+                return EthState::transaction_count(self, address, block_id).await;
             };
             alloy_eips::eip8250::validate_nonce_keys(&keys)
                 .map_err(|reason| EthApiError::InvalidParams(reason.into()))?;
             if keys.is_empty() {
-                return LoadState::transaction_count(self, address, block_id).await;
+                return EthState::transaction_count(self, address, block_id).await;
             }
             self.spawn_blocking_io_fut(async move |this| {
                 let at = block_id.unwrap_or_default();

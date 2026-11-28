@@ -1084,6 +1084,7 @@ where
                 };
                 let mut executor =
                     evm_config.block_executor_factory().create_executor(evm, execution_ctx);
+                executor.set_parent_timestamp(parent_timestamp);
                 if input.has_block_access_list() {
                     executor.enable_block_access_list_builder();
                 }
@@ -1197,13 +1198,14 @@ where
             .execution_ctx_for(input, parent_timestamp)
             .map_err(|e| InsertBlockErrorKind::Other(Box::new(e)))?;
         let (output, senders, built_bal, received_bal_evm) =
-            crate::tree::payload_processor::bal::execute_block(
+            crate::tree::payload_processor::bal::execute_block_with_parent_timestamp(
                 &self.runtime,
                 &self.evm_config,
                 &make_db,
                 input_bal,
                 env.evm_env,
                 ctx,
+                Some(parent_timestamp),
                 env.transaction_count,
                 handle.clone_transaction_receiver(),
                 receipt_tx,

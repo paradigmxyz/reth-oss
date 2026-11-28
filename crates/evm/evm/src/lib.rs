@@ -21,6 +21,9 @@ use reth_primitives_traits::{
     BlockTy, HeaderTy, NodePrimitives, ReceiptTy, SealedBlock, SealedHeader, TxTy,
 };
 
+#[cfg(feature = "std")]
+use alloy_consensus::BlockHeader;
+
 pub use evm2::{
     debug_unreachable,
     evm::{Database, DynDatabase},
@@ -541,7 +544,9 @@ pub trait ConfigureEvm: Clone + Debug + Send + Sync + Unpin {
     {
         let evm = self.evm_for_block(db, block.header())?;
         let ctx = self.context_for_block_with_parent_timestamp(block, parent_timestamp)?;
-        Ok(self.block_executor_factory().create_executor(evm, ctx))
+        let mut executor = self.block_executor_factory().create_executor(evm, ctx);
+        executor.set_parent_timestamp(parent_timestamp);
+        Ok(executor)
     }
 
     /// Creates an EVM instance for single-transaction execution with the configured environment.
@@ -615,8 +620,10 @@ pub trait ConfigureEvm: Clone + Debug + Send + Sync + Unpin {
             Receipt = ReceiptTy<Self::Primitives>,
         >,
     {
+        let mut executor = self.block_executor_factory().create_executor(evm, ctx.clone());
+        executor.set_parent_timestamp(parent.timestamp());
         BasicBlockBuilder {
-            executor: f(self.block_executor_factory().create_executor(evm, ctx.clone())),
+            executor: f(executor),
             evm_env,
             transactions: Default::default(),
             ctx,
@@ -692,6 +699,25 @@ pub trait ConfigureEvm: Clone + Debug + Send + Sync + Unpin {
         let mut executor = factory.create_executor(evm, ctx);
         executor.apply_pre_execution_changes()?;
         Ok(executor.into_state())
+    }
+
+    /// Applies pre-execution changes with the actual parent timestamp for fork transitions.
+    ///
+    /// The default delegates to [`Self::pre_block_state_changes`], preserving existing overrides
+    /// for configurations without parent-dependent transitions.
+    #[cfg(feature = "std")]
+    fn pre_block_state_changes_with_parent_timestamp<'a, DB>(
+        &'a self,
+        db: DB,
+        evm_env: EvmEnvFor<Self>,
+        ctx: ExecutionCtxFor<'a, Self>,
+        _parent_timestamp: u64,
+    ) -> Result<BundleState, BlockExecutionError>
+    where
+        Self: 'a,
+        DB: DynDatabase + 'a,
+    {
+        self.pre_block_state_changes(db, evm_env, ctx)
     }
 
     /// Returns whether engine validation may commit transaction results from speculative prewarm

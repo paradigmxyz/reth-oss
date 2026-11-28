@@ -358,6 +358,10 @@ impl<'a> BlockExecutor for SettlingExecutor<'a> {
         self.inner.evm_mut()
     }
 
+    fn set_parent_timestamp(&mut self, parent_timestamp: u64) {
+        self.inner.set_parent_timestamp(parent_timestamp);
+    }
+
     fn set_state_hook(&mut self, hook: impl FnMut(StateUpdate) + Send + 'static) -> bool {
         self.inner.set_state_hook(hook)
     }
