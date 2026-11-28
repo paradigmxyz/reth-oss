@@ -14,6 +14,7 @@ use reth_network_p2p::error::RequestResult;
 use reth_storage_api::{DependencyProofFetcher, DependencyProofRequest};
 use std::{
     collections::{BTreeMap, BTreeSet},
+    ops::Bound::{Excluded, Unbounded},
     sync::Arc,
     time::Duration,
 };
@@ -88,6 +89,8 @@ async fn run<N: NetworkPrimitives>(
         BoxFuture<'static, (Vec<DependencyProofRequest>, PeerId, RequestResult<DependencyProofs>)>,
     >::new();
     let mut next_request = BTreeMap::<PeerId, Instant>::new();
+    // Preserve rotation across fetches so silent peers cannot monopolize every deadline.
+    let mut last_peer = None;
     let mut interval = tokio::time::interval(Duration::from_millis(250));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
@@ -166,7 +169,8 @@ async fn run<N: NetworkPrimitives>(
             },
         }
         // Coalesce concurrent block requests to share peer quotas and avoid per-proof round trips.
-        for (peer, sender) in &peers {
+        let start = last_peer.map_or(Unbounded, Excluded);
+        for (peer, sender) in peers.range((start, Unbounded)).chain(peers.iter()) {
             if downloads.len() >= CAPACITY ||
                 next_request.get(peer).is_some_and(|until| *until > Instant::now())
             {
@@ -200,6 +204,7 @@ async fn run<N: NetworkPrimitives>(
                     }
                 }
                 next_request.insert(*peer, Instant::now() + DEPENDENCY_PROOF_REQUEST_INTERVAL);
+                last_peer = Some(*peer);
                 let peer = *peer;
                 downloads.push(
                     async move {
@@ -379,6 +384,37 @@ mod tests {
         response.send(Ok(DependencyProofs(vec![Bytes::new()]))).unwrap();
         assert_eq!(fetched.await.unwrap().unwrap(), Some(Bytes::new()));
         assert!(matches!(old_messages.try_recv(), Err(mpsc::error::TryRecvError::Disconnected)));
+        driver.abort();
+        assert!(driver.await.unwrap_err().is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn proof_fetch_rotation_survives_peer_cooldown() {
+        let peer = PeerConfig::default().launch().await.unwrap();
+        let (events, incoming) = mpsc::unbounded_channel();
+        let (sender, requests) = mpsc::channel(CAPACITY);
+        let fetcher = Arc::new(PeerDependencyProofFetcher(sender));
+        let (first, mut first_messages) = session(PeerId::repeat_byte(1), EthVersion::Eth74);
+        let (second, mut second_messages) = session(PeerId::repeat_byte(2), EthVersion::Eth74);
+        events.send(first).unwrap();
+        events.send(second).unwrap();
+        let driver =
+            tokio::spawn(run(peer.handle(), UnboundedReceiverStream::new(incoming), requests));
+        for messages in [&mut first_messages, &mut second_messages] {
+            let requester = Arc::clone(&fetcher);
+            let proof = Bytes::from_static(b"authenticated proof");
+            let expected = DependencyProofRequest {
+                block_hash: B256::repeat_byte(3),
+                commitment: keccak256(&proof),
+            };
+            let fetched = tokio::spawn(async move { requester.fetch(expected).await });
+            let (hashes, response) = request(messages).await;
+            assert_eq!(hashes.0, vec![expected.block_hash]);
+            response.send(Ok(DependencyProofs(vec![proof.clone()]))).unwrap();
+            assert_eq!(fetched.await.unwrap().unwrap(), Some(proof));
+            // The next fetch must rotate even after the first peer's quota resets.
+            tokio::time::sleep(DEPENDENCY_PROOF_REQUEST_INTERVAL).await;
+        }
         driver.abort();
         assert!(driver.await.unwrap_err().is_cancelled());
     }

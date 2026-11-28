@@ -1,7 +1,6 @@
 //! Shared (EIP-8070) and indexed (EIP-8408) cell retrieval messages.
 //!
 //! Payload codecs are flattened: `RequestPair` supplies the outer RLP list and request id.
-//! `ProtocolMessage` preserves the extra legacy cell-payload list on eth/72 connections.
 
 use alloc::vec::Vec;
 use alloy_eips::eip7594::{BlobCellMask, Cell};
@@ -241,9 +240,7 @@ pub struct GetCells {
 impl GetCells {
     /// Returns the requested indices at a transaction position, interpreting the wire bitvector.
     pub fn cell_mask(&self, index: usize) -> Option<BlobCellMask> {
-        self.cell_mask
-            .mask_at(index)
-            .map(|mask| BlobCellMask::from_bits(u128::from_le_bytes(mask.into())))
+        self.cell_mask.mask_at(index).map(BlobCellMask::new)
     }
 
     /// Builds an adaptive request from one mask per hash, choosing shared for uniform masks.
@@ -389,8 +386,8 @@ impl Cells {
                 .cell_mask
                 .mask_at(request_index)
                 .ok_or(Error::Custom("invalid cell mask identifier"))?;
-            let bits = u128::from_le_bytes(mask.into());
-            if bits & !u128::from_le_bytes(requested.into()) != 0 {
+            let bits = BlobCellMask::new(mask).bits();
+            if bits & !BlobCellMask::new(requested).bits() != 0 {
                 return Err(Error::Custom("unrequested cell index"))
             }
             let count = bits.count_ones() as usize;
@@ -458,6 +455,11 @@ fn decode_bounded_list<T: Decodable>(buf: &mut &[u8], max: usize) -> alloy_rlp::
     Ok(values)
 }
 
+/// Converts a mask to its wire cells bitmap, the inverse of [`BlobCellMask::new`].
+pub fn encode_cell_mask(mask: BlobCellMask) -> B128 {
+    B128::from(mask.bits().to_le_bytes())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -504,56 +506,48 @@ mod tests {
             }),
             EthMessage::Cells(RequestPair { request_id: 1, message: Cells::default() }),
         ];
-        // Frozen base-revision encodings, including the extra cell-payload list.
-        let legacy = [
-            hex!("14d401d2c09000000000000000000000000000000000").to_vec(),
-            hex!("15d501d3c0c09000000000000000000000000000000000").to_vec(),
-        ];
-        for (message, expected) in messages.into_iter().zip(legacy) {
+        for message in messages {
             let protocol = ProtocolMessage::from(message);
-            assert_eq!(protocol.encoded_for_version(EthVersion::Eth72), expected);
-            let mut buf = expected.as_slice();
-            assert_eq!(
-                ProtocolMessage::decode_message(EthVersion::Eth72, &mut buf).unwrap(),
-                protocol
-            );
-            assert!(buf.is_empty());
             let canonical = alloy_rlp::encode(&protocol);
-            assert_eq!(protocol.encoded_for_version(EthVersion::Eth73), canonical);
-            let mut buf = canonical.as_slice();
-            assert_eq!(
-                ProtocolMessage::decode_message(EthVersion::Eth73, &mut buf).unwrap(),
-                protocol
-            );
-            assert!(buf.is_empty());
+            for version in [EthVersion::Eth72, EthVersion::Eth73] {
+                let mut buf = canonical.as_slice();
+                assert_eq!(ProtocolMessage::decode_message(version, &mut buf).unwrap(), protocol);
+                assert!(buf.is_empty());
+            }
         }
     }
 
     #[test]
-    fn legacy_cell_payload_is_bounded() {
-        let mut wire = hex!("14d401d2c09000000000000000000000000000000000").to_vec();
-        wire.push(0x80);
-        let mut buf = wire.as_slice();
-        ProtocolMessage::<EthNetworkPrimitives>::decode_message(EthVersion::Eth72, &mut buf)
-            .unwrap();
-        assert_eq!(buf, &[0x80]);
-        // Extra fields inside either list must not be silently consumed.
-        for wire in [
-            hex!("14d501d3c0900000000000000000000000000000000080"),
-            hex!("14d501d2c0900000000000000000000000000000000080"),
+    fn cell_payload_is_bounded() {
+        for (wire, extra_field) in [
+            (
+                hex!("14d301c09000000000000000000000000000000000").to_vec(),
+                hex!("14d401c0900000000000000000000000000000000080").to_vec(),
+            ),
+            (
+                hex!("15d401c0c09000000000000000000000000000000000").to_vec(),
+                hex!("15d501c0c0900000000000000000000000000000000080").to_vec(),
+            ),
         ] {
-            assert!(matches!(
-                ProtocolMessage::<EthNetworkPrimitives>::decode_message(
-                    EthVersion::Eth72,
-                    &mut wire.as_slice()
-                ),
-                Err(crate::message::MessageError::RlpError(Error::UnexpectedLength))
-            ));
+            for version in [EthVersion::Eth72, EthVersion::Eth73] {
+                let mut appended = wire.clone();
+                appended.push(0x80);
+                let mut buf = appended.as_slice();
+                ProtocolMessage::<EthNetworkPrimitives>::decode_message(version, &mut buf).unwrap();
+                assert_eq!(buf, &[0x80]);
+                assert!(matches!(
+                    ProtocolMessage::<EthNetworkPrimitives>::decode_message(
+                        version,
+                        &mut extra_field.as_slice()
+                    ),
+                    Err(crate::message::MessageError::RlpError(Error::UnexpectedLength))
+                ));
+            }
         }
     }
 
     #[test]
-    fn indexed_packets_match_rlp_vectors() {
+    fn indexed_packets_match_geth_rlp_vectors() {
         let vectors: serde_json::Value =
             serde_json::from_str(include_str!("../testdata/eip8408/vectors.json",)).unwrap();
         let hashes = [0x11u64, 0x22, 0x33].map(|value| B256::from(U256::from(value))).to_vec();
@@ -612,7 +606,7 @@ mod tests {
 
     #[test]
     fn indexed_wire_vector_is_flat() {
-        // Local schema fixture; additional RLP vectors are checked above.
+        // Local schema fixture; independent geth RLP vectors are checked above.
         let pair = RequestPair { request_id: 1, message: request() };
         let expected = hex!("f86b01f842a00000000000000000000000000000000000000000000000000000000000000000a00101010101010101010101010101010101010101010101010101010101010101e290010101010101010101010101010101019002020202020202020202020202020202820001");
         assert_eq!(alloy_rlp::encode(&pair), expected);
@@ -733,6 +727,40 @@ mod tests {
     }
 
     #[test]
+    fn decode_bounds_precede_element_decoding() {
+        // Each list holds one malformed element past its bound, which must not be decoded.
+        let mut payload = alloy_rlp::encode(B256::ZERO).repeat(MAX_INDEXED_CELL_HASHES);
+        payload.push(0x80);
+        let mut hashes = Vec::new();
+        Header { list: true, payload_length: payload.len() }.encode(&mut hashes);
+        hashes.extend_from_slice(&payload);
+        let masks = CellMasks::Indexed {
+            masks: vec![B128::ZERO, B128::repeat_byte(1)],
+            mask_ids: (0..MAX_INDEXED_CELL_HASHES).map(|index| (index % 2) as u8).collect(),
+        };
+        let mut request = hashes.clone();
+        masks.encode(&mut request);
+        assert_eq!(
+            GetCells::decode(&mut request.as_slice()),
+            Err(Error::Custom("invalid indexed cell counts"))
+        );
+        let mut response = hashes;
+        response.push(0xc0);
+        masks.encode(&mut response);
+        assert_eq!(
+            Cells::decode(&mut response.as_slice()),
+            Err(Error::Custom("invalid indexed cell counts"))
+        );
+        let mut response = alloy_rlp::encode(vec![B256::ZERO]);
+        response.extend_from_slice(&hex!("c3c0c180"));
+        B128::ZERO.encode(&mut response);
+        assert_eq!(
+            Cells::decode(&mut response.as_slice()),
+            Err(Error::Custom("invalid cell response dimensions"))
+        );
+    }
+
+    #[test]
     fn response_correlation_and_subsets() {
         let request = indexed(
             vec![B256::ZERO, B256::repeat_byte(1)],
@@ -771,6 +799,12 @@ mod tests {
             masks: vec![B128::from(3u128.to_le_bytes())],
             mask_ids: Bytes::from_static(&[0]),
         };
+        assert_eq!(
+            response.validate_response(&request),
+            Err(Error::Custom("invalid cell response dimensions"))
+        );
+        response.cell_mask =
+            CellMasks::Indexed { masks: vec![B128::ZERO], mask_ids: Bytes::from_static(&[0]) };
         assert_eq!(
             response.validate_response(&request),
             Err(Error::Custom("invalid cell response dimensions"))
@@ -931,9 +965,8 @@ mod tests {
                 .unwrap(),
                 protocol
             );
-            let legacy = protocol.encoded_for_version(EthVersion::Eth72);
             assert!(
-                matches!(ProtocolMessage::<EthNetworkPrimitives>::decode_message(EthVersion::Eth72,&mut legacy.as_slice()),Err(crate::message::MessageError::Invalid(EthVersion::Eth72, id)) if id == message_type)
+                matches!(ProtocolMessage::<EthNetworkPrimitives>::decode_message(EthVersion::Eth72,&mut encoded.as_slice()),Err(crate::message::MessageError::Invalid(EthVersion::Eth72, id)) if id == message_type)
             );
         }
         assert_eq!(
@@ -1029,7 +1062,7 @@ mod tests {
             for message in messages {
                 let protocol = ProtocolMessage::from(message);
                 for version in [EthVersion::Eth72, EthVersion::Eth73] {
-                    let wire = protocol.encoded_for_version(version);
+                    let wire = alloy_rlp::encode(&protocol);
                     let mut buf = wire.as_slice();
                     prop_assert_eq!(&ProtocolMessage::decode_message(version, &mut buf).unwrap(),
                         &protocol);

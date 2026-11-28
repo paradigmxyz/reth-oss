@@ -14,7 +14,7 @@ use reth_eth_wire::{
     handshake::EthHandshake,
     multiplex::ProtocolConnection,
     protocol::{Protocol, ProtocolIngressLimits},
-    Capability, EthNetworkPrimitives, StatusBuilder, UnauthedEthStream,
+    Capability, EthNetworkPrimitives, StatusBuilder, UnauthedEthStream, MAX_PAYLOAD_SIZE,
 };
 use reth_eth_wire_types::message::MAX_MESSAGE_SIZE;
 use reth_ethereum_forks::EthereumHardfork;
@@ -159,6 +159,7 @@ async fn incoming_hello_with_spoofed_identity_is_rejected() {
         start_pending_incoming_session::<EthNetworkPrimitives>(
             Arc::new(EthHandshake::default()),
             MAX_MESSAGE_SIZE,
+            MAX_PAYLOAD_SIZE,
             disconnect_rx,
             SessionId(0),
             incoming,
@@ -216,6 +217,7 @@ async fn outgoing_hello_with_spoofed_identity_is_rejected() {
         start_pending_outbound_session::<EthNetworkPrimitives>(
             Arc::new(EthHandshake::default()),
             MAX_MESSAGE_SIZE,
+            MAX_PAYLOAD_SIZE,
             disconnect_rx,
             events_tx,
             SessionId(0),
@@ -257,6 +259,7 @@ async fn matching_identity_establishes_session() {
         start_pending_incoming_session::<EthNetworkPrimitives>(
             Arc::new(EthHandshake::default()),
             MAX_MESSAGE_SIZE,
+            MAX_PAYLOAD_SIZE,
             disconnect_rx,
             SessionId(0),
             incoming,
@@ -339,6 +342,7 @@ async fn extra_protocol_waits_for_status_handshake() {
             start_pending_incoming_session::<EthNetworkPrimitives>(
                 Arc::new(EthHandshake::default()),
                 MAX_MESSAGE_SIZE,
+                MAX_PAYLOAD_SIZE,
                 disconnect_rx,
                 SessionId(0),
                 incoming,
@@ -425,6 +429,7 @@ fn session_manager() -> SessionManager<EthNetworkPrimitives> {
         RlpxSubProtocols::default(),
         Arc::new(EthHandshake::default()),
         MAX_MESSAGE_SIZE,
+        MAX_PAYLOAD_SIZE,
         false,
     )
 }
@@ -510,6 +515,7 @@ async fn cancellation_interrupts_stalled_ecies() {
     let mut auth = Box::pin(authenticate::<EthNetworkPrimitives>(
         Arc::new(EthHandshake::default()),
         MAX_MESSAGE_SIZE,
+        MAX_PAYLOAD_SIZE,
         disconnect_rx,
         events,
         stream,
@@ -638,4 +644,17 @@ async fn inbound_capacity_rejection_preserves_outbound_attempt() {
             assert!(matches!(error, P2PStreamError::Disconnected(DisconnectReason::TooManyPeers)));
         }
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn silent_rejected_inbound_releases_disconnect_slot() {
+    let sessions = session_manager();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let _remote = TcpStream::connect(listener.local_addr().unwrap()).await.unwrap();
+    let (stream, _) = listener.accept().await.unwrap();
+    sessions.try_disconnect_incoming_connection(stream, DisconnectReason::TooManyPeers);
+    tokio::time::sleep(HANDSHAKE_TIMEOUT - Duration::from_secs(1)).await;
+    assert_eq!(Arc::strong_count(&sessions.disconnections_counter.0), 2);
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(Arc::strong_count(&sessions.disconnections_counter.0), 1);
 }

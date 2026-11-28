@@ -51,6 +51,7 @@ reth-rpc-layer.workspace = true
 reth-stages.workspace = true
 reth-static-file.workspace = true
 reth-storage-overlay = { workspace = true, features = ["rayon"] }
+reth-concurrency = { workspace = true, features = ["std"] }
 reth-tasks = { workspace = true, features = ["rayon"] }
 reth-tokio-util.workspace = true
 reth-tracing = { workspace = true, features = ["std"] }
@@ -62,6 +63,7 @@ reth-node-ethstats.workspace = true
 alloy-consensus.workspace = true
 alloy-network.workspace = true
 alloy-primitives.workspace = true
+alloy-rpc-client = { workspace = true, features = ["reqwest"] }
 alloy-rpc-types = { workspace = true, features = ["engine"] }
 alloy-eips = { workspace = true, features = ["kzg"] }
 alloy-rpc-types-engine.workspace = true
@@ -80,8 +82,8 @@ eyre.workspace = true
 parking_lot.workspace = true
 jsonrpsee.workspace = true
 fdlimit.workspace = true
-rayon.workspace = true
 serde_json.workspace = true
+reqwest.workspace = true
 
 # tracing
 tracing.workspace = true
@@ -121,6 +123,7 @@ test-utils = [
     "reth-node-ethereum/test-utils",
     "reth-primitives-traits/test-utils",
     "reth-tasks/test-utils",
+    "reth-concurrency/test-utils",
 ]
 trie-debug = [
     "reth-engine-tree/trie-debug",

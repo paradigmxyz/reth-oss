@@ -48,7 +48,6 @@ alloy-eips.workspace = true
 # misc
 eyre.workspace = true
 clap = { workspace = true, features = ["derive", "env", "string"] }
-humantime.workspace = true
 rand.workspace = true
 derive_more.workspace = true
 toml.workspace = true
@@ -56,11 +55,11 @@ serde.workspace = true
 strum = { workspace = true, features = ["derive"] }
 thiserror.workspace = true
 url.workspace = true
-ipnet.workspace = true
 # io
 dirs-next.workspace = true
 
 # obs
+log.workspace = true
 tracing.workspace = true
 reth-tracing-otlp.workspace = true
 
@@ -76,7 +75,6 @@ proptest.workspace = true
 tokio.workspace = true
 
 [features]
-# Features for smolgen to generate correct env vars
 jemalloc = ["reth-cli-util/jemalloc"]
 asm-keccak = [
     "alloy-primitives/asm-keccak",
@@ -89,11 +87,10 @@ tracy = ["reth-tracing/tracy"]
 min-error-logs = ["tracing/release_max_level_error"]
 min-warn-logs = ["tracing/release_max_level_warn"]
 min-info-logs = ["tracing/release_max_level_info"]
-min-debug-logs = ["tracing/release_max_level_debug"]
+# Only `min-debug-logs` sets `log/release_max_level_debug` because `log` errors if multiple
+# `release_max_level_*` features are unified (e.g. `--all-features` or `default` + `min-debug-logs`).
+min-debug-logs = ["tracing/release_max_level_debug", "log/release_max_level_debug"]
 min-trace-logs = ["tracing/release_max_level_trace"]
 
 # Debug recording for sparse trie mutations
 trie-debug = ["reth-engine-primitives/trie-debug"]
-
-[build-dependencies]
-smolgen = { workspace = true, features = ["build", "cargo", "emit_and_set", "gitcl"] }

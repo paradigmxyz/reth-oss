@@ -397,8 +397,9 @@ impl<N: NetworkPrimitives> ActiveSession<N> {
                 if let Some(req) = self.inflight_requests.get(&resp.request_id) &&
                     let RequestState::Waiting(PeerRequest::GetCells { request, .. }) =
                         &req.request &&
-                    resp.message.validate_response(request).is_err()
+                    let Err(err) = resp.message.validate_response(request)
                 {
+                    debug!(target: "net::session", request_id=?resp.request_id, %err, remote_peer_id=?self.remote_peer_id, "received invalid cells response");
                     if let Some(req) = self.inflight_requests.remove(&resp.request_id) &&
                         let RequestState::Waiting(request) = req.request
                     {
@@ -576,7 +577,7 @@ impl<N: NetworkPrimitives> ActiveSession<N> {
         let request_id = self.next_id();
         trace!(?request, peer_id=?self.remote_peer_id, ?request_id, "sending request to peer");
         let msg = match request.create_request_message(request_id) {
-            RequestMessage::Eth(msg) => msg.map_versioned(version).into(),
+            RequestMessage::Eth(msg) => msg.into(),
             RequestMessage::Snap(msg) => OutgoingMessage::Snap(msg),
         };
 
@@ -1388,7 +1389,7 @@ mod tests {
         handshake::EthHandshake, protocol::Protocol, BlockBodies, BlockHeaders,
         EthNetworkPrimitives, EthStream, GetBlockAccessLists, GetBlockBodies,
         HelloMessageWithProtocols, P2PStream, StatusBuilder, UnauthedEthStream, UnauthedP2PStream,
-        UnifiedStatus,
+        UnifiedStatus, MAX_PAYLOAD_SIZE,
     };
     use reth_eth_wire_types::{
         message::MAX_MESSAGE_SIZE,
@@ -1476,6 +1477,7 @@ mod tests {
             tokio::task::spawn(start_pending_incoming_session(
                 Arc::new(EthHandshake::default()),
                 MAX_MESSAGE_SIZE,
+                MAX_PAYLOAD_SIZE,
                 disconnect_rx,
                 session_id,
                 stream,
@@ -1660,6 +1662,41 @@ mod tests {
                 ))
                 .unwrap();
             client_stream.flush().await.unwrap();
+
+            let msg = client_stream.next().await.unwrap().unwrap_err();
+            assert_eq!(msg.as_disconnected(), Some(DisconnectReason::ProtocolBreach));
+        });
+
+        let (tx, rx) = oneshot::channel();
+
+        tokio::task::spawn(async move {
+            let (incoming, _) = listener.accept().await.unwrap();
+            let session = builder.connect_incoming(incoming).await;
+            session.await;
+
+            tx.send(()).unwrap();
+        });
+
+        fut.await;
+        rx.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_unsolicited_response_disconnects_with_protocol_breach() {
+        let mut builder = SessionBuilder::default();
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let local_addr = listener.local_addr().unwrap();
+
+        let fut = builder.with_client_stream(local_addr, async move |mut client_stream| {
+            assert_eq!(client_stream.version(), EthVersion::Eth71);
+            client_stream
+                .send(EthMessage::BlockAccessLists(RequestPair {
+                    request_id: 7,
+                    message: BlockAccessLists(vec![None; 1024]),
+                }))
+                .await
+                .unwrap();
 
             let msg = client_stream.next().await.unwrap().unwrap_err();
             assert_eq!(msg.as_disconnected(), Some(DisconnectReason::ProtocolBreach));
@@ -2358,6 +2395,7 @@ mod tests {
         assert!(calculate_new_timeout(timeout, rtt * 2) > timeout);
         assert!(calculate_new_timeout(timeout, rtt * 2) < timeout * 2);
     }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn dependency_proof_response_count_is_correlated_before_delivery() {
         tokio::time::timeout(Duration::from_secs(15), async {

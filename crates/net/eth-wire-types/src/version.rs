@@ -123,6 +123,11 @@ impl EthVersion {
             Self::Eth69 | Self::Eth70 | Self::Eth71 | Self::Eth72 | Self::Eth73 | Self::Eth74
         )
     }
+
+    /// Returns true if the version is eth/72 or newer.
+    pub const fn is_eth72_or_newer(&self) -> bool {
+        *self as u8 >= Self::Eth72 as u8
+    }
 }
 
 /// RLP encodes `EthVersion` as a single byte (66-74).
@@ -319,6 +324,15 @@ mod tests {
         assert!(EthVersion::Eth71.has_eth68_metadata());
         assert!(EthVersion::Eth72.has_eth68_metadata());
         assert!(EthVersion::Eth73.has_eth68_metadata());
+        assert!(EthVersion::Eth74.has_eth68_metadata());
+    }
+
+    #[test]
+    fn test_is_eth72_or_newer() {
+        assert!(!EthVersion::Eth71.is_eth72_or_newer());
+        assert!(EthVersion::Eth72.is_eth72_or_newer());
+        assert!(EthVersion::Eth73.is_eth72_or_newer());
+        assert!(EthVersion::Eth74.is_eth72_or_newer());
     }
 
     #[test]
