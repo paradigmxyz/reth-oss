@@ -152,6 +152,7 @@ mod tests {
     use reth_rpc_eth_api::{
         helpers::{EthCall, SpawnBlocking},
         node::RpcNodeCoreAdapter,
+        FullEthApiServer,
     };
     use reth_rpc_eth_types::{FrameSimulationPrefixShape, GasCap};
     use reth_transaction_pool::{
@@ -159,6 +160,46 @@ mod tests {
         validate::RecentRootReference,
         PoolPooledTx, TransactionOrigin, TransactionPool,
     };
+
+    #[tokio::test]
+    async fn bogota_rpc_preserves_legacy_nonce_calls() {
+        let address = Address::repeat_byte(1);
+        let accounts = AddressMap::from_iter([(address, ExtendedAccount::new(42, U256::ZERO))]);
+        let api = mock_eth_api(accounts);
+        // This call also compiles the unchanged two-argument Rust server signature.
+        assert_eq!(
+            reth_rpc_eth_api::EthApiServer::transaction_count(
+                &api,
+                address,
+                Some(BlockId::latest())
+            )
+            .await
+            .unwrap(),
+            U256::from(42)
+        );
+        let module = api.into_rpc_with_nonce_keys();
+        for params in [
+            serde_json::json!([address]),
+            serde_json::json!([address, "latest"]),
+            serde_json::json!([address, "latest", null]),
+            serde_json::json!([address, "latest", []]),
+            serde_json::json!([address, "latest", [], true]),
+            serde_json::json!({"address": address, "block_number": "latest", "nonce_keys": []}),
+        ] {
+            let request = serde_json::json!({"jsonrpc":"2.0", "id":1, "method":"eth_getTransactionCount", "params":params});
+            let (response, _) = module.raw_json_request(&request.to_string(), 1).await.unwrap();
+            let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+            assert_eq!(response, serde_json::json!({"jsonrpc":"2.0", "id":1, "result":"0x2a"}));
+        }
+        // A nonempty key list reaches the actual keyed state reader and its activation guard.
+        let request = serde_json::json!({"jsonrpc":"2.0", "id":1, "method":"eth_getTransactionCount", "params":[address, "latest", ["0x1"]]});
+        let (response, _) = module.raw_json_request(&request.to_string(), 1).await.unwrap();
+        let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+        let expected: jsonrpsee::types::ErrorObjectOwned =
+            reth_rpc_eth_types::EthApiError::KeyedNoncesNotActive.into();
+        assert_eq!(response["error"], serde_json::to_value(expected).unwrap());
+        assert!(module.method_names().any(|name| name == "eth_simulateFrameTransaction"));
+    }
 
     /// A sidecar with one zero blob. Its commitment and proof are the point at infinity, so it is
     /// valid without loading the KZG trusted setup.

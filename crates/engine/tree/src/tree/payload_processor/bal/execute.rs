@@ -74,6 +74,46 @@ where
     DB: Database + Send + 'a,
     MakeDb: Fn(bool) -> Result<DB, BalExecutionError> + Sync + 'a,
 {
+    execute_block_with_parent_timestamp(
+        runtime,
+        evm_config,
+        make_db,
+        input_bal,
+        evm_env,
+        ctx,
+        None,
+        transaction_count,
+        txs,
+        receipt_tx,
+    )
+}
+
+/// Executes a BAL block with its actual parent timestamp for fork transition changes.
+///
+/// `None` retains the legacy entry point's missing-parent behavior.
+#[expect(clippy::too_many_arguments, clippy::type_complexity)]
+pub fn execute_block_with_parent_timestamp<'a, Evm, Tx, Err, DB, MakeDb>(
+    runtime: &Runtime,
+    evm_config: &'a Evm,
+    make_db: &'a MakeDb,
+    input_bal: Arc<DecodedBal>,
+    evm_env: EvmEnvFor<Evm>,
+    ctx: ExecutionCtxFor<'a, Evm>,
+    parent_timestamp: Option<u64>,
+    transaction_count: usize,
+    txs: Receiver<(usize, Result<Tx, Err>)>,
+    receipt_tx: Sender<IndexedReceipt<ReceiptTy<Evm::Primitives>>>,
+) -> Result<
+    (BlockExecutionOutput<ReceiptTy<Evm::Primitives>>, Vec<Address>, BlockAccessList, Arc<EvmBal>),
+    BalExecutionError,
+>
+where
+    Evm: ConfigureEvm + 'static,
+    Tx: ExecutableTxFor<Evm> + Send + 'a,
+    Err: core::error::Error + Send + Sync + 'static,
+    DB: Database + Send + 'a,
+    MakeDb: Fn(bool) -> Result<DB, BalExecutionError> + Sync + 'a,
+{
     let worker_pool = runtime.bal_streaming_pool();
     let worker_count = worker_pool.current_num_threads().max(1).min(transaction_count);
 
@@ -85,6 +125,7 @@ where
             input_bal,
             evm_env,
             ctx,
+            parent_timestamp,
             transaction_count,
             txs,
             receipt_tx,
@@ -101,6 +142,7 @@ fn execute_block_inner<'scope, Evm, Tx, Err, DB, MakeDb>(
     input_bal: Arc<DecodedBal>,
     evm_env: EvmEnvFor<Evm>,
     ctx: ExecutionCtxFor<'scope, Evm>,
+    parent_timestamp: Option<u64>,
     transaction_count: usize,
     txs: Receiver<(usize, Result<Tx, Err>)>,
     receipt_tx: Sender<IndexedReceipt<ReceiptTy<Evm::Primitives>>>,
@@ -148,6 +190,7 @@ where
             Arc::clone(&received_bal),
             evm_env.clone(),
             ctx.clone(),
+            parent_timestamp,
         );
     }
     drop(result_tx);
@@ -155,6 +198,9 @@ where
     let evm = evm_config.evm_with_env(make_db(false)?, evm_env);
     let mut canonical_executor =
         evm_config.block_executor_factory().create_executor(evm, ctx.clone());
+    if let Some(timestamp) = parent_timestamp {
+        canonical_executor.set_parent_timestamp(timestamp);
+    }
     canonical_executor.enable_block_access_list_builder();
     canonical_executor.apply_pre_execution_changes()?;
 
@@ -1122,6 +1168,7 @@ mod tests {
                 received_bal,
                 evm_config.evm_env(block.header()).unwrap(),
                 evm_config.context_for_block(&block).unwrap(),
+                None,
             );
         });
         let mut outputs = ordered_worker_outputs(&result_rx, 3);

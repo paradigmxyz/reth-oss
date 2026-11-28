@@ -20,8 +20,12 @@ use alloy_serde::JsonStorageKey;
 use jsonrpsee::{core::RpcResult, proc_macros::rpc};
 use reth_primitives_traits::TxTy;
 use reth_rpc_convert::RpcTxReq;
-use reth_rpc_eth_types::{EthCapabilities, FillTransaction, FrameSimulationResult};
-use reth_rpc_server_types::{result::internal_rpc_err, ToRpcResult};
+use reth_rpc_eth_types::{EthApiError, EthCapabilities, FillTransaction, FrameSimulationResult};
+use reth_rpc_server_types::{
+    result::{internal_rpc_err, invalid_params_rpc_err},
+    ToRpcResult,
+};
+use serde_json::Value;
 use std::collections::HashMap;
 use tracing::trace;
 
@@ -37,6 +41,54 @@ pub trait FullEthApiServer:
         TxTy<Self::Primitives>,
     > + FullEthApi
 {
+    /// Builds the `eth` module with optional nonce keys on `eth_getTransactionCount`.
+    ///
+    /// The base Rust client and server retain their two-argument nonce method.
+    fn into_rpc_with_nonce_keys(self) -> jsonrpsee::RpcModule<Self>
+    where
+        Self: Sized + 'static,
+    {
+        let mut module = EthApiServer::into_rpc(self);
+        module.remove_method("eth_getTransactionCount");
+        module
+            .register_async_method("eth_getTransactionCount", |params, api| async move {
+                let values = match params.parse::<Value>()? {
+                    Value::Array(mut values) if !values.is_empty() => {
+                        values.resize(3, Value::Null);
+                        values
+                    }
+                    Value::Object(mut values) => vec![
+                        values.remove("address").unwrap_or(Value::Null),
+                        values.remove("block_number").unwrap_or(Value::Null),
+                        values.remove("nonce_keys").unwrap_or(Value::Null),
+                    ],
+                    _ => {
+                        return Err(invalid_params_rpc_err(
+                            "expected an address, optional block and optional nonce keys",
+                        ))
+                    }
+                };
+                let (address, block_number, nonce_keys) =
+                    serde_json::from_value::<(Address, Option<BlockId>, Option<Vec<U256>>)>(
+                        Value::Array(values),
+                    )
+                    .map_err(|error| invalid_params_rpc_err(error.to_string()))?;
+                if nonce_keys.as_ref().is_none_or(Vec::is_empty) {
+                    return EthApiServer::transaction_count(api.as_ref(), address, block_number)
+                        .await
+                }
+                EthState::transaction_count_with_nonce_keys(
+                    api.as_ref(),
+                    address,
+                    block_number,
+                    nonce_keys,
+                )
+                .await
+                .map_err(Into::into)
+            })
+            .expect("the base nonce handler was removed");
+        module
+    }
 }
 
 impl<T> FullEthApiServer for T where
@@ -220,13 +272,12 @@ pub trait EthApi<
         block_number: Option<BlockId>,
     ) -> RpcResult<HashMap<Address, Vec<B256>>>;
 
-    /// Returns the account nonce or the shared sequence of the selected EIP-8250 nonce keys.
+    /// Returns the account nonce at the selected block.
     #[method(name = "getTransactionCount")]
     async fn transaction_count(
         &self,
         address: Address,
         block_number: Option<BlockId>,
-        nonce_keys: Option<Vec<U256>>,
     ) -> RpcResult<U256>;
 
     /// Returns code at a given address at given block number.
@@ -250,17 +301,18 @@ pub trait EthApi<
         block_number: Option<BlockId>,
     ) -> RpcResult<Vec<SimulatedBlock<B>>>;
 
-    /// Validates and simulates a canonical EIP-8141 frame transaction without committing state.
+    /// Validates and simulates a canonical frame transaction without committing state.
     ///
-    /// The raw envelope must have type `0x06`. The response reports public-prefix validity and,
-    /// when valid, the payer, maximum cost, aggregate gas, and each frame's outcome and dual gas
-    /// use.
+    /// Implementations without frame transaction support return an unsupported-method error.
     #[method(name = "simulateFrameTransaction")]
     async fn simulate_frame_transaction(
         &self,
         raw_frame_transaction: Bytes,
         block_number: Option<BlockId>,
-    ) -> RpcResult<FrameSimulationResult>;
+    ) -> RpcResult<FrameSimulationResult> {
+        let _ = (raw_frame_transaction, block_number);
+        Err(EthApiError::Unsupported("frame transaction simulation").into())
+    }
 
     /// Executes a new message call immediately without creating a transaction on the block chain.
     #[method(name = "call")]
@@ -741,10 +793,9 @@ where
         &self,
         address: Address,
         block_number: Option<BlockId>,
-        nonce_keys: Option<Vec<U256>>,
     ) -> RpcResult<U256> {
         trace!(target: "rpc::eth", ?address, ?block_number, "Serving eth_getTransactionCount");
-        Ok(EthState::transaction_count(self, address, block_number, nonce_keys).await?)
+        Ok(EthState::transaction_count(self, address, block_number).await?)
     }
 
     /// Handler for: `eth_getCode`

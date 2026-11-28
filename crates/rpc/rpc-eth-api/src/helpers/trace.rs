@@ -538,7 +538,12 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> + Call {
             .map_err(Self::Error::from_eth_err)?;
         let changes = self
             .evm_config()
-            .pre_block_state_changes(&mut *db, evm_env, ctx)
+            .pre_block_state_changes_with_parent_timestamp(
+                &mut *db,
+                evm_env,
+                ctx,
+                parent.timestamp(),
+            )
             .map_err(Self::Error::from_eth_err)?;
         db.commit_source(&reth_execution_types::BundleSource(&changes));
         Ok(changes)

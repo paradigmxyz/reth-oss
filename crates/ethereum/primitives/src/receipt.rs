@@ -99,6 +99,27 @@ impl Receipt {
         }
     }
 
+    /// Returns standard Ethereum receipt data, or `None` for a frame receipt.
+    pub const fn as_standard(&self) -> Option<&StandardReceipt> {
+        match &self.inner {
+            ReceiptData::Standard(receipt) => Some(receipt),
+            ReceiptData::Frame(_) => None,
+        }
+    }
+
+    /// Extracts standard receipt data, returning the original frame receipt on failure.
+    pub fn try_into_standard(self) -> Result<StandardReceipt, Self> {
+        match self.inner {
+            ReceiptData::Standard(receipt) => Ok(receipt),
+            ReceiptData::Frame(_) => Err(self),
+        }
+    }
+
+    /// Calculates the receipt root without memoized log blooms.
+    pub fn calculate_receipt_root_no_memo(receipts: &[Self]) -> B256 {
+        calculate_receipt_root_no_memo(receipts)
+    }
+
     /// Returns the transaction type associated with this receipt.
     pub const fn tx_type(&self) -> TxType {
         match &self.inner {
@@ -483,6 +504,42 @@ mod tests {
     ///
     /// Withdrawals can be optionally included at the end of the RLP encoded message.
     pub(crate) type Block<T = TransactionSigned> = alloy_consensus::Block<T>;
+
+    #[test]
+    fn standard_accessors_preserve_frame_receipts() {
+        let standard = StandardReceipt {
+            tx_type: TxType::Eip1559,
+            success: true,
+            cumulative_gas_used: 21_000,
+            logs: vec![Log::new_unchecked(Address::ZERO, vec![], bytes!("1234"))],
+        };
+        let receipt = Receipt::standard(
+            standard.tx_type,
+            standard.success,
+            standard.cumulative_gas_used,
+            standard.logs.clone(),
+        );
+        assert_eq!(receipt.as_standard(), Some(&standard));
+        assert_eq!(receipt.try_into_standard(), Ok(standard));
+
+        let frame = Receipt::from(ReceiptEnvelope::Eip8141(
+            FrameReceiptPayload {
+                cumulative_gas_used: 42_000,
+                payer: Address::repeat_byte(1),
+                frame_receipts: vec![FrameReceipt {
+                    status: FrameStatus::Failure,
+                    ..Default::default()
+                }],
+            }
+            .into(),
+        ));
+        assert_eq!(frame.as_standard(), None);
+        assert_eq!(frame.clone().try_into_standard(), Err(frame.clone()));
+        assert_eq!(
+            Receipt::calculate_receipt_root_no_memo(core::slice::from_ref(&frame)),
+            calculate_receipt_root_no_memo(&[frame])
+        );
+    }
 
     #[test]
     fn frame_receipt_status_matches_its_consensus_envelope() {

@@ -76,6 +76,7 @@ pub(super) fn spawn_worker<'scope, Evm, Tx, Err, DB, MakeDb>(
     received_bal: Arc<<BlockExecutorFor<'scope, Evm> as BlockExecutor>::BlockAccessList>,
     evm_env: EvmEnvFor<Evm>,
     ctx: ExecutionCtxFor<'scope, Evm>,
+    parent_timestamp: Option<u64>,
 ) where
     Evm: ConfigureEvm + 'scope,
     Tx: ExecutableTxFor<Evm> + Send + 'scope,
@@ -93,6 +94,9 @@ pub(super) fn spawn_worker<'scope, Evm, Tx, Err, DB, MakeDb>(
                     evm_config.evm_with_env(WorkerDatabase(database.clone()), evm_env.clone());
                 let mut executor =
                     evm_config.block_executor_factory().create_executor(evm, ctx.clone());
+                if let Some(timestamp) = parent_timestamp {
+                    executor.set_parent_timestamp(timestamp);
+                }
                 executor.set_block_access_list(Arc::clone(&received_bal));
 
                 loop {
