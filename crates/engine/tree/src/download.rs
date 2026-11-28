@@ -458,7 +458,9 @@ impl<B: Block> BlockDownloader for NoopBlockDownloader<B> {
 mod tests {
     use super::*;
     use crate::test_utils::insert_headers_into_client;
-    use alloy_consensus::{proofs::calculate_withdrawals_root, Header};
+    use alloy_consensus::{
+        constants::EMPTY_TRANSACTIONS, proofs::calculate_withdrawals_root, Header,
+    };
     use alloy_eips::{
         eip1559::ETHEREUM_BLOCK_GAS_LIMIT_30M, eip7685::EMPTY_REQUESTS_HASH,
         eip7928::EMPTY_BLOCK_ACCESS_LIST_HASH, eip8288::dependency_digest,
@@ -733,23 +735,48 @@ mod tests {
         consensus.validate_header(ancestor.sealed_header()).unwrap();
         consensus.validate_block_pre_execution(&ancestor).unwrap();
 
-        for invalid_dependencies in [false, true] {
+        for (invalid_dependencies, transactions_root) in
+            [(false, EMPTY_TRANSACTIONS), (true, EMPTY_TRANSACTIONS), (false, B256::repeat_byte(2))]
+        {
             let mut header = header.clone();
             header.number += 1;
             header.parent_hash = ancestor.hash();
             header.timestamp += 1;
             header.dependency_proof_hash = Some(B256::repeat_byte(1));
+            header.transactions_root = transactions_root;
             if invalid_dependencies {
                 header.block_deps_hash = Some(B256::ZERO);
             }
             let block = SealedBlock::seal_slow(Block { header, body: body.clone() });
-            consensus.validate_header(block.sealed_header()).unwrap();
-            consensus.validate_body_against_header(block.body(), block.sealed_header()).unwrap();
-            assert_matches!(
-                (invalid_dependencies, consensus.validate_block_pre_execution(&block)),
-                (true, Err(ConsensusError::DependencyCommitmentMismatch)) |
-                    (false, Err(ConsensusError::DependencyProofCommitmentMismatch))
-            );
+            let assert_invalid_commitment = |result| {
+                if transactions_root != EMPTY_TRANSACTIONS {
+                    assert_matches!(
+                        result,
+                        Err(ConsensusError::BodyTransactionRootDiff(diff))
+                            if diff.got == EMPTY_TRANSACTIONS && diff.expected == transactions_root
+                    );
+                } else {
+                    assert_matches!(
+                        (invalid_dependencies, result),
+                        (true, Err(ConsensusError::DependencyCommitmentMismatch)) |
+                            (false, Err(ConsensusError::DependencyProofCommitmentMismatch))
+                    );
+                }
+            };
+            if transactions_root == EMPTY_TRANSACTIONS {
+                // Empty-block commitments are rejected from the header before body validation.
+                assert_invalid_commitment(consensus.validate_header(block.sealed_header()));
+                consensus
+                    .validate_body_against_header(block.body(), block.sealed_header())
+                    .unwrap();
+            } else {
+                // A valid header can still commit to a body that the peer did not return.
+                consensus.validate_header(block.sealed_header()).unwrap();
+                assert_invalid_commitment(
+                    consensus.validate_body_against_header(block.body(), block.sealed_header()),
+                );
+            }
+            assert_invalid_commitment(consensus.validate_block_pre_execution(&block));
             assert_matches!(
                 consensus.prepare_block_supplemental_data(block.sealed_header().clone()).await,
                 Err(ConsensusError::DependencyProofUnavailable(hash)) if hash == block.hash()
