@@ -135,6 +135,16 @@ impl Capability {
         Self::eth(EthVersion::Eth73)
     }
 
+    /// Returns the eth/74 capability.
+    pub const fn eth_74() -> Self {
+        Self::eth(EthVersion::Eth74)
+    }
+
+    /// Whether this is eth/74.
+    pub fn is_eth_v74(&self) -> bool {
+        self.name == "eth" && self.version == 74
+    }
+
     /// Returns the `snap/2` capability.
     pub const fn snap_2() -> Self {
         Self::snap(SnapVersion::V2)
@@ -237,6 +247,7 @@ pub struct Capabilities {
     eth_71: bool,
     eth_72: bool,
     eth_73: bool,
+    eth_74: bool,
 }
 
 impl Capabilities {
@@ -251,6 +262,7 @@ impl Capabilities {
             eth_71: value.iter().any(Capability::is_eth_v71),
             eth_72: value.iter().any(Capability::is_eth_v72),
             eth_73: value.iter().any(Capability::is_eth_v73),
+            eth_74: value.iter().any(Capability::is_eth_v74),
             inner: value,
         }
     }
@@ -274,7 +286,8 @@ impl Capabilities {
                     self.eth_70 ||
                     self.eth_71 ||
                     self.eth_72 ||
-                    self.eth_73
+                    self.eth_73 ||
+                    self.eth_74
             }
             EthVersion::Eth67 => {
                 self.eth_67 ||
@@ -283,7 +296,8 @@ impl Capabilities {
                     self.eth_70 ||
                     self.eth_71 ||
                     self.eth_72 ||
-                    self.eth_73
+                    self.eth_73 ||
+                    self.eth_74
             }
             EthVersion::Eth68 => {
                 self.eth_68 ||
@@ -291,15 +305,24 @@ impl Capabilities {
                     self.eth_70 ||
                     self.eth_71 ||
                     self.eth_72 ||
-                    self.eth_73
+                    self.eth_73 ||
+                    self.eth_74
             }
             EthVersion::Eth69 => {
-                self.eth_69 || self.eth_70 || self.eth_71 || self.eth_72 || self.eth_73
+                self.eth_69 ||
+                    self.eth_70 ||
+                    self.eth_71 ||
+                    self.eth_72 ||
+                    self.eth_73 ||
+                    self.eth_74
             }
-            EthVersion::Eth70 => self.eth_70 || self.eth_71 || self.eth_72 || self.eth_73,
-            EthVersion::Eth71 => self.eth_71 || self.eth_72 || self.eth_73,
-            EthVersion::Eth72 => self.eth_72 || self.eth_73,
-            EthVersion::Eth73 => self.eth_73,
+            EthVersion::Eth70 => {
+                self.eth_70 || self.eth_71 || self.eth_72 || self.eth_73 || self.eth_74
+            }
+            EthVersion::Eth71 => self.eth_71 || self.eth_72 || self.eth_73 || self.eth_74,
+            EthVersion::Eth72 => self.eth_72 || self.eth_73 || self.eth_74,
+            EthVersion::Eth73 => self.eth_73 || self.eth_74,
+            EthVersion::Eth74 => self.eth_74,
         }
     }
 
@@ -319,6 +342,7 @@ impl Capabilities {
     #[inline]
     pub const fn supports_eth(&self) -> bool {
         self.eth_73 ||
+            self.eth_74 ||
             self.eth_72 ||
             self.eth_71 ||
             self.eth_70 ||
@@ -394,6 +418,7 @@ impl Decodable for Capabilities {
             eth_71: inner.iter().any(Capability::is_eth_v71),
             eth_72: inner.iter().any(Capability::is_eth_v72),
             eth_73: inner.iter().any(Capability::is_eth_v73),
+            eth_74: inner.iter().any(Capability::is_eth_v74),
             inner,
         })
     }
@@ -425,6 +450,18 @@ mod tests {
         }
         let old = Capabilities::new(vec![Capability::eth_72()]);
         assert!(!old.supports_eth_at_least(&EthVersion::Eth73));
+    }
+
+    #[test]
+    fn eth74_capabilities_include_earlier_messages() {
+        let capabilities = Capabilities::new(vec![Capability::eth_74()]);
+        assert!(capabilities.supports_eth());
+        for version in 66..=74 {
+            assert!(capabilities.supports_eth_at_least(&EthVersion::try_from(version).unwrap()));
+        }
+        assert!(!Capabilities::new(vec![Capability::eth_73()])
+            .supports_eth_at_least(&EthVersion::Eth74));
+        assert_eq!(Capabilities::from(vec![Capability::eth_74()]), capabilities);
     }
 
     proptest! {

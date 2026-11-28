@@ -235,7 +235,8 @@ where
                 EthMessageID::NodeData |
                 EthMessageID::Receipts |
                 EthMessageID::BlockAccessLists |
-                EthMessageID::Cells
+                EthMessageID::Cells |
+                EthMessageID::DependencyProofs
         ) {
             return Ok(())
         }
@@ -464,6 +465,9 @@ impl PendingResponse {
             EthMessage::GetCells(req) => {
                 (req.request_id, EthMessageID::Cells, req.message.hashes.len())
             }
+            EthMessage::GetDependencyProofs(req) => {
+                (req.request_id, EthMessageID::DependencyProofs, req.message.0.len())
+            }
             _ => return None,
         };
         Some((request_id, Self { message_id, max_items }))
@@ -522,10 +526,10 @@ mod tests {
         hello::DEFAULT_TCP_PORT,
         message::RequestPair,
         p2pstream::UnauthedP2PStream,
-        BlockAccessLists, BlockBodies, BlockHeaders, Cells, EthMessage, EthMessageID, EthStream,
-        EthVersion, GetBlockAccessLists, GetBlockBodies, GetCells, GetReceipts70,
-        HelloMessageWithProtocols, PassthroughCodec, ProtocolMessage, ProtocolVersion, Receipts70,
-        Status, StatusMessage,
+        BlockAccessLists, BlockBodies, BlockHeaders, Cells, DependencyProofs, EthMessage,
+        EthMessageID, EthStream, EthVersion, GetBlockAccessLists, GetBlockBodies, GetCells,
+        GetDependencyProofs, GetReceipts70, HelloMessageWithProtocols, PassthroughCodec,
+        ProtocolMessage, ProtocolVersion, Receipts70, Status, StatusMessage,
     };
     use alloy_chains::NamedChain;
     use alloy_primitives::{
@@ -1132,7 +1136,7 @@ mod tests {
 
     #[test]
     fn cells_response_bounds_hashes_and_cells() {
-        for version in [EthVersion::Eth72, EthVersion::Eth73] {
+        for version in [EthVersion::Eth72, EthVersion::Eth73, EthVersion::Eth74] {
             let mut eth = EthStreamInner::<EthNetworkPrimitives>::new(version);
             let request = |request_id| {
                 EthMessage::GetCells(RequestPair {
@@ -1171,5 +1175,58 @@ mod tests {
                 ));
             }
         }
+    }
+
+    #[test]
+    fn dependency_proof_responses_require_a_matching_request() {
+        let response = |entries| {
+            EthMessage::DependencyProofs(RequestPair {
+                request_id: 7,
+                message: DependencyProofs(vec![Default::default(); entries]),
+            })
+        };
+        for entries in 0..=2 {
+            let mut eth = EthStreamInner::<EthNetworkPrimitives>::new(EthVersion::Eth74);
+            assert!(matches!(
+                eth.decode_message(encode(response(entries))).unwrap_err(),
+                EthStreamError::UnsolicitedResponse {
+                    message_id: EthMessageID::DependencyProofs,
+                    request_id: 7,
+                }
+            ));
+            eth.encode_message(EthMessage::GetDependencyProofs(RequestPair {
+                request_id: 7,
+                message: GetDependencyProofs(vec![B256::ZERO; 2]),
+            }))
+            .unwrap();
+            assert_eq!(eth.decode_message(encode(response(entries))).unwrap(), response(entries));
+            assert!(matches!(
+                eth.decode_message(encode(response(entries))).unwrap_err(),
+                EthStreamError::UnsolicitedResponse {
+                    message_id: EthMessageID::DependencyProofs,
+                    request_id: 7,
+                }
+            ));
+        }
+    }
+
+    #[test]
+    fn dependency_proof_count_is_checked_before_decoding() {
+        let mut eth = EthStreamInner::<EthNetworkPrimitives>::new(EthVersion::Eth74);
+        eth.encode_message(EthMessage::GetDependencyProofs(RequestPair {
+            request_id: 7,
+            message: GetDependencyProofs(vec![B256::ZERO]),
+        }))
+        .unwrap();
+        // Two malformed proof items must be rejected by count before proof decoding.
+        let wire = BytesMut::from(&[0x17, 0xc4, 7, 0xc2, 0xc0, 0xc0][..]);
+        assert!(matches!(
+            eth.decode_message(wire).unwrap_err(),
+            EthStreamError::ResponseExceedsRequest {
+                message_id: EthMessageID::DependencyProofs,
+                request_id: 7,
+                max_items: 1,
+            }
+        ));
     }
 }

@@ -1,4 +1,4 @@
-//! Implements Ethereum wire protocol for versions 66 through 73.
+//! Implements Ethereum wire protocol for versions 66 through 74.
 //! Defines structs/enums for messages, request-response pairs, and broadcasts.
 //! Handles compatibility with [`EthVersion`].
 //!
@@ -14,8 +14,9 @@ use super::{
 };
 use crate::{
     status::StatusMessage, BlockRangeUpdate, BroadcastPoolTransactions, CellMasks, Cells,
-    EthNetworkPrimitives, EthVersion, GetCells, NetworkPrimitives, NewPooledTransactionHashes72,
-    RawCapabilityMessage, Receipts69, Receipts70, SharedTransactions,
+    DependencyProofs, EthNetworkPrimitives, EthVersion, GetCells, GetDependencyProofs,
+    NetworkPrimitives, NewPooledTransactionHashes72, RawCapabilityMessage, Receipts69, Receipts70,
+    SharedTransactions,
 };
 use alloc::{boxed::Box, string::String, sync::Arc};
 use alloy_primitives::{
@@ -227,6 +228,18 @@ impl<N: NetworkPrimitives> ProtocolMessage<N> {
                 buf,
                 |request| &request.cell_mask,
             )?),
+            EthMessageID::GetDependencyProofs => {
+                if version < EthVersion::Eth74 {
+                    return Err(MessageError::Invalid(version, message_type))
+                }
+                EthMessage::GetDependencyProofs(RequestPair::decode(buf)?)
+            }
+            EthMessageID::DependencyProofs => {
+                if version < EthVersion::Eth74 {
+                    return Err(MessageError::Invalid(version, message_type))
+                }
+                EthMessage::DependencyProofs(RequestPair::decode(buf)?)
+            }
             EthMessageID::Other(_) => {
                 let raw_payload = Bytes::copy_from_slice(buf);
                 buf.advance(raw_payload.len());
@@ -376,6 +389,10 @@ pub enum EthMessage<N: NetworkPrimitives = EthNetworkPrimitives> {
     GetReceipts70(RequestPair<GetReceipts70>),
     /// Represents a `GetBlockAccessLists` request-response pair for eth/71.
     GetBlockAccessLists(RequestPair<GetBlockAccessLists>),
+    /// Requests dependency proofs over eth/74.
+    GetDependencyProofs(RequestPair<GetDependencyProofs>),
+    /// Returns a prefix of the requested dependency proofs over eth/74.
+    DependencyProofs(RequestPair<DependencyProofs>),
     /// Represents a Receipts request-response pair.
     #[cfg_attr(
         feature = "serde",
@@ -437,6 +454,8 @@ impl<N: NetworkPrimitives> EthMessage<N> {
             Self::Receipts(_) | Self::Receipts69(_) | Self::Receipts70(_) => EthMessageID::Receipts,
             Self::BlockRangeUpdate(_) => EthMessageID::BlockRangeUpdate,
             Self::GetBlockAccessLists(_) => EthMessageID::GetBlockAccessLists,
+            Self::GetDependencyProofs(_) => EthMessageID::GetDependencyProofs,
+            Self::DependencyProofs(_) => EthMessageID::DependencyProofs,
             Self::BlockAccessLists(_) => EthMessageID::BlockAccessLists,
             Self::Cells(_) => EthMessageID::Cells,
             Self::GetCells(_) => EthMessageID::GetCells,
@@ -453,6 +472,7 @@ impl<N: NetworkPrimitives> EthMessage<N> {
                 Self::GetReceipts(_) |
                 Self::GetReceipts70(_) |
                 Self::GetBlockAccessLists(_) |
+                Self::GetDependencyProofs(_) |
                 Self::GetCells(_) |
                 Self::GetPooledTransactions(_) |
                 Self::GetNodeData(_)
@@ -468,6 +488,7 @@ impl<N: NetworkPrimitives> EthMessage<N> {
                 Self::Receipts69(_) |
                 Self::Receipts70(_) |
                 Self::BlockAccessLists(_) |
+                Self::DependencyProofs(_) |
                 Self::BlockHeaders(_) |
                 Self::BlockBodies(_) |
                 Self::NodeData(_) |
@@ -497,6 +518,8 @@ impl<N: NetworkPrimitives> Encodable for EthMessage<N> {
             Self::GetReceipts(request) => request.encode(out),
             Self::GetReceipts70(request) => request.encode(out),
             Self::GetBlockAccessLists(request) => request.encode(out),
+            Self::GetDependencyProofs(request) => request.encode(out),
+            Self::DependencyProofs(response) => response.encode(out),
             Self::GetCells(request) => request.encode(out),
             Self::Receipts(receipts) => receipts.encode(out),
             Self::Receipts69(receipt69) => receipt69.encode(out),
@@ -527,6 +550,8 @@ impl<N: NetworkPrimitives> Encodable for EthMessage<N> {
             Self::GetReceipts(request) => request.length(),
             Self::GetReceipts70(request) => request.length(),
             Self::GetBlockAccessLists(request) => request.length(),
+            Self::GetDependencyProofs(request) => request.length(),
+            Self::DependencyProofs(response) => response.length(),
             Self::GetCells(request) => request.length(),
             Self::Receipts(receipts) => receipts.length(),
             Self::Receipts69(receipt69) => receipt69.length(),
@@ -649,6 +674,10 @@ pub enum EthMessageID {
     ///
     /// Introduced in Eth72
     Cells = 0x15,
+    /// Requests dependency proofs (eth/74).
+    GetDependencyProofs = 0x16,
+    /// Returns dependency proofs (eth/74).
+    DependencyProofs = 0x17,
     /// Represents unknown message types.
     Other(u8),
 }
@@ -677,13 +706,17 @@ impl EthMessageID {
             Self::BlockAccessLists => 0x13,
             Self::GetCells => 0x14,
             Self::Cells => 0x15,
+            Self::GetDependencyProofs => 0x16,
+            Self::DependencyProofs => 0x17,
             Self::Other(value) => *value, // Return the stored `u8`
         }
     }
 
     /// Returns the max value for the given version.
     pub const fn max(version: EthVersion) -> u8 {
-        if version.is_eth72_or_newer() {
+        if version.is_eth74() {
+            Self::DependencyProofs.to_u8()
+        } else if version.is_eth72_or_newer() {
             Self::Cells.to_u8()
         } else if version.is_eth71() {
             Self::BlockAccessLists.to_u8()
@@ -736,6 +769,8 @@ impl Decodable for EthMessageID {
             0x13 => Self::BlockAccessLists,
             0x14 => Self::GetCells,
             0x15 => Self::Cells,
+            0x16 => Self::GetDependencyProofs,
+            0x17 => Self::DependencyProofs,
             unknown => Self::Other(*unknown),
         };
         buf.advance(1);
@@ -768,6 +803,8 @@ impl TryFrom<usize> for EthMessageID {
             0x13 => Ok(Self::BlockAccessLists),
             0x14 => Ok(Self::GetCells),
             0x15 => Ok(Self::Cells),
+            0x16 => Ok(Self::GetDependencyProofs),
+            0x17 => Ok(Self::DependencyProofs),
             _ => Err("Invalid message ID"),
         }
     }

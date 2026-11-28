@@ -567,6 +567,12 @@ pub struct EthRequestHandlerMetrics {
     /// Number of `GetBlockAccessLists` requests received
     pub(crate) eth_block_access_lists_requests_received_total: Counter,
 
+    /// Number of `GetDependencyProofs` requests received.
+    pub(crate) eth_dependency_proofs_requests_received_total: Counter,
+
+    /// Number of dependency proof requests answered with an unserved empty prefix.
+    pub(crate) eth_dependency_proofs_requests_unserved_total: Counter,
+
     /// Number of `snap/2` (EIP-8189) requests received
     pub(crate) snap_requests_received_total: Counter,
 

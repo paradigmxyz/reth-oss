@@ -577,6 +577,13 @@ impl<N: NetworkPrimitives> NetworkManager<N> {
                     response,
                 })
             }
+            PeerRequest::GetDependencyProofs { request, response } => {
+                self.delegate_eth_request(IncomingEthRequest::GetDependencyProofs {
+                    peer_id,
+                    request,
+                    response,
+                })
+            }
             PeerRequest::GetCells { request, response } => self
                 .delegate_eth_request(IncomingEthRequest::GetCells { peer_id, request, response }),
             PeerRequest::GetPooledTransactions { request, response } => {

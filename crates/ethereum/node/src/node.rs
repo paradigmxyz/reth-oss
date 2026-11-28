@@ -25,9 +25,10 @@ use reth_network::{
     primitives::BasicNetworkPrimitives,
     protocol::IntoRlpxSubProtocol,
     transactions::dependencies::{
-        DependencyAdmission, DependencyProofProtocolHandler, DependencyProtocolHandler,
+        DependencyAdmission, DependencyProtocolHandler, PeerDependencyProofFetcher,
     },
-    NetworkHandle, NetworkProtocols, PeersInfo,
+    types::EthVersion,
+    NetworkHandle, NetworkManager, NetworkProtocols, PeersInfo,
 };
 use reth_node_api::{
     AddOnsContext, FullNodeComponents, HeaderTy, NodeAddOns, NodePrimitives,
@@ -803,22 +804,25 @@ where
         ctx: &BuilderContext<Node>,
         pool: Pool,
     ) -> eyre::Result<Self::Network> {
-        let network = ctx.network_builder().await?;
+        let mut network_config = ctx.network_config()?;
         let admission = ctx
             .chain_spec()
             .fork(EthereumHardfork::Bogota)
             .as_timestamp()
             .is_some()
             .then(|| DependencyAdmission::new(pool.clone()));
-        let handle = ctx.start_network(network, pool);
         if admission.is_some() {
-            let (handler, fetcher, task) =
-                DependencyProofProtocolHandler::new(ctx.provider().clone());
+            network_config.hello_message.protocols.push(EthVersion::Eth74.into());
+        }
+        let network = NetworkManager::builder(network_config).await?;
+        let proof_retrieval =
+            admission.is_some().then(|| PeerDependencyProofFetcher::new(network.handle()));
+        let handle = ctx.start_network(network, pool);
+        if let Some((fetcher, task)) = proof_retrieval {
             reth_provider::DependencyProofProvider::set_dependency_proof_fetcher(
                 ctx.provider(),
                 fetcher,
             )?;
-            handle.add_rlpx_sub_protocol(handler.into_rlpx_sub_protocol());
             let span = tracing::Span::current();
             ctx.task_executor().spawn_critical_with_graceful_shutdown_signal(
                 "eip8288-proof-retrieval",

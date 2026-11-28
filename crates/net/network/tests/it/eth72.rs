@@ -92,6 +92,7 @@ fn blob_tx_without_blobs() -> PooledTransactionVariant {
 
 #[test_case(EthVersion::Eth72; "eth72")]
 #[test_case(EthVersion::Eth73; "eth73")]
+#[test_case(EthVersion::Eth74; "eth74")]
 #[tokio::test(flavor = "multi_thread")]
 async fn test_eth72_blob_announcements_and_elided_pooled_response(eth_version: EthVersion) {
     reth_tracing::init_test_tracing();
@@ -207,6 +208,8 @@ async fn test_eth72_blob_announcements_and_elided_pooled_response(eth_version: E
 #[test_case(EthVersion::Eth72, false; "eth72_shared")]
 #[test_case(EthVersion::Eth73, false; "eth73_shared")]
 #[test_case(EthVersion::Eth73, true; "eth73_indexed")]
+#[test_case(EthVersion::Eth74, false; "eth74_shared")]
+#[test_case(EthVersion::Eth74, true; "eth74_indexed")]
 #[tokio::test(flavor = "multi_thread")]
 async fn test_cells_and_response_form(eth_version: EthVersion, indexed: bool) {
     let provider = MockEthProvider::default().with_genesis_block();

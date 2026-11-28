@@ -8,7 +8,7 @@ use alloy_consensus::{constants::KECCAK_EMPTY, BlockHeader, ReceiptWithBloom};
 use alloy_eips::BlockHashOrNumber;
 use alloy_primitives::{map::B256Set, Bytes, B256};
 use alloy_rlp::{length_of_length, Encodable};
-use futures::StreamExt;
+use futures::{stream::FuturesUnordered, StreamExt};
 use reth_eth_wire::{
     message::MAX_MESSAGE_SIZE,
     snap::{
@@ -20,6 +20,7 @@ use reth_eth_wire::{
     GetBlockAccessLists, GetBlockBodies, GetBlockHeaders, GetCells, GetNodeData, GetReceipts,
     GetReceipts70, HeadersDirection, NetworkPrimitives, NodeData, Receipts, Receipts69, Receipts70,
 };
+use reth_eth_wire_types::{DependencyProofs, GetDependencyProofs};
 use reth_network_p2p::{
     error::{RequestError, RequestResult},
     snap::client::SnapResponse,
@@ -28,12 +29,12 @@ use reth_network_peers::PeerId;
 use reth_primitives_traits::Block;
 use reth_storage_api::{
     errors::provider::ProviderResult, BalProvider, BlockReader, BytecodeReader,
-    GetBlockAccessListLimit, HeaderProvider, RangeEnd, RangeResponse, StateProviderFactory,
-    StateRangeProviderFactory,
+    DependencyProofStore, GetBlockAccessListLimit, HeaderProvider, RangeEnd, RangeResponse,
+    StateProviderFactory, StateRangeProviderFactory,
 };
 use reth_transaction_pool::{blobstore::NoopBlobStore, BlobStore};
 use std::{
-    collections::VecDeque,
+    collections::{BTreeMap, VecDeque},
     future::Future,
     pin::Pin,
     task::{Context, Poll},
@@ -93,6 +94,9 @@ pub const MAX_STORAGE_RANGE_ACCOUNTS_SERVE: usize = 1024;
 /// Maximum size of replies to data retrievals: 2MB
 pub const SOFT_RESPONSE_LIMIT: usize = 2 * 1024 * 1024;
 
+/// Per-peer dependency proof request interval, shared by serving and local scheduling.
+pub(crate) const DEPENDENCY_PROOF_REQUEST_INTERVAL: Duration = Duration::from_secs(1);
+
 /// Maximum number of `snap/2` account and storage range requests served at once.
 ///
 /// Serving an old root can rewind the trie block by block, so these requests run off the handler
@@ -141,6 +145,8 @@ pub struct EthRequestHandler<C, N: NetworkPrimitives = EthNetworkPrimitives> {
     metrics: EthRequestHandlerMetrics,
     /// `snap/2` range requests running or waiting off the handler task.
     state_range_requests: StateRangeRequests,
+    /// Bounded proof reads and per-peer serving cooldowns.
+    dependency_proof_requests: DependencyProofRequests,
 }
 
 // === impl EthRequestHandler ===
@@ -153,7 +159,14 @@ impl<C, N: NetworkPrimitives> EthRequestHandler<C, N> {
             incoming_requests: ReceiverStream::new(incoming),
             metrics: Default::default(),
             state_range_requests: Default::default(),
+            dependency_proof_requests: Default::default(),
         }
+    }
+
+    /// Sets the separate proof store used to serve eth/74 requests.
+    pub fn with_dependency_proof_store(mut self, store: DependencyProofStore) -> Self {
+        self.dependency_proof_requests.store = store;
+        self
     }
 
     /// Set blob store for the request handler
@@ -691,6 +704,7 @@ where
         // Frees the slots of finished state range tasks first, so the requests admitted below see
         // them and queued requests keep their turn.
         this.state_range_requests.poll(cx, &this.client, &this.metrics);
+        this.dependency_proof_requests.poll(cx);
 
         let mut acc = Duration::ZERO;
         let maybe_more_incoming_requests = metered_poll_nested_stream_with_budget!(
@@ -722,6 +736,12 @@ where
                     IncomingEthRequest::GetBlockAccessLists { peer_id, request, response } => {
                         this.on_block_access_lists_request(peer_id, request, response)
                     }
+                    IncomingEthRequest::GetDependencyProofs { peer_id, request, response } => {
+                        this.metrics.eth_dependency_proofs_requests_received_total.increment(1);
+                        if !this.dependency_proof_requests.on_request(peer_id, request, response) {
+                            this.metrics.eth_dependency_proofs_requests_unserved_total.increment(1);
+                        }
+                    }
                     IncomingEthRequest::GetCells { peer_id, request, response } => {
                         this.on_cells_request(peer_id, request, response)
                     }
@@ -737,6 +757,7 @@ where
         // Polled again so that the tasks and the queue timeout of requests admitted above wake this
         // handler.
         this.state_range_requests.poll(cx, &this.client, &this.metrics);
+        this.dependency_proof_requests.poll(cx);
 
         // stream is fully drained and import futures pending
         if maybe_more_incoming_requests {
@@ -1147,6 +1168,17 @@ pub enum IncomingEthRequest<N: NetworkPrimitives = EthNetworkPrimitives> {
         /// The channel sender for the response containing block access lists.
         response: oneshot::Sender<RequestResult<BlockAccessLists>>,
     },
+    /// Requests dependency proofs in block-hash order.
+    ///
+    /// The response should be sent through the channel.
+    GetDependencyProofs {
+        /// The ID of the peer to request dependency proofs from.
+        peer_id: PeerId,
+        /// The requested block hashes.
+        request: GetDependencyProofs,
+        /// The channel sender for the response containing dependency proofs.
+        response: oneshot::Sender<RequestResult<DependencyProofs>>,
+    },
     /// Request Cells from the peer.
     ///
     /// The response should be sent through the channel.
@@ -1171,6 +1203,86 @@ pub enum IncomingEthRequest<N: NetworkPrimitives = EthNetworkPrimitives> {
     },
 }
 
+/// Proof reads stay off the network task, with no unbounded waiting queue.
+#[derive(Debug, Default)]
+struct DependencyProofRequests {
+    store: DependencyProofStore,
+    tasks: FuturesUnordered<JoinHandle<()>>,
+    cooldowns: BTreeMap<PeerId, Instant>,
+}
+
+impl DependencyProofRequests {
+    fn poll(&mut self, cx: &mut Context<'_>) {
+        while let Poll::Ready(Some(result)) = self.tasks.poll_next_unpin(cx) {
+            if let Err(error) = result {
+                error!(target: "net::eth", %error, "Dependency proof read failed");
+            }
+        }
+    }
+
+    fn on_request(
+        &mut self,
+        peer: PeerId,
+        request: GetDependencyProofs,
+        response: oneshot::Sender<RequestResult<DependencyProofs>>,
+    ) -> bool {
+        const MAX_CONCURRENT: usize = 2;
+        const MAX_COOLDOWNS: usize = 128;
+        self.cooldowns.retain(|_, until| *until > Instant::now());
+        if self.tasks.len() >= MAX_CONCURRENT ||
+            self.cooldowns.contains_key(&peer) ||
+            self.cooldowns.len() >= MAX_COOLDOWNS
+        {
+            // An empty prefix leaves every requested hash unserved and eligible for retry.
+            if response.send(Ok(DependencyProofs::default())).is_err() {
+                debug!(target: "net::eth", "Dependency proof requester left");
+            }
+            return false
+        }
+        self.cooldowns.insert(peer, Instant::now() + DEPENDENCY_PROOF_REQUEST_INTERVAL);
+        let store = self.store.clone();
+        let span = Span::current();
+        self.tasks.push(tokio::task::spawn_blocking(move || {
+            let _entered = span.enter();
+            let proofs = get_dependency_proofs_response(&store, request);
+            if response.send(Ok(proofs)).is_err() {
+                debug!(target: "net::eth", "Dependency proof requester left");
+            }
+        }));
+        true
+    }
+}
+
+fn get_dependency_proofs_response(
+    store: &DependencyProofStore,
+    request: GetDependencyProofs,
+) -> DependencyProofs {
+    let mut proofs = Vec::new();
+    let mut bytes = 0;
+    let started = Instant::now();
+    for hash in request.0.into_iter().take(reth_eth_wire_types::MAX_DEPENDENCY_PROOFS) {
+        if bytes >= SOFT_RESPONSE_LIMIT || started.elapsed() >= Duration::from_secs(1) {
+            break
+        }
+        // Store writers authenticate post-activation commitments before inserting proofs. The
+        // corresponding header need not have reached this provider or durable storage yet.
+        let proof = match store.get(hash) {
+            Ok(proof) => proof.unwrap_or_default(),
+            Err(error) => {
+                error!(target: "net::eth", %error, %hash, "Cannot read dependency proof");
+                break
+            }
+        };
+        if proof.len() > alloy_eips::eip8288::MAX_DEPENDENCY_PROOF_BYTES {
+            error!(target: "net::eth", %hash, "Stored dependency proof exceeds size limit");
+            break
+        }
+        bytes += proof.length();
+        proofs.push(proof);
+    }
+    DependencyProofs(proofs)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1185,7 +1297,7 @@ mod tests {
     use reth_ethereum_primitives::Receipt;
     use reth_primitives_traits::Account;
     use reth_provider::test_utils::{ExtendedAccount, MockEthProvider};
-    use reth_storage_api::noop::NoopProvider;
+    use reth_storage_api::{noop::NoopProvider, DependencyProofProvider};
     use reth_transaction_pool::blobstore::{
         BlobStoreCleanupStat, BlobStoreError, PooledBlobSidecar,
     };
@@ -2457,5 +2569,107 @@ mod tests {
             }))
             .unwrap()
             .into()
+    }
+
+    #[derive(Clone, Debug, Default)]
+    struct TestDependencyProofs {
+        entries: Vec<(B256, Bytes)>,
+        fail: bool,
+        reads: Arc<AtomicUsize>,
+    }
+
+    impl DependencyProofProvider for TestDependencyProofs {
+        fn dependency_proof(&self, hash: B256) -> ProviderResult<Option<Bytes>> {
+            self.reads.fetch_add(1, Ordering::Relaxed);
+            if self.fail {
+                return Err(reth_storage_api::errors::provider::ProviderError::UnsupportedProvider)
+            }
+            Ok(self.entries.iter().find(|(key, _)| *key == hash).map(|(_, proof)| proof.clone()))
+        }
+        fn insert_dependency_proof(&self, _: B256, _: Bytes) -> ProviderResult<()> {
+            Err(reth_storage_api::errors::provider::ProviderError::UnsupportedProvider)
+        }
+    }
+
+    #[test]
+    fn dependency_proof_serving_preserves_positions_without_headers() {
+        let hashes = (0..5).map(B256::repeat_byte).collect::<Vec<_>>();
+        let present = Bytes::from_static(b"proof");
+        let store = TestDependencyProofs {
+            entries: vec![(hashes[1], present.clone()), (hashes[3], Bytes::new())],
+            ..Default::default()
+        };
+        let reads = store.reads.clone();
+        let response = get_dependency_proofs_response(
+            &DependencyProofStore::new(store),
+            GetDependencyProofs(hashes),
+        );
+        assert_eq!(
+            response,
+            DependencyProofs(vec![Bytes::new(), present, Bytes::new(), Bytes::new(), Bytes::new()])
+        );
+        assert_eq!(reads.load(Ordering::Relaxed), 5);
+    }
+
+    #[test]
+    fn dependency_proof_serving_stops_at_soft_size_lookup_and_local_error_limits() {
+        let hash = B256::repeat_byte(1);
+        let proof = Bytes::from(vec![1; alloy_eips::eip8288::MAX_DEPENDENCY_PROOF_BYTES]);
+        let store =
+            TestDependencyProofs { entries: vec![(hash, proof.clone())], ..Default::default() };
+        let response = get_dependency_proofs_response(
+            &DependencyProofStore::new(store),
+            GetDependencyProofs(vec![hash; 4]),
+        );
+        assert_eq!(response, DependencyProofs(vec![proof.clone(); 2]));
+        let hashes = vec![B256::ZERO; reth_eth_wire_types::MAX_DEPENDENCY_PROOFS + 1];
+        assert_eq!(
+            get_dependency_proofs_response(
+                &DependencyProofStore::default(),
+                GetDependencyProofs(hashes)
+            )
+            .0
+            .len(),
+            reth_eth_wire_types::MAX_DEPENDENCY_PROOFS
+        );
+        for store in [
+            TestDependencyProofs { fail: true, ..Default::default() },
+            TestDependencyProofs {
+                entries: vec![(hash, Bytes::from(vec![1; proof.len() + 1]))],
+                ..Default::default()
+            },
+        ] {
+            assert_eq!(
+                get_dependency_proofs_response(
+                    &DependencyProofStore::new(store),
+                    GetDependencyProofs(vec![hash])
+                ),
+                DependencyProofs::default()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn dependency_proof_serving_rate_limits_and_concurrency_are_shared_per_peer() {
+        let mut requests = DependencyProofRequests::default();
+        let peer = PeerId::repeat_byte(1);
+        let (response, first) = oneshot::channel();
+        requests.on_request(peer, GetDependencyProofs::default(), response);
+        let (response, second) = oneshot::channel();
+        requests.on_request(peer, GetDependencyProofs::default(), response);
+        assert_eq!(second.await.unwrap().unwrap(), DependencyProofs::default());
+        assert_eq!(requests.tasks.len(), 1);
+        let (response, third) = oneshot::channel();
+        requests.on_request(PeerId::repeat_byte(2), GetDependencyProofs::default(), response);
+        assert_eq!(requests.tasks.len(), 2);
+        let (response, fourth) = oneshot::channel();
+        requests.on_request(PeerId::repeat_byte(3), GetDependencyProofs::default(), response);
+        assert_eq!(fourth.await.unwrap().unwrap(), DependencyProofs::default());
+        assert_eq!(requests.tasks.len(), 2);
+        assert_eq!(first.await.unwrap().unwrap(), DependencyProofs::default());
+        assert_eq!(third.await.unwrap().unwrap(), DependencyProofs::default());
+        while let Some(result) = requests.tasks.next().await {
+            result.unwrap();
+        }
     }
 }

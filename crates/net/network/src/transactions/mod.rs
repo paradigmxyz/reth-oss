@@ -2229,7 +2229,9 @@ impl PooledTransactionsHashesBuilder {
             EthVersion::Eth68 | EthVersion::Eth69 | EthVersion::Eth70 | EthVersion::Eth71 => {
                 Self::Eth68(Default::default())
             }
-            EthVersion::Eth72 | EthVersion::Eth73 => Self::Eth72(Default::default()),
+            EthVersion::Eth72 | EthVersion::Eth73 | EthVersion::Eth74 => {
+                Self::Eth72(Default::default())
+            }
         }
     }
 
@@ -2243,11 +2245,9 @@ impl PooledTransactionsHashesBuilder {
             EthVersion::Eth68 | EthVersion::Eth69 | EthVersion::Eth70 | EthVersion::Eth71 => {
                 Self::Eth68(NewPooledTransactionHashes68::with_capacity(capacity))
             }
-            EthVersion::Eth72 | EthVersion::Eth73 => {
-                Self::Eth72(SmallVec::from_buf([NewPooledTransactionHashes72::with_capacity(
-                    capacity,
-                )]))
-            }
+            EthVersion::Eth72 | EthVersion::Eth73 | EthVersion::Eth74 => Self::Eth72(
+                SmallVec::from_buf([NewPooledTransactionHashes72::with_capacity(capacity)]),
+            ),
         }
     }
 

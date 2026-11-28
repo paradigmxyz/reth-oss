@@ -978,6 +978,9 @@ impl<Node: FullNodeTypes> BuilderContext<Node> {
             .split_with_handle();
 
         self.executor.spawn_critical_blocking_task("p2p txpool", txpool);
+        let eth = eth.with_dependency_proof_store(reth_provider::DependencyProofStore::new(
+            self.provider().clone(),
+        ));
         self.executor.spawn_critical_blocking_task("p2p eth request handler", eth);
 
         let default_peers_path = self.config().datadir().known_peers();

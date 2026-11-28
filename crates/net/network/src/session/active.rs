@@ -438,6 +438,30 @@ impl<N: NetworkPrimitives> ActiveSession<N> {
 
                 OnIncomingMessageOutcome::Ok
             }
+            EthMessage::GetDependencyProofs(req) => {
+                on_request!(req, DependencyProofs, GetDependencyProofs)
+            }
+            EthMessage::DependencyProofs(resp) => {
+                if let Some(req) = self.inflight_requests.get(&resp.request_id) &&
+                    let RequestState::Waiting(PeerRequest::GetDependencyProofs {
+                        request, ..
+                    }) = &req.request &&
+                    resp.message.0.len() > request.0.len()
+                {
+                    if let Some(req) = self.inflight_requests.remove(&resp.request_id) &&
+                        let RequestState::Waiting(request) = req.request
+                    {
+                        request.send_bad_response();
+                    }
+                    return OnIncomingMessageOutcome::BadMessage {
+                        error: EthStreamError::InvalidMessage(MessageError::Other(
+                            "too many dependency proofs".into(),
+                        )),
+                        message: EthMessage::DependencyProofs(resp),
+                    }
+                }
+                on_response!(resp, GetDependencyProofs)
+            }
             EthMessage::GetCells(resp) => {
                 on_request!(resp, Cells, GetCells)
             }
@@ -526,6 +550,13 @@ impl<N: NetworkPrimitives> ActiveSession<N> {
             );
             request.send_err_response(RequestError::UnsupportedCapability);
             return;
+        }
+
+        if let PeerRequest::GetDependencyProofs { request: proofs, .. } = &request &&
+            proofs.0.len() > reth_eth_wire_types::MAX_DEPENDENCY_PROOFS
+        {
+            request.send_err_response(RequestError::InvalidRequest);
+            return
         }
 
         // `GetSnap` isn't covered by the eth-version check above, and a connection that never
@@ -1350,7 +1381,7 @@ mod tests {
     use super::*;
     use crate::session::{handle::PendingSessionEvent, start_pending_incoming_session};
     use alloy_eips::eip2124::ForkFilter;
-    use alloy_primitives::{B128, B256};
+    use alloy_primitives::{Bytes, B128, B256};
     use futures::task::noop_waker;
     use reth_chainspec::MAINNET;
     use reth_ecies::stream::ECIESStream;
@@ -1366,7 +1397,8 @@ mod tests {
             AccountRangeMessage, BlockAccessListsMessage, GetAccountRangeMessage,
             GetBlockAccessListsMessage,
         },
-        BlockAccessLists, CellMasks, Cells, EthMessageID, GetCells, NewPooledTransactionHashes72,
+        BlockAccessLists, CellMasks, Cells, DependencyProofs, EthMessageID, GetCells,
+        GetDependencyProofs, NewPooledTransactionHashes72,
     };
     use reth_ethereum_forks::EthereumHardfork;
     use reth_network_p2p::error::RequestResult;
@@ -2362,5 +2394,42 @@ mod tests {
         assert!(calculate_new_timeout(timeout, rtt / 2) > timeout / 2);
         assert!(calculate_new_timeout(timeout, rtt * 2) > timeout);
         assert!(calculate_new_timeout(timeout, rtt * 2) < timeout * 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dependency_proof_response_count_is_correlated_before_delivery() {
+        tokio::time::timeout(Duration::from_secs(15), async {
+            let mut builder = SessionBuilder::default();
+            builder.hello = HelloMessageWithProtocols::builder(builder.local_peer_id).protocols(vec![EthVersion::Eth74.into()]).build();
+            builder.status.set_eth_version(EthVersion::Eth74);
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let client = builder.with_client_stream(listener.local_addr().unwrap(), async move |stream| {
+                let _stream = stream;
+                futures::future::pending::<()>().await;
+            });
+            let client = tokio::spawn(client);
+            let (incoming, _) = listener.accept().await.unwrap();
+            let mut session = builder.connect_incoming(incoming).await;
+            let (response, receiver) = oneshot::channel();
+            session.on_internal_peer_request(PeerRequest::GetDependencyProofs {
+                request: GetDependencyProofs(vec![B256::ZERO; reth_eth_wire_types::MAX_DEPENDENCY_PROOFS + 1]), response,
+            }, session.request_deadline());
+            assert_eq!(receiver.await.unwrap().unwrap_err(), RequestError::InvalidRequest);
+            assert!(session.inflight_requests.is_empty());
+            let (response, receiver) = oneshot::channel();
+            session.on_internal_peer_request(PeerRequest::GetDependencyProofs {
+                request: GetDependencyProofs(vec![B256::ZERO]), response,
+            }, session.request_deadline());
+            let request_id = *session.inflight_requests.keys().next().unwrap();
+            let outcome = session.on_incoming_message(EthMessage::DependencyProofs(RequestPair {
+                request_id,
+                message: DependencyProofs(vec![Bytes::new(); 2]),
+            }));
+            assert!(matches!(outcome, OnIncomingMessageOutcome::BadMessage { error: EthStreamError::InvalidMessage(MessageError::Other(message)), .. } if message == "too many dependency proofs"));
+            assert_eq!(receiver.await.unwrap().unwrap_err(), RequestError::BadResponse);
+            assert!(session.inflight_requests.is_empty());
+            client.abort();
+            assert!(client.await.unwrap_err().is_cancelled());
+        }).await.unwrap();
     }
 }

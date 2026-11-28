@@ -45,13 +45,15 @@ pub enum EthVersion {
     Eth72 = 72,
     /// Indexed cell requests and responses ([EIP-8408](https://eips.ethereum.org/EIPS/eip-8408)).
     Eth73 = 73,
+    /// Dependency proof exchange (EIP-8512).
+    Eth74 = 74,
 }
 
 impl EthVersion {
-    /// The latest known eth version
+    /// The latest eth version enabled by default; experimental versions are opt-in.
     pub const LATEST: Self = Self::Eth71;
 
-    /// All known eth versions
+    /// Eth versions advertised by default, in descending preference order.
     pub const ALL_VERSIONS: &'static [Self] =
         &[Self::Eth71, Self::Eth70, Self::Eth69, Self::Eth68, Self::Eth67, Self::Eth66];
 
@@ -74,7 +76,13 @@ impl EthVersion {
     pub const fn has_eth68_metadata(&self) -> bool {
         matches!(
             self,
-            Self::Eth68 | Self::Eth69 | Self::Eth70 | Self::Eth71 | Self::Eth72 | Self::Eth73
+            Self::Eth68 |
+                Self::Eth69 |
+                Self::Eth70 |
+                Self::Eth71 |
+                Self::Eth72 |
+                Self::Eth73 |
+                Self::Eth74
         )
     }
 
@@ -103,9 +111,17 @@ impl EthVersion {
         matches!(self, Self::Eth73)
     }
 
+    /// Returns true if the version is eth/74.
+    pub const fn is_eth74(&self) -> bool {
+        matches!(self, Self::Eth74)
+    }
+
     /// Returns true if the version is eth/69 or newer.
     pub const fn is_eth69_or_newer(&self) -> bool {
-        matches!(self, Self::Eth69 | Self::Eth70 | Self::Eth71 | Self::Eth72 | Self::Eth73)
+        matches!(
+            self,
+            Self::Eth69 | Self::Eth70 | Self::Eth71 | Self::Eth72 | Self::Eth73 | Self::Eth74
+        )
     }
 
     /// Returns true if the version is eth/72 or newer.
@@ -114,7 +130,7 @@ impl EthVersion {
     }
 }
 
-/// RLP encodes `EthVersion` as a single byte (66-73).
+/// RLP encodes `EthVersion` as a single byte (66-74).
 impl Encodable for EthVersion {
     fn encode(&self, out: &mut dyn BufMut) {
         (*self as u8).encode(out)
@@ -126,7 +142,7 @@ impl Encodable for EthVersion {
 }
 
 /// RLP decodes a single byte into `EthVersion`.
-/// Returns error if byte is not a valid version (66-73).
+/// Returns error if byte is not a valid version (66-74).
 impl Decodable for EthVersion {
     fn decode(buf: &mut &[u8]) -> alloy_rlp::Result<Self> {
         let version = u8::decode(buf)?;
@@ -157,6 +173,7 @@ impl TryFrom<&str> for EthVersion {
             "71" => Ok(Self::Eth71),
             "72" => Ok(Self::Eth72),
             "73" => Ok(Self::Eth73),
+            "74" => Ok(Self::Eth74),
             _ => Err(ParseVersionError(s.to_string())),
         }
     }
@@ -185,6 +202,7 @@ impl TryFrom<u8> for EthVersion {
             71 => Ok(Self::Eth71),
             72 => Ok(Self::Eth72),
             73 => Ok(Self::Eth73),
+            74 => Ok(Self::Eth74),
             _ => Err(ParseVersionError(u.to_string())),
         }
     }
@@ -218,6 +236,7 @@ impl From<EthVersion> for &'static str {
             EthVersion::Eth71 => "71",
             EthVersion::Eth72 => "72",
             EthVersion::Eth73 => "73",
+            EthVersion::Eth74 => "74",
         }
     }
 }
@@ -305,6 +324,7 @@ mod tests {
         assert!(EthVersion::Eth71.has_eth68_metadata());
         assert!(EthVersion::Eth72.has_eth68_metadata());
         assert!(EthVersion::Eth73.has_eth68_metadata());
+        assert!(EthVersion::Eth74.has_eth68_metadata());
     }
 
     #[test]
@@ -312,6 +332,7 @@ mod tests {
         assert!(!EthVersion::Eth71.is_eth72_or_newer());
         assert!(EthVersion::Eth72.is_eth72_or_newer());
         assert!(EthVersion::Eth73.is_eth72_or_newer());
+        assert!(EthVersion::Eth74.is_eth72_or_newer());
     }
 
     #[test]

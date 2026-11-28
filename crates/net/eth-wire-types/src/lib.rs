@@ -59,3 +59,6 @@ pub use snap::*;
 /// re-export for convenience
 pub use alloy_eips::eip1898::{BlockHashOrNumber, HashOrNumber};
 pub use alloy_eips::eip2718::Encodable2718;
+
+mod dependency_proofs;
+pub use dependency_proofs::*;

@@ -41,7 +41,7 @@ use tokio::{
 use tracing::debug;
 
 mod proofs;
-pub use proofs::{DependencyProofConnection, DependencyProofProtocolHandler};
+pub use proofs::PeerDependencyProofFetcher;
 
 const EVENT_CAPACITY: usize = 16;
 const PEER_CAPACITY: usize = 1024;
