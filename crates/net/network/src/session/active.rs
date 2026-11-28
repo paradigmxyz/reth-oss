@@ -49,7 +49,7 @@ use tokio::{
 };
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::PollSender;
-use tracing::{debug, trace};
+use tracing::{debug, error, trace};
 
 /// The recommended interval at which to check if a new range update should be sent to the remote
 /// peer.
@@ -394,6 +394,19 @@ impl<N: NetworkPrimitives> ActiveSession<N> {
                 on_response!(resp, GetBlockAccessLists)
             }
             EthMessage::Cells(resp) => {
+                if let Some(req) = self.inflight_requests.get(&resp.request_id) &&
+                    let RequestState::Waiting(PeerRequest::GetCells { request, .. }) =
+                        &req.request &&
+                    resp.message.validate_response(request).is_err()
+                {
+                    if let Some(req) = self.inflight_requests.remove(&resp.request_id) &&
+                        let RequestState::Waiting(request) = req.request
+                    {
+                        request.send_bad_response();
+                    }
+                    self.on_bad_message();
+                    return OnIncomingMessageOutcome::Ok
+                }
                 on_response!(resp, GetCells)
             }
             EthMessage::BlockRangeUpdate(msg) => {
@@ -423,6 +436,30 @@ impl<N: NetworkPrimitives> ActiveSession<N> {
                 }
 
                 OnIncomingMessageOutcome::Ok
+            }
+            EthMessage::GetDependencyProofs(req) => {
+                on_request!(req, DependencyProofs, GetDependencyProofs)
+            }
+            EthMessage::DependencyProofs(resp) => {
+                if let Some(req) = self.inflight_requests.get(&resp.request_id) &&
+                    let RequestState::Waiting(PeerRequest::GetDependencyProofs {
+                        request, ..
+                    }) = &req.request &&
+                    resp.message.0.len() > request.0.len()
+                {
+                    if let Some(req) = self.inflight_requests.remove(&resp.request_id) &&
+                        let RequestState::Waiting(request) = req.request
+                    {
+                        request.send_bad_response();
+                    }
+                    return OnIncomingMessageOutcome::BadMessage {
+                        error: EthStreamError::InvalidMessage(MessageError::Other(
+                            "too many dependency proofs".into(),
+                        )),
+                        message: EthMessage::DependencyProofs(resp),
+                    }
+                }
+                on_response!(resp, GetDependencyProofs)
             }
             EthMessage::GetCells(resp) => {
                 on_request!(resp, Cells, GetCells)
@@ -514,11 +551,26 @@ impl<N: NetworkPrimitives> ActiveSession<N> {
             return;
         }
 
+        if let PeerRequest::GetDependencyProofs { request: proofs, .. } = &request &&
+            proofs.0.len() > reth_eth_wire_types::MAX_DEPENDENCY_PROOFS
+        {
+            request.send_err_response(RequestError::InvalidRequest);
+            return
+        }
+
         // `GetSnap` isn't covered by the eth-version check above, and a connection that never
         // negotiated `snap/2` can't send one without erroring the whole session.
         if matches!(request, PeerRequest::GetSnap { .. }) && !self.conn.supports_snap() {
             request.send_err_response(RequestError::UnsupportedCapability);
             return;
+        }
+
+        if let PeerRequest::GetCells { request: cells, .. } = &request &&
+            let Err(err) = cells.cell_mask.validate(&cells.hashes, false)
+        {
+            error!(target: "net", peer_id=?self.remote_peer_id, %err, "Rejected invalid local cell request");
+            request.send_err_response(RequestError::InvalidRequest);
+            return
         }
 
         let request_id = self.next_id();
@@ -1328,7 +1380,7 @@ mod tests {
     use super::*;
     use crate::session::{handle::PendingSessionEvent, start_pending_incoming_session};
     use alloy_eips::eip2124::ForkFilter;
-    use alloy_primitives::{B128, B256};
+    use alloy_primitives::{Bytes, B128, B256};
     use futures::task::noop_waker;
     use reth_chainspec::MAINNET;
     use reth_ecies::stream::ECIESStream;
@@ -1344,7 +1396,8 @@ mod tests {
             AccountRangeMessage, BlockAccessListsMessage, GetAccountRangeMessage,
             GetBlockAccessListsMessage,
         },
-        BlockAccessLists, EthMessageID, NewPooledTransactionHashes72,
+        BlockAccessLists, CellMasks, Cells, DependencyProofs, EthMessageID, GetCells,
+        GetDependencyProofs, NewPooledTransactionHashes72,
     };
     use reth_ethereum_forks::EthereumHardfork;
     use reth_network_p2p::error::RequestResult;
@@ -1945,6 +1998,106 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn invalid_local_cells_requests_do_not_affect_session() {
+        tokio::time::timeout(Duration::from_secs(15), async {
+            let mut builder = SessionBuilder::default();
+            builder.hello = HelloMessageWithProtocols::builder(builder.local_peer_id)
+                .protocols(vec![EthVersion::Eth73.into()])
+                .build();
+            builder.status.set_eth_version(EthVersion::Eth73);
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let valid = GetCells::from_masks(
+                vec![B256::ZERO, B256::repeat_byte(1)],
+                vec![B128::repeat_byte(1), B128::repeat_byte(2)],
+            )
+            .unwrap();
+            let expected = valid.clone();
+            let reply = Cells {
+                cell_mask: CellMasks::Indexed { masks: vec![], mask_ids: Default::default() },
+                ..Default::default()
+            };
+            let client_reply = reply.clone();
+            let client = tokio::spawn(builder.with_client_stream(
+                listener.local_addr().unwrap(),
+                async move |mut stream| {
+                    let EthMessage::GetCells(request) = stream.next().await.unwrap().unwrap()
+                    else {
+                        panic!("expected the valid cell request")
+                    };
+                    assert_eq!(request.message, expected);
+                    stream
+                        .send(EthMessage::Cells(RequestPair {
+                            request_id: request.request_id,
+                            message: client_reply,
+                        }))
+                        .await
+                        .unwrap();
+                },
+            ));
+            let (incoming, _) = listener.accept().await.unwrap();
+            let mut session = builder.connect_incoming(incoming).await;
+            assert_eq!(session.conn.version(), EthVersion::Eth73);
+            let mut invalid = Vec::new();
+            for ids in [vec![0], vec![0, 2], vec![1, 0], vec![0, 0]] {
+                invalid.push(GetCells {
+                    hashes: valid.hashes.clone(),
+                    cell_mask: CellMasks::Indexed {
+                        masks: vec![B128::repeat_byte(1), B128::repeat_byte(2)],
+                        mask_ids: ids.into(),
+                    },
+                });
+            }
+            invalid
+                .push(GetCells { hashes: vec![B256::ZERO; 2], cell_mask: valid.cell_mask.clone() });
+            invalid.push(GetCells {
+                hashes: valid.hashes.clone(),
+                cell_mask: CellMasks::Indexed {
+                    masks: vec![B128::ZERO; 2],
+                    mask_ids: vec![0, 1].into(),
+                },
+            });
+            invalid.push(GetCells {
+                hashes: vec![],
+                cell_mask: CellMasks::Indexed { masks: vec![], mask_ids: Default::default() },
+            });
+            invalid.push(GetCells {
+                hashes: valid.hashes.clone(),
+                cell_mask: CellMasks::Indexed {
+                    masks: vec![B128::ZERO],
+                    mask_ids: vec![0, 0].into(),
+                },
+            });
+            for request in invalid {
+                let (response, rx) = oneshot::channel();
+                let deadline = session.request_deadline();
+                session.on_internal_peer_request(
+                    PeerRequest::GetCells { request, response },
+                    deadline,
+                );
+                assert_eq!(rx.await.unwrap(), Err(RequestError::InvalidRequest));
+                assert!(session.inflight_requests.is_empty());
+                assert!(session.queued_outgoing.is_empty());
+                assert_eq!(session.next_id, 0);
+                assert!(!session.is_disconnecting());
+            }
+            assert!(futures::FutureExt::now_or_never(builder.active_session_rx.next()).is_none());
+            let (response, rx) = oneshot::channel();
+            let deadline = session.request_deadline();
+            session.on_internal_peer_request(
+                PeerRequest::GetCells { request: valid, response },
+                deadline,
+            );
+            assert_eq!(session.next_id, 1);
+            let session_task = tokio::spawn(session);
+            assert_eq!(rx.await.unwrap(), Ok(reply));
+            client.await.unwrap();
+            session_task.await.unwrap();
+        })
+        .await
+        .expect("cell request rejection and subsequent round trip timed out");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn get_snap_request_rejected_without_negotiated_snap() {
         // A plain `eth`-only session: no `snap/2` was negotiated.
         let mut builder = SessionBuilder::default();
@@ -2204,5 +2357,41 @@ mod tests {
         assert!(calculate_new_timeout(timeout, rtt / 2) > timeout / 2);
         assert!(calculate_new_timeout(timeout, rtt * 2) > timeout);
         assert!(calculate_new_timeout(timeout, rtt * 2) < timeout * 2);
+    }
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dependency_proof_response_count_is_correlated_before_delivery() {
+        tokio::time::timeout(Duration::from_secs(15), async {
+            let mut builder = SessionBuilder::default();
+            builder.hello = HelloMessageWithProtocols::builder(builder.local_peer_id).protocols(vec![EthVersion::Eth74.into()]).build();
+            builder.status.set_eth_version(EthVersion::Eth74);
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let client = builder.with_client_stream(listener.local_addr().unwrap(), async move |stream| {
+                let _stream = stream;
+                futures::future::pending::<()>().await;
+            });
+            let client = tokio::spawn(client);
+            let (incoming, _) = listener.accept().await.unwrap();
+            let mut session = builder.connect_incoming(incoming).await;
+            let (response, receiver) = oneshot::channel();
+            session.on_internal_peer_request(PeerRequest::GetDependencyProofs {
+                request: GetDependencyProofs(vec![B256::ZERO; reth_eth_wire_types::MAX_DEPENDENCY_PROOFS + 1]), response,
+            }, session.request_deadline());
+            assert_eq!(receiver.await.unwrap().unwrap_err(), RequestError::InvalidRequest);
+            assert!(session.inflight_requests.is_empty());
+            let (response, receiver) = oneshot::channel();
+            session.on_internal_peer_request(PeerRequest::GetDependencyProofs {
+                request: GetDependencyProofs(vec![B256::ZERO]), response,
+            }, session.request_deadline());
+            let request_id = *session.inflight_requests.keys().next().unwrap();
+            let outcome = session.on_incoming_message(EthMessage::DependencyProofs(RequestPair {
+                request_id,
+                message: DependencyProofs(vec![Bytes::new(); 2]),
+            }));
+            assert!(matches!(outcome, OnIncomingMessageOutcome::BadMessage { error: EthStreamError::InvalidMessage(MessageError::Other(message)), .. } if message == "too many dependency proofs"));
+            assert_eq!(receiver.await.unwrap().unwrap_err(), RequestError::BadResponse);
+            assert!(session.inflight_requests.is_empty());
+            client.abort();
+            assert!(client.await.unwrap_err().is_cancelled());
+        }).await.unwrap();
     }
 }

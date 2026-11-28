@@ -8,7 +8,7 @@ use alloy_consensus::{constants::KECCAK_EMPTY, BlockHeader, ReceiptWithBloom};
 use alloy_eips::BlockHashOrNumber;
 use alloy_primitives::{Bytes, B256};
 use alloy_rlp::{length_of_length, Encodable};
-use futures::StreamExt;
+use futures::{stream::FuturesUnordered, StreamExt};
 use reth_eth_wire::{
     message::MAX_MESSAGE_SIZE,
     snap::{
@@ -16,10 +16,11 @@ use reth_eth_wire::{
         GetAccountRangeMessage, GetStorageRangesMessage, SnapProtocolMessage, StorageData,
         StorageRangesMessage,
     },
-    BlockAccessLists, BlockBodies, BlockHeaders, Cells, EthNetworkPrimitives, GetBlockAccessLists,
-    GetBlockBodies, GetBlockHeaders, GetCells, GetNodeData, GetReceipts, GetReceipts70,
-    HeadersDirection, NetworkPrimitives, NodeData, Receipts, Receipts69, Receipts70,
+    BlockAccessLists, BlockBodies, BlockHeaders, CellMasks, Cells, EthNetworkPrimitives,
+    GetBlockAccessLists, GetBlockBodies, GetBlockHeaders, GetCells, GetNodeData, GetReceipts,
+    GetReceipts70, HeadersDirection, NetworkPrimitives, NodeData, Receipts, Receipts69, Receipts70,
 };
+use reth_eth_wire_types::{DependencyProofs, GetDependencyProofs};
 use reth_network_p2p::{
     error::{RequestError, RequestResult},
     snap::client::SnapResponse,
@@ -28,12 +29,12 @@ use reth_network_peers::PeerId;
 use reth_primitives_traits::Block;
 use reth_storage_api::{
     errors::provider::ProviderResult, BalProvider, BlockReader, BytecodeReader,
-    GetBlockAccessListLimit, HeaderProvider, RangeEnd, RangeResponse, StateProviderFactory,
-    StateRangeProviderFactory,
+    DependencyProofStore, GetBlockAccessListLimit, HeaderProvider, RangeEnd, RangeResponse,
+    StateProviderFactory, StateRangeProviderFactory,
 };
 use reth_transaction_pool::{blobstore::NoopBlobStore, BlobStore};
 use std::{
-    collections::VecDeque,
+    collections::{BTreeMap, VecDeque},
     future::Future,
     pin::Pin,
     task::{Context, Poll},
@@ -86,6 +87,9 @@ pub const MAX_STORAGE_RANGE_ACCOUNTS_SERVE: usize = 1024;
 /// Maximum size of replies to data retrievals: 2MB
 pub const SOFT_RESPONSE_LIMIT: usize = 2 * 1024 * 1024;
 
+/// Per-peer dependency proof request interval, shared by serving and local scheduling.
+pub(crate) const DEPENDENCY_PROOF_REQUEST_INTERVAL: Duration = Duration::from_secs(1);
+
 /// Maximum number of `snap/2` account and storage range requests served at once.
 ///
 /// Serving an old root can rewind the trie block by block, so these requests run off the handler
@@ -134,6 +138,8 @@ pub struct EthRequestHandler<C, N: NetworkPrimitives = EthNetworkPrimitives> {
     metrics: EthRequestHandlerMetrics,
     /// `snap/2` range requests running or waiting off the handler task.
     state_range_requests: StateRangeRequests,
+    /// Bounded proof reads and per-peer serving cooldowns.
+    dependency_proof_requests: DependencyProofRequests,
 }
 
 // === impl EthRequestHandler ===
@@ -146,7 +152,14 @@ impl<C, N: NetworkPrimitives> EthRequestHandler<C, N> {
             incoming_requests: ReceiverStream::new(incoming),
             metrics: Default::default(),
             state_range_requests: Default::default(),
+            dependency_proof_requests: Default::default(),
         }
+    }
+
+    /// Sets the separate proof store used to serve eth/74 requests.
+    pub fn with_dependency_proof_store(mut self, store: DependencyProofStore) -> Self {
+        self.dependency_proof_requests.store = store;
+        self
     }
 
     /// Set blob store for the request handler
@@ -448,16 +461,43 @@ where
         request: GetCells,
         response: oneshot::Sender<RequestResult<Cells>>,
     ) {
-        let mut cells_response = Cells { cell_mask: request.cell_mask, ..Default::default() };
-        let mut total_bytes = 0;
-        let cell_mask = request.cell_mask();
+        // Incoming requests can also be supplied directly, bypassing the wire decoder.
+        if request.cell_mask.validate(&request.hashes, false).is_err() {
+            let _ = response.send(Err(RequestError::InvalidRequest));
+            return
+        }
+        let mut cells_response = Cells {
+            cell_mask: match &request.cell_mask {
+                CellMasks::Shared(mask) => (*mask).into(),
+                CellMasks::Indexed { .. } => {
+                    CellMasks::Indexed { masks: Vec::new(), mask_ids: Bytes::new() }
+                }
+            },
+            ..Default::default()
+        };
+        let mut total_bytes = cells_response.length();
+        let mut response_ids = Vec::new();
+        let shared_mask = if request.cell_mask.is_indexed() { None } else { request.cell_mask(0) };
 
-        for hash in request.hashes.into_iter().take(MAX_CELLS_SERVE) {
+        for (index, &hash) in request.hashes.iter().take(MAX_CELLS_SERVE).enumerate() {
+            // Indexed tables were validated before any blob-store lookup or cell allocation.
+            let Some(cell_mask) = shared_mask.or_else(|| request.cell_mask(index)) else { break };
             let Some(cells) = self.blob_store.get_cells(hash, cell_mask).unwrap_or_default() else {
                 continue;
             };
 
             total_bytes += hash.length() + cells.length();
+            if let CellMasks::Indexed { masks, .. } = &mut cells_response.cell_mask {
+                let Some(mask) = request.cell_mask.mask_at(index) else { break };
+                let id = masks.iter().position(|entry| *entry == mask).unwrap_or_else(|| {
+                    total_bytes += mask.length();
+                    masks.push(mask);
+                    masks.len() - 1
+                });
+                // At most 64 masks, enforced above.
+                response_ids.push(id as u8);
+                total_bytes += 1;
+            }
             cells_response.hashes.push(hash);
             cells_response.cells.push(cells);
 
@@ -466,6 +506,9 @@ where
             }
         }
 
+        if let CellMasks::Indexed { mask_ids, .. } = &mut cells_response.cell_mask {
+            *mask_ids = response_ids.into();
+        }
         let _ = response.send(Ok(cells_response));
     }
 }
@@ -649,6 +692,7 @@ where
         // Frees the slots of finished state range tasks first, so the requests admitted below see
         // them and queued requests keep their turn.
         this.state_range_requests.poll(cx, &this.client, &this.metrics);
+        this.dependency_proof_requests.poll(cx);
 
         let mut acc = Duration::ZERO;
         let maybe_more_incoming_requests = metered_poll_nested_stream_with_budget!(
@@ -680,6 +724,12 @@ where
                     IncomingEthRequest::GetBlockAccessLists { peer_id, request, response } => {
                         this.on_block_access_lists_request(peer_id, request, response)
                     }
+                    IncomingEthRequest::GetDependencyProofs { peer_id, request, response } => {
+                        this.metrics.eth_dependency_proofs_requests_received_total.increment(1);
+                        if !this.dependency_proof_requests.on_request(peer_id, request, response) {
+                            this.metrics.eth_dependency_proofs_requests_unserved_total.increment(1);
+                        }
+                    }
                     IncomingEthRequest::GetCells { peer_id, request, response } => {
                         this.on_cells_request(peer_id, request, response)
                     }
@@ -695,6 +745,7 @@ where
         // Polled again so that the tasks and the queue timeout of requests admitted above wake this
         // handler.
         this.state_range_requests.poll(cx, &this.client, &this.metrics);
+        this.dependency_proof_requests.poll(cx);
 
         // stream is fully drained and import futures pending
         if maybe_more_incoming_requests {
@@ -1105,6 +1156,17 @@ pub enum IncomingEthRequest<N: NetworkPrimitives = EthNetworkPrimitives> {
         /// The channel sender for the response containing block access lists.
         response: oneshot::Sender<RequestResult<BlockAccessLists>>,
     },
+    /// Requests dependency proofs in block-hash order.
+    ///
+    /// The response should be sent through the channel.
+    GetDependencyProofs {
+        /// The ID of the peer to request dependency proofs from.
+        peer_id: PeerId,
+        /// The requested block hashes.
+        request: GetDependencyProofs,
+        /// The channel sender for the response containing dependency proofs.
+        response: oneshot::Sender<RequestResult<DependencyProofs>>,
+    },
     /// Request Cells from the peer.
     ///
     /// The response should be sent through the channel.
@@ -1129,13 +1191,93 @@ pub enum IncomingEthRequest<N: NetworkPrimitives = EthNetworkPrimitives> {
     },
 }
 
+/// Proof reads stay off the network task, with no unbounded waiting queue.
+#[derive(Debug, Default)]
+struct DependencyProofRequests {
+    store: DependencyProofStore,
+    tasks: FuturesUnordered<JoinHandle<()>>,
+    cooldowns: BTreeMap<PeerId, Instant>,
+}
+
+impl DependencyProofRequests {
+    fn poll(&mut self, cx: &mut Context<'_>) {
+        while let Poll::Ready(Some(result)) = self.tasks.poll_next_unpin(cx) {
+            if let Err(error) = result {
+                error!(target: "net::eth", %error, "Dependency proof read failed");
+            }
+        }
+    }
+
+    fn on_request(
+        &mut self,
+        peer: PeerId,
+        request: GetDependencyProofs,
+        response: oneshot::Sender<RequestResult<DependencyProofs>>,
+    ) -> bool {
+        const MAX_CONCURRENT: usize = 2;
+        const MAX_COOLDOWNS: usize = 128;
+        self.cooldowns.retain(|_, until| *until > Instant::now());
+        if self.tasks.len() >= MAX_CONCURRENT ||
+            self.cooldowns.contains_key(&peer) ||
+            self.cooldowns.len() >= MAX_COOLDOWNS
+        {
+            // An empty prefix leaves every requested hash unserved and eligible for retry.
+            if response.send(Ok(DependencyProofs::default())).is_err() {
+                debug!(target: "net::eth", "Dependency proof requester left");
+            }
+            return false
+        }
+        self.cooldowns.insert(peer, Instant::now() + DEPENDENCY_PROOF_REQUEST_INTERVAL);
+        let store = self.store.clone();
+        let span = Span::current();
+        self.tasks.push(tokio::task::spawn_blocking(move || {
+            let _entered = span.enter();
+            let proofs = get_dependency_proofs_response(&store, request);
+            if response.send(Ok(proofs)).is_err() {
+                debug!(target: "net::eth", "Dependency proof requester left");
+            }
+        }));
+        true
+    }
+}
+
+fn get_dependency_proofs_response(
+    store: &DependencyProofStore,
+    request: GetDependencyProofs,
+) -> DependencyProofs {
+    let mut proofs = Vec::new();
+    let mut bytes = 0;
+    let started = Instant::now();
+    for hash in request.0.into_iter().take(reth_eth_wire_types::MAX_DEPENDENCY_PROOFS) {
+        if bytes >= SOFT_RESPONSE_LIMIT || started.elapsed() >= Duration::from_secs(1) {
+            break
+        }
+        // Store writers authenticate post-activation commitments before inserting proofs. The
+        // corresponding header need not have reached this provider or durable storage yet.
+        let proof = match store.get(hash) {
+            Ok(proof) => proof.unwrap_or_default(),
+            Err(error) => {
+                error!(target: "net::eth", %error, %hash, "Cannot read dependency proof");
+                break
+            }
+        };
+        if proof.len() > alloy_eips::eip8288::MAX_DEPENDENCY_PROOF_BYTES {
+            error!(target: "net::eth", %hash, "Stored dependency proof exceeds size limit");
+            break
+        }
+        bytes += proof.length();
+        proofs.push(proof);
+    }
+    DependencyProofs(proofs)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use alloy_consensus::{constants::EMPTY_ROOT_HASH, Header, TxType};
     use alloy_eips::{
         eip4844::{BlobAndProofV1, BlobAndProofV2, BlobCellsAndProofsV1},
-        eip7594::{BlobCellMask, BlobTransactionSidecarVariant, Cell},
+        eip7594::{BlobCellMask, BlobTransactionSidecarVariant, Cell, BYTES_PER_CELL},
     };
     use alloy_primitives::{keccak256, Address, Log, LogData, TxHash, B128, U256};
     use alloy_rlp::{Decodable, Encodable};
@@ -1143,7 +1285,7 @@ mod tests {
     use reth_ethereum_primitives::Receipt;
     use reth_primitives_traits::Account;
     use reth_provider::test_utils::{ExtendedAccount, MockEthProvider};
-    use reth_storage_api::noop::NoopProvider;
+    use reth_storage_api::{noop::NoopProvider, DependencyProofProvider};
     use reth_transaction_pool::blobstore::{
         BlobStoreCleanupStat, BlobStoreError, PooledBlobSidecar,
     };
@@ -1158,6 +1300,7 @@ mod tests {
     struct CountingBlobStore {
         get_cells_calls: Arc<AtomicUsize>,
         expected_cell_mask: Option<BlobCellMask>,
+        cell_responses: Vec<(B256, BlobCellMask, Vec<Cell>)>,
     }
 
     impl BlobStore for CountingBlobStore {
@@ -1248,10 +1391,16 @@ mod tests {
 
         fn get_cells(
             &self,
-            _tx_hash: TxHash,
+            tx_hash: TxHash,
             cell_mask: BlobCellMask,
         ) -> Result<Option<Vec<Cell>>, BlobStoreError> {
             self.get_cells_calls.fetch_add(1, Ordering::Relaxed);
+            if let Some((_, expected, cells)) =
+                self.cell_responses.iter().find(|(hash, _, _)| *hash == tx_hash)
+            {
+                assert_eq!(cell_mask, *expected);
+                return Ok(Some(cells.clone()))
+            }
             if let Some(expected) = self.expected_cell_mask {
                 assert_eq!(cell_mask, expected);
                 return Ok(Some(vec![Cell::default()]))
@@ -1279,8 +1428,10 @@ mod tests {
         let handler = EthRequestHandler::<NoopProvider>::new(NoopProvider::default(), incoming_rx)
             .with_blob_store(Box::new(blob_store));
         let (response, rx) = oneshot::channel();
-        let request =
-            GetCells { hashes: vec![B256::ZERO; MAX_CELLS_SERVE + 1], cell_mask: B128::default() };
+        let request = GetCells {
+            hashes: vec![B256::ZERO; MAX_CELLS_SERVE + 1],
+            cell_mask: B128::default().into(),
+        };
 
         handler.on_cells_request(PeerId::default(), request, response);
 
@@ -1306,7 +1457,7 @@ mod tests {
         let handler = EthRequestHandler::<NoopProvider>::new(NoopProvider::default(), incoming_rx)
             .with_blob_store(Box::new(blob_store));
         let wire_mask = B128::from(numeric_mask.to_le_bytes());
-        let request = GetCells { hashes: vec![B256::ZERO], cell_mask: wire_mask };
+        let request = GetCells { hashes: vec![B256::ZERO], cell_mask: wire_mask.into() };
         let mut encoded = Vec::new();
         request.encode(&mut encoded);
         let request = GetCells::decode(&mut encoded.as_slice()).unwrap();
@@ -1317,10 +1468,118 @@ mod tests {
         let cells = rx.await.unwrap().unwrap();
         assert_eq!(cells.hashes, vec![B256::ZERO]);
         assert_eq!(cells.cells, vec![vec![Cell::default()]]);
-        assert_eq!(cells.cell_mask, wire_mask);
+        assert_eq!(cells.cell_mask, wire_mask.into());
         encoded.clear();
         cells.encode(&mut encoded);
         assert_eq!(Cells::decode(&mut encoded.as_slice()).unwrap(), cells);
+    }
+
+    #[tokio::test]
+    async fn indexed_cells_rebuilds_table_after_omissions() {
+        let (_incoming_tx, incoming_rx) = mpsc::channel(1);
+        let hashes = (0..4).map(B256::repeat_byte).collect::<Vec<_>>();
+        let a = B128::from(1u128.to_le_bytes());
+        let b = B128::from(2u128.to_le_bytes());
+        let c = B128::from(4u128.to_le_bytes());
+        let request = GetCells::from_masks(hashes.clone(), vec![a, b, a, c]).unwrap();
+        let blob_store = CountingBlobStore {
+            cell_responses: vec![
+                (hashes[1], BlobCellMask::from_bits(2), vec![Cell::repeat_byte(1)]),
+                (hashes[2], BlobCellMask::from_bits(1), vec![Cell::repeat_byte(2)]),
+                (hashes[3], BlobCellMask::from_bits(4), vec![Cell::repeat_byte(3)]),
+            ],
+            ..Default::default()
+        };
+        let handler = EthRequestHandler::<NoopProvider>::new(NoopProvider::default(), incoming_rx)
+            .with_blob_store(Box::new(blob_store));
+        let (response, rx) = oneshot::channel();
+        handler.on_cells_request(PeerId::default(), request.clone(), response);
+        let cells = rx.await.unwrap().unwrap();
+        assert_eq!(cells.hashes, hashes[1..]);
+        assert_eq!(
+            cells.cell_mask,
+            CellMasks::Indexed { masks: vec![b, a, c], mask_ids: Bytes::from_static(&[0, 1, 2]) }
+        );
+        assert_eq!(cells.validate_response(&request), Ok(()));
+    }
+
+    #[tokio::test]
+    async fn indexed_empty_response_preserves_form() {
+        let (_incoming_tx, incoming_rx) = mpsc::channel(1);
+        let handler = EthRequestHandler::<NoopProvider>::new(NoopProvider::default(), incoming_rx);
+        let (response, rx) = oneshot::channel();
+        let request = GetCells::from_masks(
+            vec![B256::ZERO, B256::repeat_byte(1)],
+            vec![B128::ZERO, B128::repeat_byte(1)],
+        )
+        .unwrap();
+        handler.on_cells_request(PeerId::default(), request.clone(), response);
+        let cells = rx.await.unwrap().unwrap();
+        assert_eq!(
+            cells,
+            Cells {
+                cell_mask: CellMasks::Indexed { masks: vec![], mask_ids: Bytes::new() },
+                ..Default::default()
+            }
+        );
+        assert_eq!(cells.validate_response(&request), Ok(()));
+    }
+
+    #[test_case(1; "invalid_identifier")]
+    #[test_case(0; "uniform_indexed_request")]
+    #[tokio::test]
+    async fn invalid_indexed_request_performs_no_lookups(id: u8) {
+        let (_incoming_tx, incoming_rx) = mpsc::channel(1);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let blob_store =
+            CountingBlobStore { get_cells_calls: Arc::clone(&calls), ..Default::default() };
+        let handler = EthRequestHandler::<NoopProvider>::new(NoopProvider::default(), incoming_rx)
+            .with_blob_store(Box::new(blob_store));
+        let (response, rx) = oneshot::channel();
+        let request = GetCells {
+            hashes: vec![B256::ZERO],
+            cell_mask: CellMasks::Indexed { masks: vec![B128::ZERO], mask_ids: vec![id].into() },
+        };
+        handler.on_cells_request(PeerId::default(), request, response);
+        assert_eq!(rx.await.unwrap(), Err(RequestError::InvalidRequest));
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[test_case(false)]
+    #[test_case(true)]
+    #[tokio::test]
+    async fn cells_forms_share_response_limit(indexed: bool) {
+        let (_incoming_tx, incoming_rx) = mpsc::channel(1);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let hashes = vec![B256::ZERO, B256::repeat_byte(1)];
+        let mask = B128::from(1u128.to_le_bytes());
+        let blob_store = CountingBlobStore {
+            get_cells_calls: Arc::clone(&calls),
+            cell_responses: vec![(
+                hashes[0],
+                BlobCellMask::from_bits(1),
+                vec![Cell::ZERO; SOFT_RESPONSE_LIMIT / BYTES_PER_CELL + 1],
+            )],
+            ..Default::default()
+        };
+        let handler = EthRequestHandler::<NoopProvider>::new(NoopProvider::default(), incoming_rx)
+            .with_blob_store(Box::new(blob_store));
+        let (response, rx) = oneshot::channel();
+        let request = GetCells {
+            hashes: hashes.clone(),
+            cell_mask: if indexed {
+                CellMasks::Indexed {
+                    masks: vec![mask, B128::from(2u128.to_le_bytes())],
+                    mask_ids: Bytes::from_static(&[0, 1]),
+                }
+            } else {
+                mask.into()
+            },
+        };
+        handler.on_cells_request(PeerId::default(), request, response);
+        let cells = rx.await.unwrap().unwrap();
+        assert_eq!(cells.hashes, vec![hashes[0]]);
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
     }
 
     #[tokio::test]
@@ -2206,5 +2465,106 @@ mod tests {
             }))
             .unwrap()
             .into()
+    }
+    #[derive(Clone, Debug, Default)]
+    struct TestDependencyProofs {
+        entries: Vec<(B256, Bytes)>,
+        fail: bool,
+        reads: Arc<AtomicUsize>,
+    }
+
+    impl DependencyProofProvider for TestDependencyProofs {
+        fn dependency_proof(&self, hash: B256) -> ProviderResult<Option<Bytes>> {
+            self.reads.fetch_add(1, Ordering::Relaxed);
+            if self.fail {
+                return Err(reth_storage_api::errors::provider::ProviderError::UnsupportedProvider)
+            }
+            Ok(self.entries.iter().find(|(key, _)| *key == hash).map(|(_, proof)| proof.clone()))
+        }
+        fn insert_dependency_proof(&self, _: B256, _: Bytes) -> ProviderResult<()> {
+            Err(reth_storage_api::errors::provider::ProviderError::UnsupportedProvider)
+        }
+    }
+
+    #[test]
+    fn dependency_proof_serving_preserves_positions_without_headers() {
+        let hashes = (0..5).map(B256::repeat_byte).collect::<Vec<_>>();
+        let present = Bytes::from_static(b"proof");
+        let store = TestDependencyProofs {
+            entries: vec![(hashes[1], present.clone()), (hashes[3], Bytes::new())],
+            ..Default::default()
+        };
+        let reads = store.reads.clone();
+        let response = get_dependency_proofs_response(
+            &DependencyProofStore::new(store),
+            GetDependencyProofs(hashes),
+        );
+        assert_eq!(
+            response,
+            DependencyProofs(vec![Bytes::new(), present, Bytes::new(), Bytes::new(), Bytes::new()])
+        );
+        assert_eq!(reads.load(Ordering::Relaxed), 5);
+    }
+
+    #[test]
+    fn dependency_proof_serving_stops_at_soft_size_lookup_and_local_error_limits() {
+        let hash = B256::repeat_byte(1);
+        let proof = Bytes::from(vec![1; alloy_eips::eip8288::MAX_DEPENDENCY_PROOF_BYTES]);
+        let store =
+            TestDependencyProofs { entries: vec![(hash, proof.clone())], ..Default::default() };
+        let response = get_dependency_proofs_response(
+            &DependencyProofStore::new(store),
+            GetDependencyProofs(vec![hash; 4]),
+        );
+        assert_eq!(response, DependencyProofs(vec![proof.clone(); 2]));
+        let hashes = vec![B256::ZERO; reth_eth_wire_types::MAX_DEPENDENCY_PROOFS + 1];
+        assert_eq!(
+            get_dependency_proofs_response(
+                &DependencyProofStore::default(),
+                GetDependencyProofs(hashes)
+            )
+            .0
+            .len(),
+            reth_eth_wire_types::MAX_DEPENDENCY_PROOFS
+        );
+        for store in [
+            TestDependencyProofs { fail: true, ..Default::default() },
+            TestDependencyProofs {
+                entries: vec![(hash, Bytes::from(vec![1; proof.len() + 1]))],
+                ..Default::default()
+            },
+        ] {
+            assert_eq!(
+                get_dependency_proofs_response(
+                    &DependencyProofStore::new(store),
+                    GetDependencyProofs(vec![hash])
+                ),
+                DependencyProofs::default()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn dependency_proof_serving_rate_limits_and_concurrency_are_shared_per_peer() {
+        let mut requests = DependencyProofRequests::default();
+        let peer = PeerId::repeat_byte(1);
+        let (response, first) = oneshot::channel();
+        requests.on_request(peer, GetDependencyProofs::default(), response);
+        let (response, second) = oneshot::channel();
+        requests.on_request(peer, GetDependencyProofs::default(), response);
+        assert_eq!(second.await.unwrap().unwrap(), DependencyProofs::default());
+        assert_eq!(requests.tasks.len(), 1);
+        let (response, third) = oneshot::channel();
+        requests.on_request(PeerId::repeat_byte(2), GetDependencyProofs::default(), response);
+        assert_eq!(requests.tasks.len(), 2);
+        let (response, fourth) = oneshot::channel();
+        requests.on_request(PeerId::repeat_byte(3), GetDependencyProofs::default(), response);
+        assert_eq!(fourth.await.unwrap().unwrap(), DependencyProofs::default());
+        assert_eq!(requests.tasks.len(), 2);
+        assert_eq!(first.await.unwrap().unwrap(), DependencyProofs::default());
+        assert_eq!(third.await.unwrap().unwrap(), DependencyProofs::default());
+        while let Some(result) = requests.tasks.next().await {
+            result.unwrap();
+        }
     }
 }

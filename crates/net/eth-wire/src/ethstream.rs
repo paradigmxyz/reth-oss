@@ -193,7 +193,7 @@ where
             return Err(EthStreamError::EthHandshakeError(EthHandshakeError::StatusNotInHandshake));
         }
 
-        Ok(Bytes::from(alloy_rlp::encode(ProtocolMessage::from(item))))
+        Ok(Bytes::from(ProtocolMessage::from(item).encoded_for_version(self.version)))
     }
 }
 
@@ -323,9 +323,9 @@ where
             return Err(EthStreamError::EthHandshakeError(EthHandshakeError::StatusNotInHandshake))
         }
 
-        self.project()
-            .inner
-            .start_send(Bytes::from(alloy_rlp::encode(ProtocolMessage::from(item))))?;
+        let this = self.project();
+        let bytes = this.eth.encode_message(item)?;
+        this.inner.start_send(bytes)?;
 
         Ok(())
     }

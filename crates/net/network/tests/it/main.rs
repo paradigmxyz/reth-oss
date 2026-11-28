@@ -3,6 +3,7 @@
 mod big_pooled_txs_req;
 mod connect;
 mod eth72;
+mod eth74;
 mod multiplex;
 mod requests;
 mod session;

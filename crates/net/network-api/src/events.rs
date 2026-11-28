@@ -2,10 +2,11 @@
 
 use reth_eth_wire_types::{
     message::RequestPair, snap::SnapProtocolMessage, BlockAccessLists, BlockBodies, BlockHeaders,
-    Capabilities, Cells, DisconnectReason, EthMessage, EthNetworkPrimitives, EthVersion,
-    GetBlockAccessLists, GetBlockBodies, GetBlockHeaders, GetCells, GetNodeData,
-    GetPooledTransactions, GetReceipts, GetReceipts70, NetworkPrimitives, NodeData,
-    PooledTransactions, Receipts, Receipts69, Receipts70, UnifiedStatus,
+    Capabilities, Cells, DependencyProofs, DisconnectReason, EthMessage, EthNetworkPrimitives,
+    EthVersion, GetBlockAccessLists, GetBlockBodies, GetBlockHeaders, GetCells,
+    GetDependencyProofs, GetNodeData, GetPooledTransactions, GetReceipts, GetReceipts70,
+    NetworkPrimitives, NodeData, PooledTransactions, Receipts, Receipts69, Receipts70,
+    UnifiedStatus,
 };
 use reth_ethereum_forks::ForkId;
 use reth_network_p2p::{
@@ -265,6 +266,17 @@ pub enum PeerRequest<N: NetworkPrimitives = EthNetworkPrimitives> {
         /// The channel to send the response for block access lists.
         response: oneshot::Sender<RequestResult<BlockAccessLists>>,
     },
+    /// Requests dependency proofs from the peer.
+    ///
+    /// Callers must authenticate the entire response against trusted header commitments with
+    /// [`DependencyProofs::validate_response`] before consuming entries.
+    /// The response should be sent through the channel.
+    GetDependencyProofs {
+        /// The request for dependency proofs.
+        request: GetDependencyProofs,
+        /// The channel to send the response for dependency proofs.
+        response: oneshot::Sender<RequestResult<DependencyProofs>>,
+    },
     /// Requests cells from the peer.
     ///
     /// The response should be sent through the channel.
@@ -314,6 +326,7 @@ impl<N: NetworkPrimitives> PeerRequest<N> {
             Self::GetReceipts69 { response, .. } => response.send(Err(err)).ok(),
             Self::GetReceipts70 { response, .. } => response.send(Err(err)).ok(),
             Self::GetBlockAccessLists { response, .. } => response.send(Err(err)).ok(),
+            Self::GetDependencyProofs { response, .. } => response.send(Err(err)).ok(),
             Self::GetCells { response, .. } => response.send(Err(err)).ok(),
             Self::GetSnap { response, .. } => response.send(Err(err)).ok(),
         };
@@ -324,7 +337,15 @@ impl<N: NetworkPrimitives> PeerRequest<N> {
     pub fn is_supported_by_eth_version(&self, version: EthVersion) -> bool {
         match self {
             Self::GetBlockAccessLists { .. } => version >= EthVersion::Eth71,
-            Self::GetCells { .. } => version >= EthVersion::Eth72,
+            Self::GetDependencyProofs { .. } => version >= EthVersion::Eth74,
+            Self::GetCells { request, .. } => {
+                version >=
+                    if request.cell_mask.is_indexed() {
+                        EthVersion::Eth73
+                    } else {
+                        EthVersion::Eth72
+                    }
+            }
             _ => true,
         }
     }
@@ -370,6 +391,12 @@ impl<N: NetworkPrimitives> PeerRequest<N> {
             }
             Self::GetBlockAccessLists { request, .. } => {
                 RequestMessage::Eth(EthMessage::GetBlockAccessLists(RequestPair {
+                    request_id,
+                    message: request.clone(),
+                }))
+            }
+            Self::GetDependencyProofs { request, .. } => {
+                RequestMessage::Eth(EthMessage::GetDependencyProofs(RequestPair {
                     request_id,
                     message: request.clone(),
                 }))
@@ -439,6 +466,7 @@ impl<R> fmt::Debug for PeerRequestSender<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy_primitives::{B128, B256};
 
     #[test]
     fn test_get_block_access_lists_version_support() {
@@ -458,5 +486,25 @@ mod tests {
 
         assert!(!req.is_supported_by_eth_version(EthVersion::Eth71));
         assert!(req.is_supported_by_eth_version(EthVersion::Eth72));
+        assert!(req.is_supported_by_eth_version(EthVersion::Eth73));
+        let (tx, _rx) = oneshot::channel();
+        let req = PeerRequest::<EthNetworkPrimitives>::GetCells {
+            request: GetCells::from_masks(
+                vec![B256::ZERO, B256::repeat_byte(1)],
+                vec![B128::ZERO, B128::repeat_byte(1)],
+            )
+            .unwrap(),
+            response: tx,
+        };
+        assert!(!req.is_supported_by_eth_version(EthVersion::Eth72));
+        assert!(req.is_supported_by_eth_version(EthVersion::Eth73));
+    }
+    #[test]
+    fn dependency_proof_requests_require_eth74() {
+        let (response, _) = oneshot::channel();
+        let request: PeerRequest =
+            PeerRequest::GetDependencyProofs { request: GetDependencyProofs::default(), response };
+        assert!(!request.is_supported_by_eth_version(EthVersion::Eth73));
+        assert!(request.is_supported_by_eth_version(EthVersion::Eth74));
     }
 }

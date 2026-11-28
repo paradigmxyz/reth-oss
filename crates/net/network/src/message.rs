@@ -14,7 +14,7 @@ use reth_eth_wire::{
     NewPooledTransactionHashes, NodeData, PooledTransactions, Receipts, SharedTransactions,
     Transactions,
 };
-use reth_eth_wire_types::{snap::SnapProtocolMessage, RawCapabilityMessage};
+use reth_eth_wire_types::{snap::SnapProtocolMessage, DependencyProofs, RawCapabilityMessage};
 use reth_network_api::{PeerRequest, RequestMessage};
 use reth_network_p2p::{
     error::{RequestError, RequestResult},
@@ -191,6 +191,11 @@ pub enum PeerResponse<N: NetworkPrimitives = EthNetworkPrimitives> {
         /// The receiver channel for the response to a block access lists request.
         response: oneshot::Receiver<RequestResult<BlockAccessLists>>,
     },
+    /// Represents a response to a request for dependency proofs.
+    DependencyProofs {
+        /// The receiver channel for the response to a dependency proofs request.
+        response: oneshot::Receiver<RequestResult<DependencyProofs>>,
+    },
     ///
     /// Represents a response to a request for cells.
     Cells {
@@ -245,6 +250,10 @@ impl<N: NetworkPrimitives> PeerResponse<N> {
                 Ok(res) => PeerResponseResult::BlockAccessLists(res),
                 Err(err) => PeerResponseResult::BlockAccessLists(Err(err.into())),
             },
+            Self::DependencyProofs { response } => match ready!(response.poll_unpin(cx)) {
+                Ok(res) => PeerResponseResult::DependencyProofs(res),
+                Err(err) => PeerResponseResult::DependencyProofs(Err(err.into())),
+            },
             Self::Cells { response } => match ready!(response.poll_unpin(cx)) {
                 Ok(res) => PeerResponseResult::Cells(res),
                 Err(err) => PeerResponseResult::Cells(Err(err.into())),
@@ -277,6 +286,8 @@ pub enum PeerResponseResult<N: NetworkPrimitives = EthNetworkPrimitives> {
     Receipts70(RequestResult<Receipts70<N::Receipt>>),
     /// Represents a result containing block access lists or an error.
     BlockAccessLists(RequestResult<BlockAccessLists>),
+    /// Represents dependency proofs or an error.
+    DependencyProofs(RequestResult<DependencyProofs>),
     /// Represents a result containing cells or an error.
     Cells(RequestResult<Cells>),
     /// Represents a result containing a `snap/2` response or an error.
@@ -334,6 +345,13 @@ impl<N: NetworkPrimitives> PeerResponseResult<N> {
                 }
                 Err(err) => Err(err),
             },
+            Self::DependencyProofs(resp) => match resp {
+                Ok(res) => {
+                    let request = RequestPair { request_id: id, message: res };
+                    Ok(RequestMessage::Eth(EthMessage::DependencyProofs(request)))
+                }
+                Err(err) => Err(err),
+            },
             Self::Cells(resp) => match resp {
                 Ok(res) => {
                     let request = RequestPair { request_id: id, message: res };
@@ -363,6 +381,7 @@ impl<N: NetworkPrimitives> PeerResponseResult<N> {
             Self::Receipts69(res) => res.as_ref().err(),
             Self::Receipts70(res) => res.as_ref().err(),
             Self::BlockAccessLists(res) => res.as_ref().err(),
+            Self::DependencyProofs(res) => res.as_ref().err(),
             Self::Cells(res) => res.as_ref().err(),
             Self::Snap(res) => res.as_ref().err(),
         }

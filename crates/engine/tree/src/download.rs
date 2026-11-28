@@ -230,7 +230,7 @@ where
 impl<Client, B> BlockDownloader for BasicBlockDownloader<Client, B>
 where
     Client: BlockClient<Block = B> + BlockAccessListsClient,
-    B: Block,
+    B: Block + 'static,
 {
     type Block = B;
 

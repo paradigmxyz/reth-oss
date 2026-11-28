@@ -1,48 +1,50 @@
-//! Bounded peer retrieval of separately stored proofs for the experimental EIP-8288 profile.
+//! Bounded, commitment-authenticated EIP-8512 retrieval for block synchronization.
 
-use crate::protocol::{ConnectionHandler, OnNotSupported, ProtocolHandler};
-use alloy_eips::eip8288::MAX_DEPENDENCY_PROOF_BYTES;
-use alloy_primitives::{bytes::BytesMut, keccak256, map::B256Map, Bytes, B256};
-use futures::{future::BoxFuture, stream::FuturesUnordered, FutureExt, Stream, StreamExt};
+use crate::{eth_requests::DEPENDENCY_PROOF_REQUEST_INTERVAL, NetworkHandle};
+use alloy_primitives::{map::B256Map, Bytes};
+use futures::{future::BoxFuture, stream::FuturesUnordered, FutureExt, StreamExt};
 use reth_eth_wire::{
-    capability::SharedCapabilities,
-    multiplex::ProtocolConnection,
-    protocol::{Protocol, ProtocolIngressLimits},
-    Capability,
+    DependencyProofs, DisconnectReason, EthVersion, GetDependencyProofs, NetworkPrimitives,
 };
-use reth_network_api::{Direction, PeerId};
-use reth_storage_api::{DependencyProofFetcher, DependencyProofProvider, DependencyProofRequest};
+use reth_network_api::{
+    events::{NetworkEvent, PeerEvent, PeerRequest, PeerRequestSender},
+    NetworkEventListenerProvider, PeerId, Peers,
+};
+use reth_network_p2p::error::RequestResult;
+use reth_storage_api::{DependencyProofFetcher, DependencyProofRequest};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fmt,
-    net::SocketAddr,
-    pin::Pin,
     sync::Arc,
-    task::{Context, Poll},
     time::Duration,
 };
 use tokio::{
     sync::{mpsc, oneshot},
     time::Instant,
 };
-use tracing::{debug, error, warn};
+use tracing::{debug, warn};
 
 const CAPACITY: usize = 16;
 const MAX_PEERS: usize = 128;
-const MAX_SERVING: usize = 2;
-const MAX_MESSAGE: usize = MAX_DEPENDENCY_PROOF_BYTES + 34;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 const PEER_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// The node's bounded source of commitment-authenticated peer proofs.
+/// A bounded source of eth/74 proofs authenticated against the requested header commitment.
 #[derive(Debug)]
-struct PeerDependencyProofFetcher(mpsc::Sender<Request>);
+pub struct PeerDependencyProofFetcher(mpsc::Sender<Request>);
+
+impl PeerDependencyProofFetcher {
+    /// Subscribes before peers connect. Run the returned task for the node's lifetime.
+    pub fn new<N: NetworkPrimitives>(
+        network: NetworkHandle<N>,
+    ) -> (Arc<Self>, BoxFuture<'static, ()>) {
+        let events = network.event_listener();
+        let (sender, requests) = mpsc::channel(CAPACITY);
+        (Arc::new(Self(sender)), run(network, events, requests).boxed())
+    }
+}
 
 impl DependencyProofFetcher for PeerDependencyProofFetcher {
-    fn fetch(
-        &self,
-        request: DependencyProofRequest,
-    ) -> BoxFuture<'static, reth_storage_api::errors::provider::ProviderResult<Option<Bytes>>> {
+    fn fetch(&self, request: DependencyProofRequest) -> reth_storage_api::DependencyProofFuture {
         let sender = self.0.clone();
         async move {
             let (response, receiver) = oneshot::channel();
@@ -61,127 +63,10 @@ impl DependencyProofFetcher for PeerDependencyProofFetcher {
     }
 }
 
-/// Negotiates a separate proof capability, including when transaction gossip is disabled.
-#[derive(Clone, Debug)]
-pub struct DependencyProofProtocolHandler(mpsc::Sender<Event>);
-
-impl DependencyProofProtocolHandler {
-    /// Creates the protocol and downloader. Run the returned task for the node's lifetime.
-    pub fn new<P: DependencyProofProvider + Clone + 'static>(
-        provider: P,
-    ) -> (Self, Arc<dyn DependencyProofFetcher>, BoxFuture<'static, ()>) {
-        let (events, incoming) = mpsc::channel(CAPACITY);
-        let (requests, downloads) = mpsc::channel(CAPACITY);
-        (
-            Self(events),
-            Arc::new(PeerDependencyProofFetcher(requests)),
-            run(provider, incoming, downloads).boxed(),
-        )
-    }
-}
-
-impl ProtocolHandler for DependencyProofProtocolHandler {
-    type ConnectionHandler = Self;
-    fn on_incoming(&self, _: SocketAddr) -> Option<Self> {
-        Some(self.clone())
-    }
-    fn on_outgoing(&self, _: SocketAddr, _: PeerId) -> Option<Self> {
-        Some(self.clone())
-    }
-}
-
-impl ConnectionHandler for DependencyProofProtocolHandler {
-    type Connection = DependencyProofConnection;
-    fn protocol(&self) -> Protocol {
-        Protocol::new(Capability::new_static("dep-proof", 1), 2)
-    }
-    fn inbound_limits(&self) -> ProtocolIngressLimits {
-        ProtocolIngressLimits::new(MAX_MESSAGE)
-            .with_max_buffered_bytes(MAX_MESSAGE * 2)
-            .with_max_buffered_messages(2)
-    }
-    fn on_unsupported_by_peer(
-        self,
-        _: &SharedCapabilities,
-        _: Direction,
-        _: PeerId,
-    ) -> OnNotSupported {
-        OnNotSupported::KeepAlive
-    }
-    fn into_connection(
-        self,
-        _: Direction,
-        peer: PeerId,
-        connection: ProtocolConnection,
-    ) -> Self::Connection {
-        let (outgoing, receiver) = mpsc::channel(2);
-        let admitted = self.0.try_send(Event::Opened(peer, outgoing)).is_ok();
-        DependencyProofConnection { peer, connection, events: self.0, outgoing: receiver, admitted }
-    }
-}
-
-/// A bounded connection for proof requests and responses.
-pub struct DependencyProofConnection {
-    peer: PeerId,
-    connection: ProtocolConnection,
-    events: mpsc::Sender<Event>,
-    outgoing: mpsc::Receiver<BytesMut>,
-    admitted: bool,
-}
-
-impl fmt::Debug for DependencyProofConnection {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("DependencyProofConnection")
-            .field("peer", &self.peer)
-            .finish_non_exhaustive()
-    }
-}
-
-impl Stream for DependencyProofConnection {
-    type Item = BytesMut;
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let this = self.get_mut();
-        if !this.admitted {
-            return Poll::Ready(None)
-        }
-        if let Poll::Ready(message) = this.outgoing.poll_recv(cx) {
-            return Poll::Ready(message)
-        }
-        for _ in 0..16 {
-            match this.connection.poll_next_unpin(cx) {
-                Poll::Pending => return Poll::Pending,
-                Poll::Ready(None) => return Poll::Ready(None),
-                Poll::Ready(Some(message)) => {
-                    if !valid_message(&message) {
-                        return Poll::Ready(None)
-                    }
-                    match this.events.try_send(Event::Message(this.peer, message.freeze().into())) {
-                        Ok(()) | Err(mpsc::error::TrySendError::Full(_)) => {}
-                        Err(mpsc::error::TrySendError::Closed(_)) => return Poll::Ready(None),
-                    }
-                }
-            }
-        }
-        cx.waker().wake_by_ref();
-        Poll::Pending
-    }
-}
-
 #[derive(Debug)]
 struct Request {
     request: DependencyProofRequest,
     response: oneshot::Sender<Option<Bytes>>,
-}
-
-#[derive(Debug)]
-enum Event {
-    Opened(PeerId, mpsc::Sender<BytesMut>),
-    Message(PeerId, Bytes),
-}
-
-struct Peer {
-    outgoing: mpsc::Sender<BytesMut>,
-    next_serve: Instant,
 }
 
 struct Pending {
@@ -189,45 +74,20 @@ struct Pending {
     responses: Vec<oneshot::Sender<Option<Bytes>>>,
     tried: BTreeSet<PeerId>,
     peer: Option<PeerId>,
-    next_try: Instant,
     deadline: Instant,
 }
 
-fn valid_message(message: &[u8]) -> bool {
-    message.len() <= MAX_MESSAGE &&
-        match message.first() {
-            Some(0) => message.len() == 33,
-            Some(1) => {
-                message.len() >= 34 &&
-                    (message[33] == 1 || (message[33] == 0 && message.len() == 34))
-            }
-            _ => false,
-        }
-}
-
-fn authenticated(request: DependencyProofRequest, proof: &[u8]) -> bool {
-    proof.len() <= MAX_DEPENDENCY_PROOF_BYTES && keccak256(proof) == request.commitment
-}
-
-fn encode_response(hash: B256, proof: Option<&[u8]>) -> BytesMut {
-    let mut message = BytesMut::with_capacity(34 + proof.map_or(0, <[u8]>::len));
-    message.extend_from_slice(&[1]);
-    message.extend_from_slice(hash.as_slice());
-    message.extend_from_slice(&[u8::from(proof.is_some())]);
-    if let Some(proof) = proof {
-        message.extend_from_slice(proof);
-    }
-    message
-}
-
-async fn run<P: DependencyProofProvider + Clone + 'static>(
-    provider: P,
-    mut events: mpsc::Receiver<Event>,
+async fn run<N: NetworkPrimitives>(
+    network: NetworkHandle<N>,
+    mut events: impl futures::Stream<Item = NetworkEvent<PeerRequest<N>>> + Unpin,
     mut requests: mpsc::Receiver<Request>,
 ) {
-    let mut peers = BTreeMap::<PeerId, Peer>::new();
+    let mut peers = BTreeMap::<PeerId, PeerRequestSender<PeerRequest<N>>>::new();
     let mut pending = B256Map::<Pending>::default();
-    let mut serving = FuturesUnordered::<BoxFuture<'static, (PeerId, BytesMut)>>::new();
+    let mut downloads = FuturesUnordered::<
+        BoxFuture<'static, (Vec<DependencyProofRequest>, PeerId, RequestResult<DependencyProofs>)>,
+    >::new();
+    let mut next_request = BTreeMap::<PeerId, Instant>::new();
     let mut interval = tokio::time::interval(Duration::from_millis(250));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
@@ -241,80 +101,117 @@ async fn run<P: DependencyProofProvider + Clone + 'static>(
                 } else if pending.len() < CAPACITY {
                     pending.insert(request.block_hash, Pending {
                         request, responses: vec![response], tried: BTreeSet::new(), peer: None,
-                        next_try: Instant::now(), deadline: Instant::now() + REQUEST_TIMEOUT,
+                        deadline: Instant::now() + REQUEST_TIMEOUT,
                     });
                 }
             },
-            event = events.recv() => match event {
+            event = events.next() => match event {
                 None => return,
-                Some(Event::Opened(id, outgoing)) => {
-                    peers.retain(|_, peer| !peer.outgoing.is_closed());
-                    if peers.len() < MAX_PEERS { peers.insert(id, Peer { outgoing, next_serve: Instant::now() }); }
+                Some(NetworkEvent::ActivePeerSession { info, messages }) => {
+                    peers.retain(|_, sender| !sender.to_session_tx.is_closed());
+                    if info.version >= EthVersion::Eth74 && peers.len() < MAX_PEERS {
+                        peers.insert(info.peer_id, messages);
+                    }
                 },
-                Some(Event::Message(id, message)) => {
-                    if !peers.contains_key(&id) { continue }
-                    let hash = B256::from_slice(&message[1..33]);
-                    if message[0] == 0 {
-                        if let Some(peer) = peers.get_mut(&id) && peer.next_serve <= Instant::now() && serving.len() < MAX_SERVING {
-                            peer.next_serve = Instant::now() + Duration::from_secs(1);
-                            let provider = provider.clone();
-                            let span = tracing::Span::current();
-                            serving.push(async move {
-                                let proof = match tokio::task::spawn_blocking(move || {
-                                    let _entered = span.enter();
-                                    provider.dependency_proof(hash)
-                                }).await {
-                                    Ok(Ok(proof)) => proof.filter(|proof| proof.len() <= MAX_DEPENDENCY_PROOF_BYTES),
-                                    Ok(Err(error)) => { error!(target: "reth::eip8288", %error, "Cannot serve dependency proof"); None },
-                                    Err(error) => { error!(target: "reth::eip8288", %error, "Proof read worker failed"); None },
-                                };
-                                (id, encode_response(hash, proof.as_deref()))
-                            }.boxed());
-                        }
-                    } else if let Some(download) = pending.get_mut(&hash) && download.peer == Some(id) {
-                        if message[33] == 0 {
-                            download.peer = None;
-                            download.next_try = Instant::now();
-                        } else if authenticated(download.request, &message[34..]) {
-                            if let Some(download) = pending.remove(&hash) {
-                                let proof = message.slice(34..);
-                                for response in download.responses { if response.send(Some(proof.clone())).is_err() { debug!(target: "reth::eip8288", "Proof requester left"); } }
+                Some(NetworkEvent::Peer(PeerEvent::SessionClosed { peer_id, .. })) => { peers.remove(&peer_id); },
+                Some(NetworkEvent::Peer(_)) => {},
+            },
+            Some((batch, peer, result)) = downloads.next(), if !downloads.is_empty() => {
+                let proofs = match result {
+                    Ok(proofs) => {
+                        let commitments = batch.iter().map(|request: &DependencyProofRequest| request.commitment).collect::<Vec<_>>();
+                        if let Err(error) = proofs.validate_response(&commitments) {
+                            warn!(target: "net::eth", %peer, %error, "Invalid dependency proof response");
+                            network.disconnect_peer_with_reason(peer, DisconnectReason::SubprotocolSpecific);
+                            peers.remove(&peer);
+                            None
+                        } else { Some(proofs) }
+                    },
+                    Err(error) => {
+                        debug!(target: "net::eth", %peer, %error, "Dependency proof request failed");
+                        None
+                    },
+                };
+                let mut proofs = proofs.map(|proofs| proofs.0.into_iter());
+                for request in batch {
+                    let proof = proofs.as_mut().and_then(Iterator::next);
+                    if let Some(download) = pending.get_mut(&request.block_hash) &&
+                        download.peer == Some(peer) && download.request.commitment == request.commitment
+                    {
+                        download.peer = None;
+                        if let Some(proof) = proof {
+                            if (!proof.is_empty() || request.commitment == alloy_consensus::constants::KECCAK_EMPTY) &&
+                                let Some(download) = pending.remove(&request.block_hash)
+                            {
+                                for response in download.responses {
+                                    if response.send(Some(proof.clone())).is_err() {
+                                        debug!(target: "net::eth", "Proof requester left");
+                                    }
+                                }
                             }
-                        } else {
-                            // Dropping the last sender closes the invalid peer's capability.
-                            warn!(target: "reth::eip8288", peer = %id, %hash, "Dependency proof does not match its header");
-                            peers.remove(&id);
-                            download.peer = None;
-                            download.next_try = Instant::now();
+                        } else if proofs.is_some() {
+                            // Truncated suffixes were not served: retry this peer after its quota resets.
+                            download.tried.remove(&peer);
                         }
                     }
                 }
             },
-            Some((id, message)) = serving.next(), if !serving.is_empty() => {
-                if let Some(peer) = peers.get(&id) && let Err(error) = peer.outgoing.try_send(message) {
-                    debug!(target: "reth::eip8288", %error, "Proof response queue unavailable");
-                }
-            },
             _ = interval.tick() => {
-                peers.retain(|_, peer| !peer.outgoing.is_closed());
+                peers.retain(|_, sender| !sender.to_session_tx.is_closed());
+                next_request.retain(|peer, _| peers.contains_key(peer));
                 pending.retain(|_, download| {
                     download.responses.retain(|response| !response.is_closed());
                     !download.responses.is_empty() && download.deadline > Instant::now()
                 });
-                for download in pending.values_mut() {
-                    if download.next_try > Instant::now() { continue }
-                    download.peer = None;
-                    if let Some((id, peer)) = peers.iter().find(|(id, _)| !download.tried.contains(*id)) {
-                        download.tried.insert(*id);
-                        let mut message = BytesMut::with_capacity(33);
-                        message.extend_from_slice(&[0]);
-                        message.extend_from_slice(download.request.block_hash.as_slice());
-                        match peer.outgoing.try_send(message) {
-                            Ok(()) => { download.peer = Some(*id); download.next_try = Instant::now() + PEER_TIMEOUT; },
-                            Err(error) => debug!(target: "reth::eip8288", %error, "Proof request queue unavailable"),
-                        }
+            },
+        }
+        // Coalesce concurrent block requests to share peer quotas and avoid per-proof round trips.
+        for (peer, sender) in &peers {
+            if downloads.len() >= CAPACITY ||
+                next_request.get(peer).is_some_and(|until| *until > Instant::now())
+            {
+                continue
+            }
+            let batch = pending
+                .values()
+                .filter(|download| {
+                    download.peer.is_none() &&
+                        download.tried.len() < MAX_PEERS &&
+                        !download.tried.contains(peer)
+                })
+                .map(|download| download.request)
+                .collect::<Vec<_>>();
+            if batch.is_empty() {
+                continue
+            }
+            let (response, receiver) = oneshot::channel();
+            let request = PeerRequest::GetDependencyProofs {
+                request: GetDependencyProofs(
+                    batch.iter().map(|request| request.block_hash).collect(),
+                ),
+                response,
+            };
+            // Full session queues are transient and do not consume the peer's retry attempt.
+            if sender.try_send(request).is_ok() {
+                for request in &batch {
+                    if let Some(download) = pending.get_mut(&request.block_hash) {
+                        download.tried.insert(*peer);
+                        download.peer = Some(*peer);
                     }
                 }
+                next_request.insert(*peer, Instant::now() + DEPENDENCY_PROOF_REQUEST_INTERVAL);
+                let peer = *peer;
+                downloads.push(
+                    async move {
+                        let result = match tokio::time::timeout(PEER_TIMEOUT, receiver).await {
+                            Ok(Ok(result)) => result,
+                            Ok(Err(_)) => Err(reth_network_p2p::error::RequestError::ChannelClosed),
+                            Err(_) => Err(reth_network_p2p::error::RequestError::Timeout),
+                        };
+                        (batch, peer, result)
+                    }
+                    .boxed(),
+                );
             }
         }
     }
@@ -323,103 +220,166 @@ async fn run<P: DependencyProofProvider + Clone + 'static>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::PeerConfig;
+    use alloy_primitives::{keccak256, B256};
+    use reth_eth_wire::{Capabilities, DependencyProofs};
+    use reth_network_api::events::SessionInfo;
+    use tokio_stream::wrappers::UnboundedReceiverStream;
 
-    #[derive(Clone, Debug)]
-    struct EmptyProofs;
-
-    impl DependencyProofProvider for EmptyProofs {
-        fn dependency_proof(
-            &self,
-            _: B256,
-        ) -> reth_storage_api::errors::provider::ProviderResult<Option<Bytes>> {
-            Ok(None)
-        }
-        fn insert_dependency_proof(
-            &self,
-            _: B256,
-            _: Bytes,
-        ) -> reth_storage_api::errors::provider::ProviderResult<()> {
-            Err(reth_storage_api::errors::provider::ProviderError::UnsupportedProvider)
-        }
+    fn session(peer: PeerId, version: EthVersion) -> (NetworkEvent, mpsc::Receiver<PeerRequest>) {
+        let (sender, receiver) = mpsc::channel(2);
+        (
+            NetworkEvent::ActivePeerSession {
+                info: SessionInfo {
+                    peer_id: peer,
+                    remote_addr: "127.0.0.1:1".parse().unwrap(),
+                    client_version: "test".into(),
+                    capabilities: Arc::new(Capabilities::new(vec![
+                        reth_eth_wire::Capability::eth(version),
+                    ])),
+                    status: Arc::new(Default::default()),
+                    version,
+                    peer_kind: Default::default(),
+                },
+                messages: PeerRequestSender::new(peer, sender),
+            },
+            receiver,
+        )
     }
 
-    #[test]
-    fn proof_messages_are_bounded_and_distinguish_empty_from_missing() {
-        let mut message = vec![1; 34];
-        assert!(valid_message(&message));
-        message[33] = 0;
-        assert!(valid_message(&message));
-        message.push(0);
-        assert!(!valid_message(&message));
-        assert!(!valid_message(&vec![1; MAX_MESSAGE + 1]));
-        assert!(!valid_message(&[0; 32]));
-        assert!(valid_message(&[0; 33]));
-    }
-
-    #[test]
-    fn downloaded_proofs_must_match_the_header_before_storage() {
-        let proof = b"proof";
-        let request =
-            DependencyProofRequest { block_hash: B256::ZERO, commitment: keccak256(proof) };
-        assert!(authenticated(request, proof));
-        assert!(!authenticated(request, b"changed"));
-        assert!(!authenticated(request, &vec![0; MAX_DEPENDENCY_PROOF_BYTES + 1]));
+    async fn request(
+        receiver: &mut mpsc::Receiver<PeerRequest>,
+    ) -> (
+        GetDependencyProofs,
+        oneshot::Sender<reth_network_p2p::error::RequestResult<DependencyProofs>>,
+    ) {
+        let message =
+            tokio::time::timeout(Duration::from_secs(5), receiver.recv()).await.unwrap().unwrap();
+        let PeerRequest::GetDependencyProofs { request, response } = message else {
+            panic!("expected dependency proof request")
+        };
+        (request, response)
     }
 
     #[tokio::test]
-    async fn unavailable_and_invalid_peers_are_retried_without_accepting_bad_bytes() {
-        for invalid in [false, true] {
-            let (handler, fetcher, driver) = DependencyProofProtocolHandler::new(EmptyProofs);
-            let driver = tokio::spawn(driver);
-            let first = PeerId::repeat_byte(1);
-            let second = PeerId::repeat_byte(2);
-            let (first_sender, mut first_messages) = mpsc::channel(2);
-            let (second_sender, mut second_messages) = mpsc::channel(2);
-            handler.0.send(Event::Opened(first, first_sender)).await.unwrap();
-            handler.0.send(Event::Opened(second, second_sender)).await.unwrap();
+    async fn unavailable_invalid_and_truncated_responses_retry() {
+        for mode in 0..4 {
+            let peer = PeerConfig::default().launch().await.unwrap();
+            let network = peer.handle();
+            let (events, incoming) = mpsc::unbounded_channel();
+            let (sender, requests) = mpsc::channel(CAPACITY);
+            let fetcher = Arc::new(PeerDependencyProofFetcher(sender));
+            let (first, mut first_messages) = session(PeerId::repeat_byte(1), EthVersion::Eth74);
+            let (second, mut second_messages) = session(PeerId::repeat_byte(2), EthVersion::Eth74);
+            events.send(first).unwrap();
+            events.send(second).unwrap();
+            let driver =
+                tokio::spawn(run(network, UnboundedReceiverStream::new(incoming), requests));
             let proof = Bytes::from_static(b"authenticated proof");
-            let request = DependencyProofRequest {
+            let expected = DependencyProofRequest {
                 block_hash: B256::repeat_byte(3),
                 commitment: keccak256(&proof),
             };
-            let fetched = tokio::spawn(async move { fetcher.fetch(request).await });
-            let message = tokio::time::timeout(Duration::from_secs(2), first_messages.recv())
-                .await
-                .unwrap()
-                .unwrap();
-            assert_eq!(message[0], 0);
-            assert_eq!(&message[1..], request.block_hash.as_slice());
-            handler
-                .0
-                .send(Event::Message(
-                    first,
-                    encode_response(request.block_hash, invalid.then_some(b"wrong".as_slice()))
-                        .freeze()
-                        .into(),
-                ))
-                .await
-                .unwrap();
-            let message = tokio::time::timeout(Duration::from_secs(2), second_messages.recv())
-                .await
-                .unwrap()
-                .unwrap();
-            assert_eq!(&message[1..], request.block_hash.as_slice());
-            handler
-                .0
-                .send(Event::Message(
-                    second,
-                    encode_response(request.block_hash, Some(&proof)).freeze().into(),
-                ))
-                .await
-                .unwrap();
+            let requester = Arc::clone(&fetcher);
+            let fetched = tokio::spawn(async move { requester.fetch(expected).await });
+            let (hashes, response) = request(&mut first_messages).await;
+            assert_eq!(hashes.0, vec![expected.block_hash]);
+            let bad = match mode {
+                0 => DependencyProofs(vec![Bytes::new()]),
+                1 => DependencyProofs(vec![Bytes::from_static(b"wrong")]),
+                2 => DependencyProofs(vec![]),
+                _ => DependencyProofs(vec![proof.clone(), Bytes::new()]),
+            };
+            response.send(Ok(bad)).unwrap();
+            let (_, response) = request(&mut second_messages).await;
+            response.send(Ok(DependencyProofs(vec![proof.clone()]))).unwrap();
             assert_eq!(fetched.await.unwrap().unwrap(), Some(proof));
-            if invalid {
-                assert_eq!(first_messages.recv().await, None);
-            } else {
-                assert!(!first_messages.is_closed());
-            }
+            assert_eq!(first_messages.is_closed(), matches!(mode, 1 | 3));
             driver.abort();
             assert!(driver.await.unwrap_err().is_cancelled());
         }
+    }
+
+    #[tokio::test]
+    async fn truncated_suffix_is_retried_without_losing_batch_positions() {
+        let peer = PeerConfig::default().launch().await.unwrap();
+        let (events, incoming) = mpsc::unbounded_channel();
+        let (sender, requests) = mpsc::channel(CAPACITY);
+        let mut responses = Vec::new();
+        for index in 0..3 {
+            let (response, receiver) = oneshot::channel();
+            sender
+                .send(Request {
+                    request: DependencyProofRequest {
+                        block_hash: B256::repeat_byte(index),
+                        commitment: keccak256([index]),
+                    },
+                    response,
+                })
+                .await
+                .unwrap();
+            responses.push(receiver);
+        }
+        let driver =
+            tokio::spawn(run(peer.handle(), UnboundedReceiverStream::new(incoming), requests));
+        // Wait until the driver has received the complete batch before announcing a peer.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while sender.capacity() != CAPACITY {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let (event, mut messages) = session(PeerId::repeat_byte(1), EthVersion::Eth74);
+        events.send(event).unwrap();
+        let (hashes, response) = request(&mut messages).await;
+        assert_eq!(hashes.0.len(), 3);
+        response
+            .send(Ok(DependencyProofs(vec![Bytes::copy_from_slice(&hashes.0[0][..1])])))
+            .unwrap();
+        let (retry, response) = request(&mut messages).await;
+        assert_eq!(retry.0, hashes.0[1..]);
+        response
+            .send(Ok(DependencyProofs(
+                retry.0.iter().map(|hash| Bytes::copy_from_slice(&hash[..1])).collect(),
+            )))
+            .unwrap();
+        for (index, receiver) in responses.into_iter().enumerate() {
+            assert_eq!(
+                receiver.await.unwrap(),
+                Some(Bytes::from(vec![u8::try_from(index).unwrap()]))
+            );
+        }
+        driver.abort();
+        assert!(driver.await.unwrap_err().is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn older_sessions_are_skipped_and_empty_proof_is_available() {
+        let peer = PeerConfig::default().launch().await.unwrap();
+        let (events, incoming) = mpsc::unbounded_channel();
+        let (sender, requests) = mpsc::channel(CAPACITY);
+        let fetcher = Arc::new(PeerDependencyProofFetcher(sender));
+        let (old, mut old_messages) = session(PeerId::repeat_byte(1), EthVersion::Eth73);
+        let (new, mut new_messages) = session(PeerId::repeat_byte(2), EthVersion::Eth74);
+        events.send(old).unwrap();
+        events.send(new).unwrap();
+        let driver =
+            tokio::spawn(run(peer.handle(), UnboundedReceiverStream::new(incoming), requests));
+        let requester = Arc::clone(&fetcher);
+        let fetched = tokio::spawn(async move {
+            requester
+                .fetch(DependencyProofRequest {
+                    block_hash: B256::ZERO,
+                    commitment: keccak256(b""),
+                })
+                .await
+        });
+        let (_, response) = request(&mut new_messages).await;
+        response.send(Ok(DependencyProofs(vec![Bytes::new()]))).unwrap();
+        assert_eq!(fetched.await.unwrap().unwrap(), Some(Bytes::new()));
+        assert!(matches!(old_messages.try_recv(), Err(mpsc::error::TryRecvError::Disconnected)));
+        driver.abort();
+        assert!(driver.await.unwrap_err().is_cancelled());
     }
 }
