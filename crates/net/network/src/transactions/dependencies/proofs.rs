@@ -168,6 +168,13 @@ async fn run<N: NetworkPrimitives>(
                 });
             },
         }
+        // Unavailable proofs and request failures are transient. After trying every connected
+        // peer, permit another round, still respecting each peer's request cooldown.
+        for download in pending.values_mut() {
+            if download.peer.is_none() && peers.keys().all(|peer| download.tried.contains(peer)) {
+                download.tried.clear();
+            }
+        }
         // Coalesce concurrent block requests to share peer quotas and avoid per-proof round trips.
         let start = last_peer.map_or(Unbounded, Excluded);
         for (peer, sender) in peers.range((start, Unbounded)).chain(peers.iter()) {
@@ -414,6 +421,71 @@ mod tests {
             assert_eq!(fetched.await.unwrap().unwrap(), Some(proof));
             // The next fetch must rotate even after the first peer's quota resets.
             tokio::time::sleep(DEPENDENCY_PROOF_REQUEST_INTERVAL).await;
+        }
+        driver.abort();
+        assert!(driver.await.unwrap_err().is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn one_peer_retries_unavailable_proofs_after_cooldown() {
+        let peer = PeerConfig::default().launch().await.unwrap();
+        let (events, incoming) = mpsc::unbounded_channel();
+        let (sender, requests) = mpsc::channel(CAPACITY);
+        let fetcher = Arc::new(PeerDependencyProofFetcher(sender));
+        let (event, mut messages) = session(PeerId::repeat_byte(1), EthVersion::Eth74);
+        events.send(event).unwrap();
+        let driver =
+            tokio::spawn(run(peer.handle(), UnboundedReceiverStream::new(incoming), requests));
+        let proof = Bytes::from_static(b"temporarily unavailable proof");
+        let expected = DependencyProofRequest {
+            block_hash: B256::repeat_byte(3),
+            commitment: keccak256(&proof),
+        };
+        let first_request = Instant::now();
+        let requester = Arc::clone(&fetcher);
+        let fetched = tokio::spawn(async move { requester.fetch(expected).await });
+        let (hashes, response) = request(&mut messages).await;
+        assert_eq!(hashes.0, vec![expected.block_hash]);
+        response.send(Ok(DependencyProofs(vec![Bytes::new()]))).unwrap();
+
+        let (hashes, response) = request(&mut messages).await;
+        assert!(first_request.elapsed() >= DEPENDENCY_PROOF_REQUEST_INTERVAL);
+        assert!(first_request.elapsed() < PEER_TIMEOUT);
+        assert_eq!(hashes.0, vec![expected.block_hash]);
+        response.send(Ok(DependencyProofs(vec![proof.clone()]))).unwrap();
+        assert_eq!(fetched.await.unwrap().unwrap(), Some(proof));
+        driver.abort();
+        assert!(driver.await.unwrap_err().is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn consecutive_proof_fetches_share_the_peer_cooldown() {
+        let peer = PeerConfig::default().launch().await.unwrap();
+        let (events, incoming) = mpsc::unbounded_channel();
+        let (sender, requests) = mpsc::channel(CAPACITY);
+        let fetcher = Arc::new(PeerDependencyProofFetcher(sender));
+        let (event, mut messages) = session(PeerId::repeat_byte(1), EthVersion::Eth74);
+        events.send(event).unwrap();
+        let driver =
+            tokio::spawn(run(peer.handle(), UnboundedReceiverStream::new(incoming), requests));
+        let mut previous_request = None;
+        for index in [1, 2] {
+            let requester = Arc::clone(&fetcher);
+            let proof = Bytes::from(vec![index]);
+            let expected = DependencyProofRequest {
+                block_hash: B256::repeat_byte(index),
+                commitment: keccak256(&proof),
+            };
+            let started = Instant::now();
+            let fetched = tokio::spawn(async move { requester.fetch(expected).await });
+            let (hashes, response) = request(&mut messages).await;
+            if let Some(previous) = previous_request {
+                assert!(Instant::now() - previous >= DEPENDENCY_PROOF_REQUEST_INTERVAL);
+            }
+            previous_request = Some(started);
+            assert_eq!(hashes.0, vec![expected.block_hash]);
+            response.send(Ok(DependencyProofs(vec![proof.clone()]))).unwrap();
+            assert_eq!(fetched.await.unwrap().unwrap(), Some(proof));
         }
         driver.abort();
         assert!(driver.await.unwrap_err().is_cancelled());
